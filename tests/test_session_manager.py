@@ -1,6 +1,6 @@
 import json
 import pytest
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock
 from memory_system.core.session_manager import SessionManager
 
 
