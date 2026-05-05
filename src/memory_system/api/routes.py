@@ -1,5 +1,9 @@
 from fastapi import APIRouter
-from memory_system.api.models import MemoryRequest, MemoryResponse
+from memory_system.api.models import (
+    MemoryRequest,
+    MemoryStoreResponse,
+    MemoryRecallResponse,
+)
 
 router = APIRouter()
 
@@ -15,11 +19,18 @@ def get_memory_service():
     return _memory_service
 
 
-@router.post("/v1/memory", response_model=MemoryResponse)
-async def process_memory(request: MemoryRequest):
-    """Process a memory request: store session + retrieve relevant memories."""
+@router.post("/v1/memory/store", response_model=MemoryStoreResponse)
+async def store_memory(request: MemoryRequest):
+    """Save a conversation round to session memory."""
     svc = get_memory_service()
-    return await svc.process(request)
+    return await svc.store(request)
+
+
+@router.post("/v1/memory/recall", response_model=MemoryRecallResponse)
+async def recall_memory(request: MemoryRequest):
+    """Retrieve session history + long-term memories for the current query."""
+    svc = get_memory_service()
+    return await svc.recall(request)
 
 
 @router.get("/health")

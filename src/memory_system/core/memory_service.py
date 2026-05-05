@@ -4,13 +4,11 @@ from datetime import datetime, timezone
 from memory_system.config import Settings
 from memory_system.api.models import (
     MemoryRequest,
-    MemoryResponse,
+    MemoryStoreResponse,
+    MemoryRecallResponse,
     RetrievedMemory,
 )
-from memory_system.utils.text_utils import (
-    messages_to_text,
-    get_last_user_query,
-)
+from memory_system.utils.text_utils import get_last_user_query
 
 logger = logging.getLogger(__name__)
 
@@ -40,7 +38,31 @@ class MemoryService:
     async def _get_es(self):
         return await self._es_client.get_es()
 
-    async def process(self, request: MemoryRequest) -> MemoryResponse:
+    async def store(self, request: MemoryRequest) -> MemoryStoreResponse:
+        """Save a conversation round to Redis session. Lightweight, no retrieval."""
+        user_id = request.userId
+        session_id = request.sessionId
+        raw_messages = [msg.model_dump() for msg in request.input]
+
+        redis = await self._get_redis()
+
+        # 1. Add messages to session (window management + embedding for archived rounds)
+        await self._session.add_round(redis, user_id, session_id, raw_messages)
+
+        # 2. Background: extract long-term memories from newly archived rounds
+        session = await self._session.get_session(redis, user_id, session_id)
+        if session["archived_rounds"]:
+            es = await self._get_es()
+            asyncio.create_task(
+                self._archive_pipeline(
+                    es, user_id, session_id, session["archived_rounds"]
+                )
+            )
+
+        return MemoryStoreResponse(model=request.model, status="stored")
+
+    async def recall(self, request: MemoryRequest) -> MemoryRecallResponse:
+        """Retrieve session history + long-term memories for the current query."""
         user_id = request.userId
         session_id = request.sessionId
         raw_messages = [msg.model_dump() for msg in request.input]
@@ -57,22 +79,15 @@ class MemoryService:
             except Exception as e:
                 logger.warning(f"Failed to get query embedding: {e}")
 
-        # 2. Parallel: search long-term memories + add round to session
+        # 2. Search long-term memories
         retrieved_raw = []
         if query_embedding:
-            async_tasks = [
-                self._ltm.search(es, user_id, query_embedding),
-                self._session.add_round(redis, user_id, session_id, raw_messages),
-            ]
-            results = await asyncio.gather(*async_tasks, return_exceptions=True)
-            if isinstance(results[0], list):
-                retrieved_raw = results[0]
-            else:
-                logger.warning(f"LTM search failed: {results[0]}")
-        else:
-            await self._session.add_round(redis, user_id, session_id, raw_messages)
+            try:
+                retrieved_raw = await self._ltm.search(es, user_id, query_embedding)
+            except Exception as e:
+                logger.warning(f"LTM search failed: {e}")
 
-        # 3. Build session history
+        # 3. Build session history (with relevance-filtered archived rounds)
         history_data = await self._session.build_history(
             redis, user_id, session_id, query_embedding
         )
@@ -89,7 +104,6 @@ class MemoryService:
                     importance=mem.get("importance", 0.0),
                 )
             )
-            # Insert retrieved memory into history
             history_data["history_messages"].insert(
                 0,
                 {
@@ -98,24 +112,11 @@ class MemoryService:
                 },
             )
 
-        # 5. Background: extract memories from any archived rounds
-        session = await self._session.get_session(redis, user_id, session_id)
-        if session["archived_rounds"]:
-            asyncio.create_task(
-                self._archive_pipeline(
-                    es, user_id, session_id, session["archived_rounds"]
-                )
-            )
-
-        # 6. Build response
-        output_text = messages_to_text(history_data["history_messages"])
-
-        return MemoryResponse(
+        return MemoryRecallResponse(
             model=request.model,
-            output_text=output_text,
             history=history_data["history_messages"],
             retrieved_memories=retrieved_memories,
-            usage={"total_tokens": len(output_text.split())},
+            usage={"total_tokens": sum(len(m.get("content", "")) for m in history_data.get("history_messages", []))},
         )
 
     async def _archive_pipeline(

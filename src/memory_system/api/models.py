@@ -29,11 +29,19 @@ class RetrievedMemory(BaseModel):
     importance: float
 
 
-class MemoryResponse(BaseModel):
+class MemoryStoreResponse(BaseModel):
+    """Response for /v1/memory/store — lightweight confirmation."""
     id: str = Field(default_factory=lambda: f"mem_{uuid.uuid4().hex[:12]}")
-    object: str = "memory.response"
+    object: str = "memory.store"
     model: str = "memory-v1"
-    output_text: str = ""
+    status: str = "stored"
+
+
+class MemoryRecallResponse(BaseModel):
+    """Response for /v1/memory/recall — full history + retrieved memories."""
+    id: str = Field(default_factory=lambda: f"mem_{uuid.uuid4().hex[:12]}")
+    object: str = "memory.recall"
+    model: str = "memory-v1"
     history: list[dict] = []
     retrieved_memories: list[RetrievedMemory] = []
     usage: dict = Field(default_factory=lambda: {"total_tokens": 0})

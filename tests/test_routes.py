@@ -34,24 +34,17 @@ def client(app):
     return TestClient(app)
 
 
-def test_memory_endpoint_success(client):
+def test_store_endpoint(client):
     with patch(
         "memory_system.api.routes.get_memory_service"
     ) as mock_get_svc:
         mock_svc = AsyncMock()
-        from memory_system.api.models import MemoryResponse
-
-        mock_svc.process.return_value = MemoryResponse(
-            model="memory-v1",
-            output_text="ok",
-            history=[{"role": "user", "content": "hello"}],
-            retrieved_memories=[],
-            usage={"total_tokens": 5},
-        )
+        from memory_system.api.models import MemoryStoreResponse
+        mock_svc.store.return_value = MemoryStoreResponse()
         mock_get_svc.return_value = mock_svc
 
         resp = client.post(
-            "/v1/memory",
+            "/v1/memory/store",
             json={
                 "model": "memory-v1",
                 "userId": "user_123",
@@ -62,14 +55,43 @@ def test_memory_endpoint_success(client):
 
         assert resp.status_code == 200
         data = resp.json()
-        assert data["object"] == "memory.response"
-        assert data["model"] == "memory-v1"
+        assert data["object"] == "memory.store"
+        assert data["status"] == "stored"
+
+
+def test_recall_endpoint(client):
+    with patch(
+        "memory_system.api.routes.get_memory_service"
+    ) as mock_get_svc:
+        mock_svc = AsyncMock()
+        from memory_system.api.models import MemoryRecallResponse
+        mock_svc.recall.return_value = MemoryRecallResponse(
+            model="memory-v1",
+            history=[{"role": "user", "content": "hello"}],
+            retrieved_memories=[],
+            usage={"total_tokens": 5},
+        )
+        mock_get_svc.return_value = mock_svc
+
+        resp = client.post(
+            "/v1/memory/recall",
+            json={
+                "model": "memory-v1",
+                "userId": "user_123",
+                "sessionId": "sess_abc",
+                "input": [{"role": "user", "content": "hello"}],
+            },
+        )
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["object"] == "memory.recall"
         assert "history" in data
 
 
-def test_memory_endpoint_missing_user_id(client):
+def test_missing_user_id(client):
     resp = client.post(
-        "/v1/memory",
+        "/v1/memory/store",
         json={
             "model": "memory-v1",
             "sessionId": "sess_abc",
@@ -79,24 +101,17 @@ def test_memory_endpoint_missing_user_id(client):
     assert resp.status_code == 422
 
 
-def test_memory_endpoint_multimodal(client):
+def test_multimodal_content(client):
     with patch(
         "memory_system.api.routes.get_memory_service"
     ) as mock_get_svc:
         mock_svc = AsyncMock()
-        from memory_system.api.models import MemoryResponse
-
-        mock_svc.process.return_value = MemoryResponse(
-            model="memory-v1",
-            output_text="ok",
-            history=[],
-            retrieved_memories=[],
-            usage={"total_tokens": 0},
-        )
+        from memory_system.api.models import MemoryStoreResponse
+        mock_svc.store.return_value = MemoryStoreResponse()
         mock_get_svc.return_value = mock_svc
 
         resp = client.post(
-            "/v1/memory",
+            "/v1/memory/store",
             json={
                 "model": "memory-v1",
                 "userId": "user_123",
@@ -106,10 +121,7 @@ def test_memory_endpoint_multimodal(client):
                         "role": "user",
                         "content": [
                             {"type": "input_text", "text": "what's this?"},
-                            {
-                                "type": "input_image",
-                                "image_url": "https://example.com/img.jpg",
-                            },
+                            {"type": "input_image", "image_url": "https://example.com/img.jpg"},
                         ],
                     }
                 ],

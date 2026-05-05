@@ -1,5 +1,5 @@
 import pytest
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock
 from memory_system.core.memory_service import MemoryService
 
 
@@ -26,7 +26,34 @@ def services(settings):
 
 
 @pytest.mark.asyncio
-async def test_process_minimal_request(settings, services):
+async def test_store_minimal_request(settings, services):
+    session_mgr, long_term, extractor, emb_client = services
+    svc = MemoryService(
+        settings, session_mgr, long_term, extractor, emb_client,
+        redis_client=AsyncMock(), es_client=AsyncMock(),
+    )
+    mock_redis = AsyncMock()
+    svc._redis_client.get_redis.return_value = mock_redis
+
+    from memory_system.api.models import MemoryRequest, Message
+
+    req = MemoryRequest(
+        userId="u1",
+        sessionId="s1",
+        input=[Message(role="user", content="hello")],
+    )
+
+    mock_redis.hgetall.return_value = {}
+    mock_redis.hset = AsyncMock()
+
+    resp = await svc.store(req)
+
+    assert resp.object == "memory.store"
+    assert resp.status == "stored"
+
+
+@pytest.mark.asyncio
+async def test_recall_minimal_request(settings, services):
     session_mgr, long_term, extractor, emb_client = services
     svc = MemoryService(
         settings, session_mgr, long_term, extractor, emb_client,
@@ -48,14 +75,14 @@ async def test_process_minimal_request(settings, services):
     mock_redis.hgetall.return_value = {}
     mock_redis.hset = AsyncMock()
 
-    resp = await svc.process(req)
+    resp = await svc.recall(req)
 
-    assert resp.object == "memory.response"
+    assert resp.object == "memory.recall"
     assert resp.model == "memory-v1"
 
 
 @pytest.mark.asyncio
-async def test_process_with_retrieved_memories(settings, services):
+async def test_recall_with_retrieved_memories(settings, services):
     session_mgr, long_term, extractor, emb_client = services
     long_term.search.return_value = [
         {
@@ -91,7 +118,7 @@ async def test_process_with_retrieved_memories(settings, services):
     }
     mock_redis.hset = AsyncMock()
 
-    resp = await svc.process(req)
+    resp = await svc.recall(req)
 
     assert len(resp.retrieved_memories) == 1
     assert resp.retrieved_memories[0].memory == "user likes Python"

@@ -5,7 +5,8 @@ from memory_system.api.models import (
     Message,
     MemoryRequest,
     RetrievedMemory,
-    MemoryResponse,
+    MemoryStoreResponse,
+    MemoryRecallResponse,
 )
 
 
@@ -67,13 +68,18 @@ def test_retrieved_memory():
     assert mem.id == "mem_1"
 
 
-def test_memory_response():
-    resp = MemoryResponse(
+def test_store_response():
+    resp = MemoryStoreResponse()
+    assert resp.object == "memory.store"
+    assert resp.status == "stored"
+
+
+def test_recall_response():
+    resp = MemoryRecallResponse(
         id="resp_1",
         model="memory-v1",
-        output_text="ok",
         history=[{"role": "user", "content": "hi"}],
         retrieved_memories=[],
         usage={"total_tokens": 10},
     )
-    assert resp.object == "memory.response"
+    assert resp.object == "memory.recall"
