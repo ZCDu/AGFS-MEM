@@ -9,7 +9,6 @@ from memory_system.config import Settings
 def test_settings():
     return Settings(
         redis_url="redis://localhost:6379/0",
-        es_url="http://localhost:9200",
         embedding_api_url="http://localhost:8080/v1/embeddings",
         embedding_dim=768,
         llm_api_url="http://localhost:8081/v1",
@@ -18,8 +17,6 @@ def test_settings():
         session_ttl_seconds=86400,
         archived_rounds_max=10,
         relevance_threshold=0.7,
-        mem_importance_threshold=0.5,
-        time_decay_lambda=0.01,
         mem_retrieval_top_k=5,
     )
 
@@ -45,13 +42,6 @@ def _setup_mock_redis():
     return mock_redis
 
 
-def _setup_mock_es():
-    mock_es = AsyncMock()
-    mock_es.indices.exists.return_value = True
-    mock_es.search.return_value = {"hits": {"hits": []}}
-    return mock_es
-
-
 # ---------------------------------------------------------------------------
 # Store endpoint
 # ---------------------------------------------------------------------------
@@ -62,15 +52,12 @@ def test_store_flow(client):
     with patch(
         "memory_system.clients.redis_client.RedisClient.get_redis"
     ) as mock_redis_get, patch(
-        "memory_system.clients.llm_client.LLMClient.chat_json"
-    ) as mock_llm_json, patch(
-        "memory_system.clients.llm_client.LLMClient.chat"
-    ) as mock_llm_chat:
+        "memory_system.clients.llm_client.LLMClient.extract_json_field"
+    ) as mock_llm_extract:
 
         mock_redis = _setup_mock_redis()
         mock_redis_get.return_value = mock_redis
-        mock_llm_chat.return_value = "ok"
-        mock_llm_json.return_value = []
+        mock_llm_extract.return_value = []
 
         resp = client.post(
             "/v1/memory/store",
@@ -93,15 +80,12 @@ def test_store_multimodal(client):
     with patch(
         "memory_system.clients.redis_client.RedisClient.get_redis"
     ) as mock_redis_get, patch(
-        "memory_system.clients.llm_client.LLMClient.chat_json"
-    ) as mock_llm_json, patch(
-        "memory_system.clients.llm_client.LLMClient.chat"
-    ) as mock_llm_chat:
+        "memory_system.clients.llm_client.LLMClient.extract_json_field"
+    ) as mock_llm_extract:
 
         mock_redis = _setup_mock_redis()
         mock_redis_get.return_value = mock_redis
-        mock_llm_chat.return_value = "ok"
-        mock_llm_json.return_value = []
+        mock_llm_extract.return_value = []
 
         resp = client.post(
             "/v1/memory/store",
@@ -146,15 +130,14 @@ def test_recall_flow(client):
     with patch(
         "memory_system.clients.redis_client.RedisClient.get_redis"
     ) as mock_redis_get, patch(
-        "memory_system.clients.es_client.ESClient.get_es"
-    ) as mock_es_get, patch(
+        "memory_system.clients.es_http_client.ESHttpClient.search_knn"
+    ) as mock_search, patch(
         "memory_system.clients.embedding_client.EmbeddingClient.get_embedding"
     ) as mock_emb:
 
         mock_redis = _setup_mock_redis()
-        mock_es = _setup_mock_es()
         mock_redis_get.return_value = mock_redis
-        mock_es_get.return_value = mock_es
+        mock_search.return_value = []
         mock_emb.return_value = [0.1] * 768
 
         resp = client.post(
@@ -179,32 +162,23 @@ def test_recall_with_memory_retrieval(client):
     with patch(
         "memory_system.clients.redis_client.RedisClient.get_redis"
     ) as mock_redis_get, patch(
-        "memory_system.clients.es_client.ESClient.get_es"
-    ) as mock_es_get, patch(
+        "memory_system.clients.es_http_client.ESHttpClient.search_knn"
+    ) as mock_search, patch(
         "memory_system.clients.embedding_client.EmbeddingClient.get_embedding"
     ) as mock_emb:
 
         mock_redis = _setup_mock_redis()
         mock_redis_get.return_value = mock_redis
 
-        mock_es = AsyncMock()
-        mock_es.indices.exists.return_value = True
-        mock_es.search.return_value = {
-            "hits": {
-                "hits": [
-                    {
-                        "_id": "mem_1",
-                        "_score": 0.95,
-                        "_source": {
-                            "memory": "用户叫张三，今年30岁",
-                            "importance": 0.9,
-                            "created_at": "2026-05-04T10:00:00Z",
-                        },
-                    }
-                ]
+        mock_search.return_value = [
+            {
+                "id": "mem_1",
+                "memory": "user likes Python",
+                "score": 0.95,
+                "user_id": "user_123",
+                "created_at": "2026-05-04T10:00:00Z",
             }
-        }
-        mock_es_get.return_value = mock_es
+        ]
 
         mock_emb.return_value = [0.1, 0.2, 0.3]
 
@@ -214,13 +188,14 @@ def test_recall_with_memory_retrieval(client):
                 "model": "memory-v1",
                 "userId": "user_123",
                 "sessionId": "sess_abc",
-                "input": [{"role": "user", "content": "我叫什么名字？"}],
+                "input": [{"role": "user", "content": "what's my favorite language?"}],
             },
         )
 
         assert resp.status_code == 200
         data = resp.json()
         assert "history" in data
+        assert len(data["retrieved_memories"]) == 1
 
 
 def test_recall_validation_error(client):

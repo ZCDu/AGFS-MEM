@@ -1,42 +1,45 @@
 import pytest
 from unittest.mock import AsyncMock, patch
-from memory_system.clients.es_client import ESClient
+from memory_system.clients.es_http_client import ESHttpClient
 
 
 @pytest.fixture
-def es_client(settings):
-    return ESClient(settings)
+def es_client():
+    return ESHttpClient(base_url="http://localhost:9200", auth=("user", "pass"))
 
 
 @pytest.mark.asyncio
-async def test_get_es_returns_client(es_client):
-    with patch("memory_system.clients.es_client.AsyncElasticsearch") as mock_es_cls:
-        mock_instance = AsyncMock()
-        mock_es_cls.return_value = mock_instance
+async def test_ensure_index_creates(es_client):
+    with patch("httpx.AsyncClient") as mock_cls:
+        mock_http = AsyncMock()
+        mock_cls.return_value.__aenter__.return_value = mock_http
 
-        result = await es_client.get_es()
-        assert result is mock_instance
-        mock_es_cls.assert_called_once()
+        head_resp = AsyncMock()
+        head_resp.status_code = 404
+        put_resp = AsyncMock()
+        put_resp.status_code = 200
+        mock_http.head.return_value = head_resp
+        mock_http.put.return_value = put_resp
+
+        await es_client.ensure_index("test_index", 1024)
+
+        mock_http.head.assert_called_once()
+        mock_http.put.assert_called_once()
+        call_args = mock_http.put.call_args
+        body = call_args[1]["json"]
+        assert body["mappings"]["properties"]["vector"]["dims"] == 1024
 
 
 @pytest.mark.asyncio
-async def test_get_es_reuses_connection(es_client):
-    with patch("memory_system.clients.es_client.AsyncElasticsearch") as mock_es_cls:
-        mock_instance = AsyncMock()
-        mock_es_cls.return_value = mock_instance
+async def test_ensure_index_skips_existing(es_client):
+    with patch("httpx.AsyncClient") as mock_cls:
+        mock_http = AsyncMock()
+        mock_cls.return_value.__aenter__.return_value = mock_http
 
-        c1 = await es_client.get_es()
-        c2 = await es_client.get_es()
-        assert c1 is c2
-        mock_es_cls.assert_called_once()
+        head_resp = AsyncMock()
+        head_resp.status_code = 200
+        mock_http.head.return_value = head_resp
 
+        await es_client.ensure_index("test_index", 1024)
 
-@pytest.mark.asyncio
-async def test_close(es_client):
-    with patch("memory_system.clients.es_client.AsyncElasticsearch") as mock_es_cls:
-        mock_instance = AsyncMock()
-        mock_es_cls.return_value = mock_instance
-
-        await es_client.get_es()
-        await es_client.close()
-        mock_instance.close.assert_called_once()
+        mock_http.put.assert_not_called()

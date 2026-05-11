@@ -10,15 +10,8 @@ def redis_mock():
 
 
 @pytest.fixture
-def emb_client_mock():
-    mock = AsyncMock()
-    mock.get_embedding.return_value = [0.1, 0.2, 0.3]
-    return mock
-
-
-@pytest.fixture
-def session_mgr(settings, emb_client_mock):
-    return SessionManager(settings, emb_client_mock)
+def session_mgr(settings):
+    return SessionManager(settings)
 
 
 @pytest.mark.asyncio
@@ -26,136 +19,255 @@ async def test_get_session_empty(session_mgr, redis_mock):
     redis_mock.hgetall.return_value = {}
 
     result = await session_mgr.get_session(redis_mock, "u1", "s1")
-    assert result == {"messages": [], "archived_rounds": []}
+    assert result == {"rounds": []}
 
 
 @pytest.mark.asyncio
 async def test_get_session_existing(session_mgr, redis_mock):
     redis_mock.hgetall.return_value = {
-        "messages": json.dumps([{"role": "user", "content": "hi"}]),
-        "archived_rounds": json.dumps([]),
-        "created_at": "2026-05-04T10:00:00Z",
+        "rounds": '[{"round_id": "r1", "messages": [{"role": "user", "content": "hi"}], "first_user_text": "hi"}]',
     }
 
     result = await session_mgr.get_session(redis_mock, "u1", "s1")
-    assert len(result["messages"]) == 1
-    assert result["messages"][0]["role"] == "user"
+    assert len(result["rounds"]) == 1
+    assert result["rounds"][0]["messages"][0]["content"] == "hi"
 
 
 @pytest.mark.asyncio
-async def test_add_round_within_window(session_mgr, redis_mock):
-    redis_mock.hgetall.return_value = {
-        "messages": json.dumps([{"role": "user", "content": "old"}]),
-        "archived_rounds": json.dumps([]),
-    }
+async def test_add_round_single_block(session_mgr, redis_mock):
+    """All input messages stored as one block. No embedding calls."""
+    redis_mock.hgetall.return_value = {"rounds": "[]"}
 
     new_msgs = [
-        {"role": "user", "content": "new question"},
-        {"role": "assistant", "content": "new answer"},
-    ]
-
-    await session_mgr.add_round(redis_mock, "u1", "s1", new_msgs)
-
-    # Verify HSET was called
-    call_args = redis_mock.hset.call_args
-    assert call_args is not None
-    key = call_args[0][0]
-    assert "u1" in key and "s1" in key
-
-
-@pytest.mark.asyncio
-async def test_add_round_exceeds_window(session_mgr, redis_mock):
-    # 3 messages in window (3 rounds), adding another should archive oldest
-    existing = json.dumps([
         {"role": "user", "content": "q1"},
         {"role": "assistant", "content": "a1"},
         {"role": "user", "content": "q2"},
         {"role": "assistant", "content": "a2"},
-        {"role": "user", "content": "q3"},
-        {"role": "assistant", "content": "a3"},
-    ])
-    redis_mock.hgetall.return_value = {
-        "messages": existing,
-        "archived_rounds": json.dumps([]),
-    }
-
-    new_msgs = [
-        {"role": "user", "content": "q4"},
-        {"role": "assistant", "content": "a4"},
     ]
 
     await session_mgr.add_round(redis_mock, "u1", "s1", new_msgs)
 
-    # Should have archived q1,a1
     call_args = redis_mock.hset.call_args
     mapping = call_args[1]["mapping"]
-    messages = json.loads(mapping["messages"])
-    archived = json.loads(mapping["archived_rounds"])
+    rounds = json.loads(mapping["rounds"])
 
-    # After adding q4,a4, should still have 6 messages (3 rounds * 2)
-    assert len(messages) == 6
-    assert messages[0]["content"] == "q2"  # q1 was archived
-    assert len(archived) == 1  # one archived round
+    assert len(rounds) == 1
+    assert len(rounds[0]["messages"]) == 4
+    assert rounds[0]["messages"][0]["content"] == "q1"
+    assert rounds[0]["messages"][3]["content"] == "a2"
+    assert rounds[0]["first_user_text"] == "q1"
+
+
+@pytest.mark.asyncio
+async def test_add_round_first_user_text(settings, redis_mock):
+    """first_user_text comes from first user message, not later ones."""
+    mgr = SessionManager(settings)
+    redis_mock.hgetall.return_value = {"rounds": "[]"}
+
+    new_msgs = [
+        {"role": "assistant", "content": "system intro"},
+        {"role": "user", "content": "first real question"},
+        {"role": "assistant", "content": "answer"},
+        {"role": "user", "content": "second question"},
+        {"role": "assistant", "content": "another answer"},
+    ]
+
+    await mgr.add_round(redis_mock, "u1", "s1", new_msgs)
+
+    call_args = redis_mock.hset.call_args
+    mapping = call_args[1]["mapping"]
+    rounds = json.loads(mapping["rounds"])
+
+    assert rounds[0]["first_user_text"] == "first real question"
+
+
+@pytest.mark.asyncio
+async def test_add_round_limits_total(session_mgr, redis_mock):
+    """Old rounds trimmed when exceeding max."""
+    import json
+
+    existing = json.dumps([
+        {"round_id": f"old{i}", "messages": [{"role": "user", "content": f"old{i}"}], "first_user_text": f"old{i}"}
+        for i in range(1, 11)
+    ])
+    redis_mock.hgetall.return_value = {"rounds": existing}
+
+    new_msgs = [
+        {"role": "user", "content": "new"},
+        {"role": "assistant", "content": "new a"},
+    ]
+
+    await session_mgr.add_round(redis_mock, "u1", "s1", new_msgs)
+
+    call_args = redis_mock.hset.call_args
+    mapping = call_args[1]["mapping"]
+    rounds = json.loads(mapping["rounds"])
+
+    assert len(rounds) == 10
+    assert rounds[0]["round_id"] == "old2"
+    assert rounds[-1]["messages"][0]["content"] == "new"
 
 
 @pytest.mark.asyncio
 async def test_build_history(session_mgr, redis_mock):
-    archived = [
+    """Relevant older round shown fully, most recent round always full."""
+    import json
+
+    rounds = [
         {
             "round_id": "r1",
             "messages": [
-                {"role": "user", "content": "old question"},
-                {"role": "assistant", "content": "old answer"},
+                {"role": "user", "content": "old question about Python"},
+                {"role": "assistant", "content": "old answer about Python"},
             ],
-            "embedding": [0.1, 0.2, 0.3],
-        }
+            "first_user_text": "old question about Python",
+        },
+        {
+            "round_id": "r2",
+            "messages": [
+                {"role": "user", "content": "recent q"},
+                {"role": "assistant", "content": "recent a"},
+            ],
+            "first_user_text": "recent q",
+        },
     ]
-    messages = [
-        {"role": "user", "content": "recent q"},
-        {"role": "assistant", "content": "recent a"},
-    ]
-    redis_mock.hgetall.return_value = {
-        "messages": json.dumps(messages),
-        "archived_rounds": json.dumps(archived),
-    }
+    redis_mock.hgetall.return_value = {"rounds": json.dumps(rounds)}
 
-    query_embedding = [0.1, 0.2, 0.3]  # high similarity
+    query_text = "python questions"
 
     result = await session_mgr.build_history(
-        redis_mock, "u1", "s1", query_embedding
+        redis_mock, "u1", "s1", query_text, recent_rounds_full=1,
     )
 
-    # archived round should be included because of high relevance
-    assert "old question" in result["history_str"]
-    assert "old answer" in result["history_str"]
-    assert len(result["history_messages"]) == 4  # 2 archived + 2 recent
+    assert "old question about Python" in result["history_str"]
+    assert "old answer about Python" in result["history_str"]
+    assert "recent a" in result["history_str"]
+    assert len(result["history_messages"]) == 4
 
 
 @pytest.mark.asyncio
 async def test_build_history_irrelevant_archived(session_mgr, redis_mock):
-    archived = [
+    """Irrelevant older round: Q kept, A replaced with placeholder."""
+    import json
+
+    rounds = [
         {
             "round_id": "r1",
             "messages": [
-                {"role": "user", "content": "unrelated question"},
-                {"role": "assistant", "content": "unrelated answer"},
+                {"role": "user", "content": "unrelated question about weather"},
+                {"role": "assistant", "content": "unrelated answer about weather"},
             ],
-            "embedding": [0.9, -0.8, -0.7],
-        }
+            "first_user_text": "unrelated question about weather",
+        },
+        {
+            "round_id": "r2",
+            "messages": [
+                {"role": "user", "content": "recent q"},
+                {"role": "assistant", "content": "recent a"},
+            ],
+            "first_user_text": "recent q",
+        },
     ]
-    messages = [{"role": "user", "content": "recent q"}]
-    redis_mock.hgetall.return_value = {
-        "messages": json.dumps(messages),
-        "archived_rounds": json.dumps(archived),
-    }
+    redis_mock.hgetall.return_value = {"rounds": json.dumps(rounds)}
 
-    query_embedding = [0.1, 0.2, 0.3]  # low similarity (cos sim ~= -0.54 < 0.7)
+    query_text = "python programming code"
 
     result = await session_mgr.build_history(
-        redis_mock, "u1", "s1", query_embedding
+        redis_mock, "u1", "s1", query_text, recent_rounds_full=1,
     )
 
-    # unrelated question should be truncated, answer omitted
-    assert "unrelated question" in result["history_str"]
+    assert "unrelated question about weather" in result["history_str"]
     assert "[previous response omitted]" in result["history_str"]
     assert "unrelated answer" not in result["history_str"]
+    assert "recent a" in result["history_str"]
+
+
+@pytest.mark.asyncio
+async def test_build_history_empty(session_mgr, redis_mock):
+    """Empty rounds returns empty history."""
+    redis_mock.hgetall.return_value = {"rounds": "[]"}
+
+    result = await session_mgr.build_history(redis_mock, "u1", "s1", "hello")
+
+    assert result == {"history_messages": [], "history_str": ""}
+
+
+@pytest.mark.asyncio
+async def test_build_history_recent_rounds_full(session_mgr, redis_mock):
+    """Last N rounds always full; older rounds filtered by bigram relevance."""
+    import json
+
+    rounds = [
+        {
+            "round_id": "r1",
+            "messages": [
+                {"role": "user", "content": "unrelated weather talk"},
+                {"role": "assistant", "content": "weather answer"},
+            ],
+            "first_user_text": "unrelated weather talk",
+        },
+        {
+            "round_id": "r2",
+            "messages": [
+                {"role": "user", "content": "also unrelated sports"},
+                {"role": "assistant", "content": "sports answer"},
+            ],
+            "first_user_text": "also unrelated sports",
+        },
+        {
+            "round_id": "r3",
+            "messages": [
+                {"role": "user", "content": "python question"},
+                {"role": "assistant", "content": "python answer"},
+            ],
+            "first_user_text": "python question",
+        },
+        {
+            "round_id": "r4",
+            "messages": [
+                {"role": "user", "content": "recent python"},
+                {"role": "assistant", "content": "recent python answer"},
+            ],
+            "first_user_text": "recent python",
+        },
+        {
+            "round_id": "r5",
+            "messages": [
+                {"role": "user", "content": "latest q"},
+                {"role": "assistant", "content": "latest a"},
+            ],
+            "first_user_text": "latest q",
+        },
+    ]
+    redis_mock.hgetall.return_value = {"rounds": json.dumps(rounds)}
+
+    query_text = "python programming"
+
+    # Default recent_rounds_full=3 → r3,r4,r5 always full; r1,r2 go through bigram
+    result = await session_mgr.build_history(redis_mock, "u1", "s1", query_text)
+
+    # r1 irrelevant: Q kept, A replaced with placeholder
+    assert "unrelated weather talk" in result["history_str"]
+    # r2 irrelevant: Q kept, A replaced
+    assert "also unrelated sports" in result["history_str"]
+    # r3,r4,r5 always full
+    assert "python answer" in result["history_str"]
+    assert "recent python answer" in result["history_str"]
+    assert "latest a" in result["history_str"]
+    assert "[previous response omitted]" in result["history_str"]
+
+    # r1+r2 Q-only = 2 user msgs, r2 irrelevant = 2 placeholders
+    # = 4 msgs for old. r3,r4,r5 = 6 msgs → total 10
+    assert len(result["history_messages"]) == 10
+
+
+def test_bigrams():
+    assert SessionManager._bigrams("hello") == {"he", "el", "ll", "lo"}
+
+
+def test_bigram_jaccard_identical():
+    assert SessionManager._bigram_jaccard("hello world", "hello world") == 1.0
+
+
+def test_bigram_jaccard_different():
+    assert SessionManager._bigram_jaccard("hello", "xyz") < 0.1

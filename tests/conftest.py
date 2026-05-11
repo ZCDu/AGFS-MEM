@@ -6,7 +6,6 @@ from memory_system.config import Settings
 def settings():
     return Settings(
         redis_url="redis://localhost:6379/0",
-        es_url="http://localhost:9200",
         embedding_api_url="http://localhost:8080/v1/embeddings",
         embedding_dim=768,
         llm_api_url="http://localhost:8081/v1",
@@ -15,7 +14,5 @@ def settings():
         session_ttl_seconds=86400,
         archived_rounds_max=10,
         relevance_threshold=0.7,
-        mem_importance_threshold=0.5,
-        time_decay_lambda=0.01,
         mem_retrieval_top_k=5,
     )

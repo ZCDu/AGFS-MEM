@@ -3,9 +3,10 @@ from pydantic import BaseModel, Field
 
 
 class ContentItem(BaseModel):
-    type: str  # "input_text" | "input_image"
+    type: str  # "input_text" | "input_image" | "file"
     text: str | None = None
     image_url: str | None = None
+    file_url: str | None = None
 
 
 class Message(BaseModel):
@@ -13,11 +14,17 @@ class Message(BaseModel):
     content: str | list[ContentItem]
 
 
+class MemorySettings(BaseModel):
+    """Per-request memory behavior overrides."""
+    recent_rounds_full: int | None = None
+
+
 class MemoryRequest(BaseModel):
     model: str = "memory-v1"
     userId: str
     sessionId: str
     reasoning: dict | None = None
+    memory_settings: MemorySettings | None = None
     input: list[Message]
 
 

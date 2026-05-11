@@ -6,6 +6,7 @@ class EmbeddingClient:
     def __init__(self, settings: Settings):
         self._url = settings.embedding_api_url
         self._dim = settings.embedding_dim
+        self._api_key = settings.embedding_api_key.get_secret_value()
 
     async def get_embedding(self, text: str) -> list[float]:
         """Get embedding vector for a single text."""
@@ -14,10 +15,19 @@ class EmbeddingClient:
 
     async def get_embeddings(self, texts: list[str]) -> list[list[float]]:
         """Get embeddings for multiple texts in one batch."""
+        headers = {
+            "Authorization": f"Bearer {self._api_key}",
+            "Content-Type": "application/json",
+        }
         async with httpx.AsyncClient() as client:
             resp = await client.post(
                 self._url,
-                json={"input": texts, "model": "embedding"},
+                json={
+                    "model": "text-embedding-v4",
+                    "input": texts,
+                    "encoding_format": "float",
+                },
+                headers=headers,
                 timeout=30.0,
             )
             if resp.status_code != 200:

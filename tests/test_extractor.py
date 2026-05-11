@@ -9,99 +9,119 @@ def llm_mock():
 
 
 @pytest.fixture
-def emb_mock():
-    mock = AsyncMock()
-    mock.get_embedding.return_value = [0.1, 0.2]
-    return mock
-
-
-@pytest.fixture
-def extractor(settings, llm_mock, emb_mock):
-    return MemoryExtractor(settings, llm_mock, emb_mock)
+def extractor(llm_mock):
+    return MemoryExtractor(llm_mock)
 
 
 @pytest.mark.asyncio
-async def test_extract_memories_empty(extractor, llm_mock):
-    llm_mock.chat_json.return_value = []
-
-    results = await extractor.extract_memories([
-        {"role": "user", "content": "hello"},
-        {"role": "assistant", "content": "hi"},
-    ])
-
-    assert results == []
-
-
-@pytest.mark.asyncio
-async def test_extract_memories_with_facts(extractor, llm_mock):
-    llm_mock.chat_json.return_value = [
-        {"type": "fact", "content": "用户叫张三", "importance": 0.9},
-        {"type": "preference", "content": "喜欢Python", "importance": 0.7},
+async def test_extract_facts(extractor, llm_mock):
+    llm_mock.extract_json_field.return_value = [
+        "User's name is John",
+        "User is a software engineer",
     ]
 
-    results = await extractor.extract_memories([
-        {"role": "user", "content": "我叫张三，我喜欢Python"},
-    ])
+    facts = await extractor.extract(
+        [{"role": "user", "content": "My name is John, I work at Google as a SWE"}],
+    )
 
-    assert len(results) == 2
-    assert results[0]["content"] == "用户叫张三"
-
-
-@pytest.mark.asyncio
-async def test_extract_filter_low_importance(extractor, llm_mock):
-    llm_mock.chat_json.return_value = [
-        {"type": "fact", "content": "重要信息", "importance": 0.9},
-        {"type": "fact", "content": "不重要信息", "importance": 0.3},
-    ]
-
-    results = await extractor.extract_memories([
-        {"role": "user", "content": "something"},
-    ])
-
-    assert len(results) == 1
-    assert results[0]["content"] == "重要信息"
+    assert len(facts) == 2
+    assert "User's name is John" in facts
+    assert "User is a software engineer" in facts
 
 
 @pytest.mark.asyncio
-async def test_resolve_conflicts_add(extractor, llm_mock):
-    llm_mock.chat_json.return_value = [
-        {
-            "action": "add",
-            "new_memory": {"content": "用户喜欢游泳", "importance": 0.8},
-        }
-    ]
+async def test_extract_empty(extractor, llm_mock):
+    llm_mock.extract_json_field.return_value = []
 
-    new_memories = [{"content": "用户喜欢游泳", "importance": 0.8}]
-    existing = []
+    facts = await extractor.extract(
+        [{"role": "user", "content": "Hi"}],
+    )
 
-    actions = await extractor.resolve_conflicts(new_memories, existing)
-    assert actions[0]["action"] == "add"
+    assert facts == []
 
 
 @pytest.mark.asyncio
-async def test_resolve_conflicts_update(extractor, llm_mock):
-    llm_mock.chat_json.return_value = [
-        {
-            "action": "update",
-            "old_id": "mem_001",
-            "new_content": "用户住在上海",
-            "new_importance": 0.9,
-        }
-    ]
+async def test_extract_llm_error(extractor, llm_mock):
+    llm_mock.extract_json_field.side_effect = Exception("LLM timeout")
 
-    new_memories = [{"content": "用户住在上海", "importance": 0.9}]
-    existing = [{"_id": "mem_001", "memory": "用户住在北京", "importance": 0.8}]
+    facts = await extractor.extract(
+        [{"role": "user", "content": "hello"}],
+    )
 
-    actions = await extractor.resolve_conflicts(new_memories, existing)
-    assert actions[0]["action"] == "update"
+    assert facts == []
 
 
 @pytest.mark.asyncio
-async def test_resolve_conflicts_skip(extractor, llm_mock):
-    llm_mock.chat_json.return_value = [{"action": "skip", "reason": "重复"}]
+async def test_update_memory_add(extractor, llm_mock):
+    """No old memories → LLM returns ADD actions."""
+    llm_mock.generate_json.return_value = {
+        "memory": [
+            {"id": "1", "text": "User's name is John", "event": "ADD", "old_memory": ""},
+            {"id": "2", "text": "Works at Google", "event": "ADD", "old_memory": ""},
+        ]
+    }
 
-    new_memories = [{"content": "用户叫张三", "importance": 0.9}]
-    existing = [{"_id": "mem_001", "memory": "用户叫张三", "importance": 0.9}]
+    actions = await extractor.update_memory(
+        old_memories=[],
+        new_facts=["User's name is John", "Works at Google"],
+    )
 
-    actions = await extractor.resolve_conflicts(new_memories, existing)
-    assert actions[0]["action"] == "skip"
+    assert len(actions) == 2
+    assert all(a["event"] == "ADD" for a in actions)
+
+
+@pytest.mark.asyncio
+async def test_update_memory_update(extractor, llm_mock):
+    """Similar memories exist → LLM returns UPDATE action."""
+    llm_mock.generate_json.return_value = {
+        "memory": [
+            {"id": "abc123", "text": "Lives in Beijing now", "event": "UPDATE", "old_memory": "Lives in Shanghai"},
+            {"id": "def456", "text": "Works at Google as SWE", "event": "NONE", "old_memory": ""},
+        ]
+    }
+
+    actions = await extractor.update_memory(
+        old_memories=[
+            {"id": "abc123", "text": "Lives in Shanghai"},
+            {"id": "def456", "text": "Works at Google as SWE"},
+        ],
+        new_facts=["Moved to Beijing", "Still at Google"],
+    )
+
+    assert len(actions) == 2
+    events = {a["id"]: a["event"] for a in actions}
+    assert events["abc123"] == "UPDATE"
+    assert events["def456"] == "NONE"
+
+
+@pytest.mark.asyncio
+async def test_update_memory_delete(extractor, llm_mock):
+    """Contradicting fact → LLM returns DELETE."""
+    llm_mock.generate_json.return_value = {
+        "memory": [
+            {"id": "0", "text": "Likes coffee", "event": "DELETE", "old_memory": ""},
+        ]
+    }
+
+    actions = await extractor.update_memory(
+        old_memories=[{"id": "0", "text": "Likes coffee"}],
+        new_facts=["Dislikes coffee"],
+    )
+
+    assert len(actions) == 1
+    assert actions[0]["event"] == "DELETE"
+
+
+@pytest.mark.asyncio
+async def test_update_memory_fallback_on_parse_error(extractor, llm_mock):
+    """JSON parse failure → fallback: ADD all facts."""
+    llm_mock.generate_json.return_value = "not valid json{}{"
+
+    actions = await extractor.update_memory(
+        old_memories=[{"id": "0", "text": "old fact"}],
+        new_facts=["new fact"],
+    )
+
+    assert len(actions) == 1
+    assert actions[0]["event"] == "ADD"
+    assert actions[0]["text"] == "new fact"

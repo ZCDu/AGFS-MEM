@@ -1,104 +1,127 @@
 import json
-from memory_system.config import Settings
+import logging
+from datetime import datetime
+
+from memory_system.clients.llm_client import LLMClient
+from memory_system.prompts import USER_MEMORY_EXTRACTION_PROMPT, DEFAULT_UPDATE_MEMORY_PROMPT
 from memory_system.utils.text_utils import messages_to_text
 
-
-EXTRACTION_PROMPT = """你是一个记忆提取系统。分析以下对话，提取值得长期记住的用户信息。
-
-只提取具有长期价值的信息：用户事实、偏好、重要事件、关系等。
-忽略日常闲聊、临时性的问候、无信息量的内容。
-如果没有值得记住的信息，返回空数组 []。
-
-返回 JSON 数组，每条包含：
-- type: "fact" | "preference" | "event"
-- content: 第三人称描述的记忆事实，如"用户叫张三，今年30岁"
-- importance: 0.0-1.0 的重要性评分，越高越重要
-
-对话内容：
-{messages}
-
-仅返回 JSON 数组，不要其他内容。"""
-
-
-CONFLICT_PROMPT = """你是一个记忆冲突处理系统。判断新记忆与已有记忆之间的关系，决定如何处理。
-
-已有记忆：
-{existing}
-
-新提取的记忆：
-{new_memories}
-
-对每条新记忆，返回一个操作：
-- add: 全新的信息，需要添加
-  {{"action": "add", "new_memory": {{"content": "...", "importance": 0.8}}}}
-- update: 新信息替代/修正旧信息（如地址变更、年龄更新）
-  {{"action": "update", "old_id": "mem_001", "new_content": "...", "new_importance": 0.9}}
-- skip: 重复信息，或旧信息比新信息更详细，无需操作
-  {{"action": "skip", "reason": "重复"}}
-- delete: 旧信息已过时且无需替换
-  {{"action": "delete", "old_id": "mem_001", "reason": "已过时"}}
-
-返回 JSON 数组，仅返回 JSON。"""
+logger = logging.getLogger(__name__)
 
 
 class MemoryExtractor:
-    def __init__(self, settings: Settings, llm_client, embedding_client):
-        self._settings = settings
+    """Extract facts from conversation using mem0's prompt + HTTP LLM."""
+
+    def __init__(self, llm_client: LLMClient):
         self._llm = llm_client
-        self._embedding = embedding_client
 
-    async def extract_memories(self, messages: list[dict]) -> list[dict]:
-        """Extract long-term memories from conversation messages."""
+    async def extract(self, messages: list[dict]) -> list[str]:
+        """Extract user facts from conversation messages.
+
+        Returns a list of fact strings (e.g. ['Name is Bob', 'Lives in Beijing']).
+        Returns empty list if nothing relevant found.
+        """
         text = messages_to_text(messages)
-        prompt = EXTRACTION_PROMPT.format(messages=text)
+        if not text.strip():
+            return []
+
+        system_prompt = USER_MEMORY_EXTRACTION_PROMPT.replace(
+            "{date}", datetime.now().strftime("%Y-%m-%d")
+        )
 
         try:
-            items = await self._llm.chat_json(
-                messages=[{"role": "user", "content": prompt}],
+            facts = await self._llm.extract_json_field(
+                system=system_prompt,
+                user=f"Input:\n{text}",
+                field="facts",
             )
-        except Exception:
+            logger.info(f"Extracted {len(facts)} facts: {facts}")
+            return facts
+        except Exception as e:
+            logger.error(f"Extract failed: {e}")
             return []
 
-        if not isinstance(items, list):
-            return []
-
-        # Filter by importance threshold
-        threshold = self._settings.mem_importance_threshold
-        return [
-            item for item in items
-            if item.get("importance", 0) >= threshold
-        ]
-
-    async def resolve_conflicts(
-        self, new_memories: list[dict], existing_memories: list[dict]
+    async def update_memory(
+        self,
+        old_memories: list[dict],
+        new_facts: list[str],
     ) -> list[dict]:
-        """Determine what to do with each new memory (add/update/skip/delete)."""
-        if not new_memories:
-            return []
+        """Decide ADD/UPDATE/DELETE/NONE actions for new facts against old memories.
 
-        existing_str = json.dumps(
-            [
-                {"id": m.get("_id", ""), "content": m.get("memory", ""),
-                 "importance": m.get("importance", 0)}
-                for m in existing_memories
-            ],
-            ensure_ascii=False,
-        )
-        new_str = json.dumps(new_memories, ensure_ascii=False)
+        Args:
+            old_memories: [{"id": "abc123", "text": "User is a coder"}, ...]
+            new_facts: ["User is a software engineer", ...]
 
-        prompt = CONFLICT_PROMPT.format(
-            existing=existing_str, new_memories=new_str
+        Returns:
+            [{"id": "abc123", "text": "User is a software engineer",
+              "event": "UPDATE", "old_memory": "User is a coder"}, ...]
+        """
+        # Build the prompt following mem0's get_update_memory_messages pattern
+        if old_memories:
+            current_memory_part = f"""
+Below is the current content of my memory which I have collected till now. You have to update it in the following format only:
+
+```
+{json.dumps(old_memories, ensure_ascii=False)}
+```
+
+"""
+        else:
+            current_memory_part = "\nCurrent memory is empty.\n\n"
+
+        prompt = f"""{DEFAULT_UPDATE_MEMORY_PROMPT}
+
+{current_memory_part}
+
+The new retrieved facts are mentioned in the triple backticks. You have to analyze the new retrieved facts and determine whether these facts should be added, updated, or deleted in the memory.
+
+```
+{json.dumps(new_facts, ensure_ascii=False)}
+```
+
+You must return your response in the following JSON structure only:
+
+{{
+    "memory" : [
+        {{
+            "id" : "<ID of the memory>",
+            "text" : "<Content of the memory>",
+            "event" : "<Operation to be performed>",
+            "old_memory" : "<Old memory content>"
+        }},
+        ...
+    ]
+}}
+
+Follow the instruction mentioned below:
+- Do not return anything from the custom few shot prompts provided above.
+- If the current memory is empty, then you have to add the new retrieved facts to the memory.
+- You should return the updated memory in only JSON format as shown below. The memory key should be the same if no changes are made.
+- If there is an addition, generate a new key and add the new memory corresponding to it.
+- If there is a deletion, the memory key-value pair should be removed from the memory.
+- If there is an update, the ID key should remain the same and only the value needs to be updated.
+
+Do not return anything except the JSON format."""
+
+        raw = await self._llm.generate_json(
+            system="You are a smart memory manager.",
+            user=prompt,
+            temperature=0.1,
+            max_tokens=2000,
         )
 
         try:
-            actions = await self._llm.chat_json(
-                messages=[{"role": "user", "content": prompt}],
+            result = json.loads(raw) if isinstance(raw, str) else raw
+            actions = result.get("memory", [])
+            logger.info(
+                f"Update memory decisions: {len(actions)} actions — "
+                + ", ".join(f"{a.get('event')}:{a.get('id','?')}" for a in actions)
             )
-            if not isinstance(actions, list):
-                return []
             return actions
-        except Exception:
-            # On failure, default to add all
+        except (json.JSONDecodeError, TypeError) as e:
+            logger.error(f"Failed to parse update_memory response: {e}\nRaw: {raw}")
+            # Fallback: ADD all facts as new
             return [
-                {"action": "add", "new_memory": m} for m in new_memories
+                {"id": "", "text": f, "event": "ADD", "old_memory": ""}
+                for f in new_facts
             ]

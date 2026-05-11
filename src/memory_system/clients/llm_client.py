@@ -1,71 +1,48 @@
 import json
+import logging
 import httpx
-from memory_system.config import Settings
+
+logger = logging.getLogger(__name__)
 
 
 class LLMClient:
-    def __init__(self, settings: Settings):
-        self._url = settings.llm_api_url.rstrip("/")
-        self._key = settings.llm_api_key.get_secret_value()
+    """OpenAI-compatible LLM HTTP client."""
 
-    def _headers(self) -> dict:
-        return {
+    def __init__(self, base_url: str, api_key: str, model: str):
+        self._url = base_url.rstrip("/")
+        self._key = api_key
+        self._model = model
+
+    async def generate_json(self, system: str, user: str, temperature: float = 0.1, max_tokens: int = 2000) -> str:
+        """Call LLM with json_object response format, return raw content string."""
+        headers = {
             "Authorization": f"Bearer {self._key}",
             "Content-Type": "application/json",
         }
-
-    async def chat(
-        self,
-        messages: list[dict],
-        system_prompt: str | None = None,
-        max_tokens: int = 1024,
-        temperature: float = 0.3,
-    ) -> str:
-        """Send chat completion request and return text response."""
-        full_messages = []
-        if system_prompt:
-            full_messages.append({"role": "system", "content": system_prompt})
-        full_messages.extend(messages)
-
-        async with httpx.AsyncClient() as client:
-            resp = await client.post(
-                f"{self._url}/chat/completions",
-                headers=self._headers(),
-                json={
-                    "model": "default",
-                    "messages": full_messages,
-                    "max_tokens": max_tokens,
-                    "temperature": temperature,
-                },
-                timeout=60.0,
-            )
-            if resp.status_code != 200:
-                raise RuntimeError(
-                    f"LLM API error: status={resp.status_code}, body={resp.text}"
-                )
+        body = {
+            "model": self._model,
+            "messages": [
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+            "response_format": {"type": "json_object"},
+        }
+        async with httpx.AsyncClient(timeout=httpx.Timeout(60)) as client:
+            resp = await client.post(f"{self._url}/chat/completions", json=body, headers=headers)
+            resp.raise_for_status()
             data = resp.json()
-            return data["choices"][0]["message"]["content"]
+            content = data["choices"][0]["message"]["content"]
+            logger.debug(f"LLM response: {content[:200]}...")
+            return content
 
-    async def chat_json(
-        self,
-        messages: list[dict],
-        system_prompt: str | None = None,
-        max_tokens: int = 1024,
-    ) -> dict | list:
-        """Send chat request and parse response as JSON."""
-        text = await self.chat(
-            messages=messages,
-            system_prompt=system_prompt,
-            max_tokens=max_tokens,
-            temperature=0.0,
-        )
-        # Try to extract JSON from the response text
-        text = text.strip()
-        if text.startswith("```"):
-            # Strip markdown code fences
-            lines = text.split("\n")
-            text = "\n".join(lines[1:-1])
+    async def extract_json_field(self, system: str, user: str, field: str = "facts") -> list[str]:
+        """Call LLM, parse JSON, return values for a specific field."""
         try:
-            return json.loads(text)
-        except json.JSONDecodeError:
-            raise RuntimeError(f"Failed to parse LLM JSON response: {text[:200]}")
+            content = await self.generate_json(system, user)
+            parsed = json.loads(content)
+            return parsed.get(field, [])
+        except (json.JSONDecodeError, KeyError) as e:
+            logger.warning(f"Failed to parse LLM JSON response: {e}")
+            return []
