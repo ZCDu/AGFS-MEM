@@ -1,6 +1,7 @@
 import asyncio
 import pytest
 from unittest.mock import AsyncMock
+from memory_system.api.models import Usage
 from memory_system.core.memory_service import MemoryService
 
 
@@ -13,7 +14,7 @@ def services(settings):
     redis_client = AsyncMock()
     local_storage = None
 
-    embedding_client.get_embedding.return_value = [0.1, 0.2, 0.3]
+    embedding_client.get_embedding.return_value = ([0.1, 0.2, 0.3], {})
 
     session_mgr.get_session.return_value = {
         "rounds": [{
@@ -27,8 +28,8 @@ def services(settings):
         "history_str": "user: hi",
     }
     es_client.search_knn.return_value = []
-    extractor.extract.return_value = []
-    extractor.update_memory.return_value = []
+    extractor.extract.return_value = ([], Usage())
+    extractor.update_memory.return_value = ([], Usage())
 
     return {
         "session_mgr": session_mgr,
@@ -152,10 +153,10 @@ async def test_recall_with_retrieved_memories(settings, services):
 @pytest.mark.asyncio
 async def test_extract_and_store_adds_new_facts(settings, services):
     """Facts extracted with no similar memories → direct ADD."""
-    services["extractor"].extract.return_value = [
-        "User's name is John",
-        "User works at Google",
-    ]
+    services["extractor"].extract.return_value = (
+        ["User's name is John", "User works at Google"],
+        Usage(input_tokens=50, output_tokens=30, total_tokens=80),
+    )
     services["es_client"].search_knn.return_value = []  # no similar memories
 
     svc = MemoryService(
@@ -179,13 +180,19 @@ async def test_extract_and_store_adds_new_facts(settings, services):
 @pytest.mark.asyncio
 async def test_extract_and_store_updates_existing(settings, services):
     """Similar memories exist → LLM decides UPDATE."""
-    services["extractor"].extract.return_value = ["Lives in Beijing now"]
+    services["extractor"].extract.return_value = (
+        ["Lives in Beijing now"],
+        Usage(input_tokens=30, output_tokens=15, total_tokens=45),
+    )
     services["es_client"].search_knn.return_value = [
         {"id": "abc123", "memory": "Lives in Shanghai", "score": 0.9, "user_id": "u1", "created_at": "2026-01-01T00:00:00Z"},
     ]
-    services["extractor"].update_memory.return_value = [
-        {"id": "abc123", "text": "Lives in Beijing now", "event": "UPDATE", "old_memory": "Lives in Shanghai"},
-    ]
+    services["extractor"].update_memory.return_value = (
+        [
+            {"id": "abc123", "text": "Lives in Beijing now", "event": "UPDATE", "old_memory": "Lives in Shanghai"},
+        ],
+        Usage(input_tokens=60, output_tokens=40, total_tokens=100),
+    )
 
     svc = MemoryService(
         settings,
@@ -210,13 +217,19 @@ async def test_extract_and_store_updates_existing(settings, services):
 @pytest.mark.asyncio
 async def test_extract_and_store_delete(settings, services):
     """Contradicting fact → LLM decides DELETE."""
-    services["extractor"].extract.return_value = ["Dislikes coffee"]
+    services["extractor"].extract.return_value = (
+        ["Dislikes coffee"],
+        Usage(input_tokens=20, output_tokens=10, total_tokens=30),
+    )
     services["es_client"].search_knn.return_value = [
         {"id": "mem_1", "memory": "Likes coffee", "score": 0.9, "user_id": "u1", "created_at": "2026-01-01T00:00:00Z"},
     ]
-    services["extractor"].update_memory.return_value = [
-        {"id": "mem_1", "text": "Likes coffee", "event": "DELETE", "old_memory": ""},
-    ]
+    services["extractor"].update_memory.return_value = (
+        [
+            {"id": "mem_1", "text": "Likes coffee", "event": "DELETE", "old_memory": ""},
+        ],
+        Usage(input_tokens=40, output_tokens=20, total_tokens=60),
+    )
 
     svc = MemoryService(
         settings,

@@ -30,7 +30,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     scheme = "https" if settings.es_use_ssl else "http"
     es_client = ESHttpClient(
         base_url=f"{scheme}://{settings.es_host}:{settings.es_port}",
-        auth=(settings.es_user, settings.es_password) if settings.es_user else None,
+        auth=(settings.es_user, settings.es_password.get_secret_value()) if settings.es_user else None,
         verify=settings.es_verify_certs,
     )
     embedding_client = EmbeddingClient(settings)

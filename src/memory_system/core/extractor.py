@@ -2,11 +2,21 @@ import json
 import logging
 from datetime import datetime
 
+from memory_system.api.models import Usage
 from memory_system.clients.llm_client import LLMClient
 from memory_system.prompts import USER_MEMORY_EXTRACTION_PROMPT, DEFAULT_UPDATE_MEMORY_PROMPT
 from memory_system.utils.text_utils import messages_to_text
 
 logger = logging.getLogger(__name__)
+
+
+def _to_usage(raw: dict) -> Usage:
+    """Convert OpenAI-compatible usage dict to Usage model."""
+    return Usage(
+        input_tokens=raw.get("prompt_tokens", 0) if isinstance(raw, dict) else 0,
+        output_tokens=raw.get("completion_tokens", 0) if isinstance(raw, dict) else 0,
+        total_tokens=raw.get("total_tokens", 0) if isinstance(raw, dict) else 0,
+    )
 
 
 class MemoryExtractor:
@@ -15,48 +25,41 @@ class MemoryExtractor:
     def __init__(self, llm_client: LLMClient):
         self._llm = llm_client
 
-    async def extract(self, messages: list[dict]) -> list[str]:
+    async def extract(self, messages: list[dict]) -> tuple[list[str], Usage]:
         """Extract user facts from conversation messages.
 
-        Returns a list of fact strings (e.g. ['Name is Bob', 'Lives in Beijing']).
-        Returns empty list if nothing relevant found.
+        Returns (facts, usage).
         """
         text = messages_to_text(messages)
         if not text.strip():
-            return []
+            return [], Usage()
 
         system_prompt = USER_MEMORY_EXTRACTION_PROMPT.replace(
             "{date}", datetime.now().strftime("%Y-%m-%d")
         )
 
         try:
-            facts = await self._llm.extract_json_field(
+            facts, usage_raw = await self._llm.extract_json_field(
                 system=system_prompt,
                 user=f"Input:\n{text}",
                 field="facts",
             )
-            logger.info(f"Extracted {len(facts)} facts: {facts}")
-            return facts
+            usage = _to_usage(usage_raw)
+            logger.info(f"Extracted {len(facts)} facts, usage={usage}")
+            return facts, usage
         except Exception as e:
             logger.error(f"Extract failed: {e}")
-            return []
+            return [], Usage()
 
     async def update_memory(
         self,
         old_memories: list[dict],
         new_facts: list[str],
-    ) -> list[dict]:
+    ) -> tuple[list[dict], Usage]:
         """Decide ADD/UPDATE/DELETE/NONE actions for new facts against old memories.
 
-        Args:
-            old_memories: [{"id": "abc123", "text": "User is a coder"}, ...]
-            new_facts: ["User is a software engineer", ...]
-
-        Returns:
-            [{"id": "abc123", "text": "User is a software engineer",
-              "event": "UPDATE", "old_memory": "User is a coder"}, ...]
+        Returns (actions, usage).
         """
-        # Build the prompt following mem0's get_update_memory_messages pattern
         if old_memories:
             current_memory_part = f"""
 Below is the current content of my memory which I have collected till now. You have to update it in the following format only:
@@ -103,12 +106,13 @@ Follow the instruction mentioned below:
 
 Do not return anything except the JSON format."""
 
-        raw = await self._llm.generate_json(
+        raw, usage_raw = await self._llm.generate_json(
             system="You are a smart memory manager.",
             user=prompt,
             temperature=0.1,
             max_tokens=2000,
         )
+        usage = _to_usage(usage_raw)
 
         try:
             result = json.loads(raw) if isinstance(raw, str) else raw
@@ -116,12 +120,12 @@ Do not return anything except the JSON format."""
             logger.info(
                 f"Update memory decisions: {len(actions)} actions — "
                 + ", ".join(f"{a.get('event')}:{a.get('id','?')}" for a in actions)
+                + f", usage={usage}"
             )
-            return actions
+            return actions, usage
         except (json.JSONDecodeError, TypeError) as e:
             logger.error(f"Failed to parse update_memory response: {e}\nRaw: {raw}")
-            # Fallback: ADD all facts as new
             return [
                 {"id": "", "text": f, "event": "ADD", "old_memory": ""}
                 for f in new_facts
-            ]
+            ], usage

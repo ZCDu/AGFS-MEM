@@ -92,7 +92,7 @@ class SessionManager:
             relevant = (
                 query_text
                 and round_text
-                and self._bigram_jaccard(query_text, round_text) >= threshold
+                and self._bigram_overlap(query_text, round_text) >= threshold
             )
 
             if relevant:
@@ -135,7 +135,7 @@ class SessionManager:
         return {t[i : i + 2] for i in range(len(t) - 1)}
 
     @staticmethod
-    def _bigram_jaccard(a: str, b: str) -> float:
+    def _bigram_overlap(a: str, b: str) -> float:
         """Overlap coefficient: |A ∩ B| / min(|A|, |B|).
 
         Better than standard Jaccard for short-vs-long text comparison.

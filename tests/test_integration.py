@@ -57,7 +57,7 @@ def test_store_flow(client):
 
         mock_redis = _setup_mock_redis()
         mock_redis_get.return_value = mock_redis
-        mock_llm_extract.return_value = []
+        mock_llm_extract.return_value = ([], {})
 
         resp = client.post(
             "/v1/memory/store",
@@ -85,7 +85,7 @@ def test_store_multimodal(client):
 
         mock_redis = _setup_mock_redis()
         mock_redis_get.return_value = mock_redis
-        mock_llm_extract.return_value = []
+        mock_llm_extract.return_value = ([], {})
 
         resp = client.post(
             "/v1/memory/store",
@@ -138,7 +138,7 @@ def test_recall_flow(client):
         mock_redis = _setup_mock_redis()
         mock_redis_get.return_value = mock_redis
         mock_search.return_value = []
-        mock_emb.return_value = [0.1] * 768
+        mock_emb.return_value = ([0.1] * 768, {})
 
         resp = client.post(
             "/v1/memory/recall",
@@ -180,7 +180,7 @@ def test_recall_with_memory_retrieval(client):
             }
         ]
 
-        mock_emb.return_value = [0.1, 0.2, 0.3]
+        mock_emb.return_value = ([0.1, 0.2, 0.3], {})
 
         resp = client.post(
             "/v1/memory/recall",

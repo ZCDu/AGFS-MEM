@@ -7,6 +7,8 @@ from memory_system.api.models import (
     MemoryStoreResponse,
     MemoryRecallResponse,
     RetrievedMemory,
+    HistoryMessage,
+    Usage,
 )
 from memory_system.utils.text_utils import get_last_user_query
 
@@ -46,32 +48,28 @@ class MemoryService:
         # 1. Add messages to session
         await self._session.add_round(redis, user_id, session_id, raw_messages)
 
-        # 2. Background: extract facts → embed → store in ES
-        task = asyncio.create_task(
-            self._extract_and_store(user_id, raw_messages)
-        )
-        task.add_done_callback(
-            lambda t: logger.error(f"Background _extract_and_store failed: {t.exception()}", exc_info=True)
-            if t.exception() else None
-        )
+        # 2. Extract + store in ES (inline so usage can be returned)
+        usage = await self._extract_and_store(user_id, raw_messages)
 
         # 3. Background: persist to local storage
         if self._storage:
-            task2 = asyncio.create_task(
+            asyncio.create_task(
                 self._local_storage_pipeline(user_id, raw_messages)
-            )
-            task2.add_done_callback(
-                lambda t: logger.error(f"Background _local_storage_pipeline failed: {t.exception()}", exc_info=True)
-                if t.exception() else None
+            ).add_done_callback(
+                lambda t: logger.error(
+                    f"Background _local_storage_pipeline failed: {t.exception()}",
+                    exc_info=True,
+                ) if t.exception() else None
             )
 
-        return MemoryStoreResponse(model=request.model, status="stored")
+        return MemoryStoreResponse(model=request.model, status="stored", usage=usage)
 
     async def recall(self, request: MemoryRequest) -> MemoryRecallResponse:
         """Retrieve session history + long-term memories for the current query."""
         user_id = request.userId
         session_id = request.sessionId
         raw_messages = [msg.model_dump() for msg in request.input]
+        total_usage = Usage()
 
         redis = await self._get_redis()
 
@@ -80,7 +78,7 @@ class MemoryService:
         query_embedding = []
         if query_text:
             try:
-                query_embedding = await self._embedding.get_embedding(query_text)
+                query_embedding, _ = await self._embedding.get_embedding(query_text)
             except Exception as e:
                 logger.warning(f"Failed to get query embedding: {e}")
 
@@ -97,7 +95,7 @@ class MemoryService:
             except Exception as e:
                 logger.warning(f"ES search failed: {e}")
 
-        # 3. Build session history (uses bigram overlap coefficient, no embedding needed)
+        # 3. Build session history
         recent_full = self._settings.recent_rounds_full
         if request.memory_settings and request.memory_settings.recent_rounds_full is not None:
             recent_full = request.memory_settings.recent_rounds_full
@@ -122,7 +120,7 @@ class MemoryService:
                     memory=memory,
                     score=score,
                     created_at=str(hit.get("created_at", "")),
-                    importance=score,  # Use score as importance proxy
+                    importance=score,
                 )
             )
             history_data["history_messages"].insert(
@@ -130,35 +128,38 @@ class MemoryService:
                 {"role": "system", "content": f"[Retrieved memory: {memory}]"},
             )
 
+        history_msgs = [
+            HistoryMessage(role=m["role"], content=str(m.get("content", "")))
+            for m in history_data["history_messages"]
+        ]
         return MemoryRecallResponse(
             model=request.model,
-            history=history_data["history_messages"],
+            history=history_msgs,
             retrieved_memories=retrieved_memories,
-            usage={"total_tokens": sum(
-                len(str(m.get("content", "")))
-                for m in history_data.get("history_messages", [])
-            )},
+            usage=total_usage,
         )
 
-    async def _extract_and_store(self, user_id: str, raw_messages: list[dict]):
-        """Background: LLM extraction → search similar → decide ADD/UPDATE/DELETE.
+    async def _extract_and_store(self, user_id: str, raw_messages: list[dict]) -> Usage:
+        """Extract facts, search similar, decide ADD/UPDATE/DELETE, store in ES.
 
-        Follows mem0's memory update pattern:
-        1. Extract new facts via LLM
-        2. For each fact, embed and KNN-search ES for similar existing memories
-        3. If no similar memories exist, directly ADD all facts
-        4. If similar memories exist, ask LLM to decide ADD/UPDATE/DELETE/NONE
+        Returns total LLM token usage.
         """
-        try:
-            facts = await self._extractor.extract(raw_messages)
-            if not facts:
-                return
+        total_usage = Usage()
 
-            # Collect similar existing memories per fact via KNN search
-            old_memories_map: dict[str, dict] = {}  # doc_id -> {id, text}
+        try:
+            facts, ext_usage = await self._extractor.extract(raw_messages)
+            total_usage += ext_usage
+            if not facts:
+                return total_usage
+
+            # Collect similar existing memories per fact via KNN search.
+            # Cache embeddings so we can reuse them if the ADD path is taken.
+            old_memories_map: dict[str, dict] = {}
+            fact_embeddings: dict[str, list[float]] = {}
             for fact in facts:
                 try:
-                    embedding = await self._embedding.get_embedding(fact)
+                    embedding, _ = await self._embedding.get_embedding(fact)
+                    fact_embeddings[fact] = embedding
                     hits = await self._es.search_knn(
                         index=self._settings.es_index_name,
                         vector=embedding,
@@ -177,11 +178,11 @@ class MemoryService:
 
             old_memories = list(old_memories_map.values())
 
-            # No existing similar memories — directly ADD all facts
+            # No existing similar memories — directly ADD all facts (reuse cached embeddings)
             if not old_memories:
                 for fact in facts:
                     try:
-                        embedding = await self._embedding.get_embedding(fact)
+                        embedding = fact_embeddings[fact]
                         doc_id = hashlib.md5(fact.encode()).hexdigest()
                         await self._es.index_document(
                             index=self._settings.es_index_name,
@@ -193,13 +194,14 @@ class MemoryService:
                         )
                     except Exception as e:
                         logger.error(f"Failed to ADD fact '{fact}': {e}")
-                logger.info(f"Added {len(facts)} new memories for user={user_id}")
-                return
+                logger.info(f"Added {len(facts)} new memories for user={user_id}, usage={total_usage}")
+                return total_usage
 
             # Has similar memories — ask LLM to decide actions
-            actions = await self._extractor.update_memory(old_memories, facts)
+            actions, upd_usage = await self._extractor.update_memory(old_memories, facts)
+            total_usage += upd_usage
             if not actions:
-                return
+                return total_usage
 
             for action in actions:
                 event = action.get("event", "").upper()
@@ -207,8 +209,10 @@ class MemoryService:
                 memory_id = action.get("id", "")
 
                 try:
+                    if event in ("ADD", "UPDATE"):
+                        embedding, _ = await self._embedding.get_embedding(memory_text)
+
                     if event == "ADD":
-                        embedding = await self._embedding.get_embedding(memory_text)
                         doc_id = memory_id or hashlib.md5(memory_text.encode()).hexdigest()
                         await self._es.index_document(
                             index=self._settings.es_index_name,
@@ -218,19 +222,16 @@ class MemoryService:
                             user_id=user_id,
                             hash_val=doc_id,
                         )
-
                     elif event == "UPDATE":
                         if not memory_id:
                             logger.warning("UPDATE action missing id, skipping")
                             continue
-                        embedding = await self._embedding.get_embedding(memory_text)
                         await self._es.update_document(
                             index=self._settings.es_index_name,
                             doc_id=memory_id,
                             vector=embedding,
                             data=memory_text,
                         )
-
                     elif event == "DELETE":
                         if not memory_id:
                             logger.warning("DELETE action missing id, skipping")
@@ -239,28 +240,26 @@ class MemoryService:
                             index=self._settings.es_index_name,
                             doc_id=memory_id,
                         )
-
                     elif event == "NONE":
-                        pass  # No change needed
-
+                        pass
                     else:
                         logger.warning(f"Unknown event '{event}' for memory '{memory_id}'")
 
                 except Exception as e:
-                    logger.error(
-                        f"Failed to execute {event} for memory '{memory_id}': {e}"
-                    )
+                    logger.error(f"Failed to execute {event} for memory '{memory_id}': {e}")
 
             counts = {}
             for a in actions:
                 e = a.get("event", "NONE").upper()
                 counts[e] = counts.get(e, 0) + 1
             logger.info(
-                f"Memory update complete for user={user_id}: {counts}"
+                f"Memory update complete for user={user_id}: {counts}, usage={total_usage}"
             )
 
         except Exception as e:
             logger.error(f"_extract_and_store failed for user={user_id}: {e}", exc_info=True)
+
+        return total_usage
 
     async def _local_storage_pipeline(
         self, user_id: str, messages: list[dict],

@@ -8,13 +8,11 @@ class EmbeddingClient:
         self._dim = settings.embedding_dim
         self._api_key = settings.embedding_api_key.get_secret_value()
 
-    async def get_embedding(self, text: str) -> list[float]:
-        """Get embedding vector for a single text."""
-        results = await self.get_embeddings([text])
-        return results[0]
+    async def get_embedding(self, text: str) -> tuple[list[float], dict]:
+        results, usage = await self.get_embeddings([text])
+        return results[0], usage
 
-    async def get_embeddings(self, texts: list[str]) -> list[list[float]]:
-        """Get embeddings for multiple texts in one batch."""
+    async def get_embeddings(self, texts: list[str]) -> tuple[list[list[float]], dict]:
         headers = {
             "Authorization": f"Bearer {self._api_key}",
             "Content-Type": "application/json",
@@ -36,4 +34,5 @@ class EmbeddingClient:
                     f"body={resp.text}"
                 )
             data = resp.json()
-            return [item["embedding"] for item in data["data"]]
+            usage = data.get("usage", {})
+            return [item["embedding"] for item in data["data"]], usage

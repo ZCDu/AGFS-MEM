@@ -21,9 +21,9 @@ async def test_get_embedding_success(emb_client):
         mock_http.post.return_value = mock_response
         mock_cls.return_value.__aenter__.return_value = mock_http
 
-        result = await emb_client.get_embedding("hello world")
-        assert len(result) == 3
-        assert result == [0.1, 0.2, 0.3]
+        embedding, usage = await emb_client.get_embedding("hello world")
+        assert len(embedding) == 3
+        assert embedding == [0.1, 0.2, 0.3]
 
 
 @pytest.mark.asyncio
@@ -42,9 +42,9 @@ async def test_get_embedding_batch(emb_client):
         mock_http.post.return_value = mock_response
         mock_cls.return_value.__aenter__.return_value = mock_http
 
-        result = await emb_client.get_embeddings(["text1", "text2"])
-        assert len(result) == 2
-        assert result[0] == [0.1, 0.2]
+        embeddings, usage = await emb_client.get_embeddings(["text1", "text2"])
+        assert len(embeddings) == 2
+        assert embeddings[0] == [0.1, 0.2]
 
 
 @pytest.mark.asyncio

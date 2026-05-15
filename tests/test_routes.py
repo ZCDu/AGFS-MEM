@@ -61,12 +61,12 @@ def test_recall_endpoint(client):
         "memory_system.api.routes.get_memory_service"
     ) as mock_get_svc:
         mock_svc = AsyncMock()
-        from memory_system.api.models import MemoryRecallResponse
+        from memory_system.api.models import MemoryRecallResponse, HistoryMessage, Usage
         mock_svc.recall.return_value = MemoryRecallResponse(
             model="memory-v1",
-            history=[{"role": "user", "content": "hello"}],
+            history=[HistoryMessage(role="user", content="hello")],
             retrieved_memories=[],
-            usage={"total_tokens": 5},
+            usage=Usage(total_tokens=5),
         )
         mock_get_svc.return_value = mock_svc
 

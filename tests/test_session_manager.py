@@ -265,9 +265,9 @@ def test_bigrams():
     assert SessionManager._bigrams("hello") == {"he", "el", "ll", "lo"}
 
 
-def test_bigram_jaccard_identical():
-    assert SessionManager._bigram_jaccard("hello world", "hello world") == 1.0
+def test_bigram_overlap_identical():
+    assert SessionManager._bigram_overlap("hello world", "hello world") == 1.0
 
 
-def test_bigram_jaccard_different():
-    assert SessionManager._bigram_jaccard("hello", "xyz") < 0.1
+def test_bigram_overlap_different():
+    assert SessionManager._bigram_overlap("hello", "xyz") < 0.1

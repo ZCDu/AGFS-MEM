@@ -1,4 +1,4 @@
-"""Memory System — conversational long-term memory for AI agents, powered by mem0."""
+"""Memory System — conversational long-term memory for AI agents."""
 
 __version__ = "0.2.0"
 

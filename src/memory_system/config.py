@@ -32,7 +32,7 @@ class Settings(BaseSettings):
     es_host: str = "localhost"
     es_port: int = 9200
     es_user: str = ""
-    es_password: str = ""
+    es_password: SecretStr = Field(default=SecretStr(""))
     es_use_ssl: bool = False
     es_verify_certs: bool = False
     es_index_name: str = "mem0"
