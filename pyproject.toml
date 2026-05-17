@@ -21,6 +21,9 @@ dev = [
     "pytest-asyncio>=0.24.0",
     "httpx>=0.28.0",
 ]
+mirage = [
+    "mirage-ai>=0.0.1",
+]
 
 [tool.setuptools.packages.find]
 where = ["src"]

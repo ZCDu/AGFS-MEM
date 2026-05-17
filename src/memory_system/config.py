@@ -38,4 +38,6 @@ class Settings(BaseSettings):
     es_index_name: str = "mem0"
 
     # Local storage
+    storage_backend: str = "local"
     storage_base_path: str = "~/memory_system_data"
+    mirage_storage_path: str = "~/memory_mirage_data"

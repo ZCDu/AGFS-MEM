@@ -1,6 +1,5 @@
 import logging
 from contextlib import asynccontextmanager
-from pathlib import Path
 from fastapi import FastAPI
 
 logging.basicConfig(level=logging.INFO)
@@ -36,8 +35,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     embedding_client = EmbeddingClient(settings)
     redis_client = RedisClient(settings)
 
-    # Local storage
-    local_storage = LocalStorage(settings.storage_base_path)
+    # Storage backend (local or mirage)
+    if settings.storage_backend == "mirage":
+        from memory_system.storage.mirage_storage import MirageStorage
+        local_storage = MirageStorage(settings.mirage_storage_path)
+    else:
+        local_storage = LocalStorage(settings.storage_base_path)
 
     # Core services
     extractor = MemoryExtractor(llm_client)
@@ -57,10 +60,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         # Ensure ES index exists
-        storage = Path(settings.storage_base_path).expanduser().resolve()
         await es_client.ensure_index(settings.es_index_name, settings.embedding_dim)
         yield
         await redis_client.close()
+        if hasattr(local_storage, "close"):
+            await local_storage.close()
 
     app = FastAPI(title="Memory System", version="0.2.0", lifespan=lifespan)
     app.include_router(router)
