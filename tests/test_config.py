@@ -9,6 +9,7 @@ def test_settings_defaults():
     assert s.session_window_size == 10
     assert s.session_ttl_seconds == 86400
     assert s.relevance_threshold == 0.35
+    assert s.memory_score_threshold == 1.2
     assert s.embedding_dim == 1024
     # .env file may override defaults; just verify it's a string
     assert isinstance(s.llm_api_key.get_secret_value(), str)
@@ -45,6 +46,8 @@ def test_secret_str_not_leaked_in_repr():
         ("mem_retrieval_top_k", 0),
         ("relevance_threshold", -0.1),
         ("relevance_threshold", 1.1),
+        ("memory_score_threshold", -0.1),
+        ("memory_score_threshold", 2.1),
     ],
 )
 def test_field_constraints_reject_invalid(field, invalid_value):

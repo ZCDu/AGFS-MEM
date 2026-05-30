@@ -28,8 +28,8 @@ class MemorySettings(BaseModel):
 
 class MemoryRequest(BaseModel):
     model: str = "memory-v1"
-    userId: str = Field(min_length=1)
-    sessionId: str = Field(min_length=1)
+    userId: str = Field(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9][A-Za-z0-9_.:-]*$")
+    sessionId: str = Field(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9][A-Za-z0-9_.:-]*$")
     reasoning: dict | None = None
     memory_settings: MemorySettings | None = None
     input: list[Message] = Field(min_length=1)

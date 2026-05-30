@@ -1,3 +1,4 @@
+import asyncio
 import json
 import uuid
 from datetime import datetime, timezone
@@ -24,6 +25,19 @@ class SessionManager:
         self, redis, user_id: str, session_id: str, messages: list[dict]
     ):
         """Store messages as one round. No embedding — uses text similarity instead."""
+        key = self._key(user_id, session_id)
+        lock_key = f"{key}:lock"
+        token = uuid.uuid4().hex
+
+        await self._acquire_lock(redis, lock_key, token)
+        try:
+            await self._add_round_unlocked(redis, user_id, session_id, messages)
+        finally:
+            await self._release_lock(redis, lock_key, token)
+
+    async def _add_round_unlocked(
+        self, redis, user_id: str, session_id: str, messages: list[dict]
+    ):
         key = self._key(user_id, session_id)
         session = await self.get_session(redis, user_id, session_id)
         now = datetime.now(timezone.utc).isoformat()
@@ -54,6 +68,25 @@ class SessionManager:
             },
         )
         await redis.expire(key, self._settings.session_ttl_seconds)
+
+    @staticmethod
+    async def _acquire_lock(redis, lock_key: str, token: str):
+        for _ in range(20):
+            acquired = await redis.set(lock_key, token, nx=True, ex=5)
+            if acquired:
+                return
+            await asyncio.sleep(0.05)
+        raise TimeoutError(f"Could not acquire session lock: {lock_key}")
+
+    @staticmethod
+    async def _release_lock(redis, lock_key: str, token: str):
+        script = """
+        if redis.call("get", KEYS[1]) == ARGV[1] then
+            return redis.call("del", KEYS[1])
+        end
+        return 0
+        """
+        await redis.eval(script, 1, lock_key, token)
 
     async def build_history(
         self,

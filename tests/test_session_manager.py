@@ -37,6 +37,7 @@ async def test_get_session_existing(session_mgr, redis_mock):
 async def test_add_round_single_block(session_mgr, redis_mock):
     """All input messages stored as one block. No embedding calls."""
     redis_mock.hgetall.return_value = {"rounds": "[]"}
+    redis_mock.set.return_value = True
 
     new_msgs = [
         {"role": "user", "content": "q1"},
@@ -56,6 +57,10 @@ async def test_add_round_single_block(session_mgr, redis_mock):
     assert rounds[0]["messages"][0]["content"] == "q1"
     assert rounds[0]["messages"][3]["content"] == "a2"
     assert rounds[0]["first_user_text"] == "q1"
+    redis_mock.set.assert_awaited_once()
+    lock_kwargs = redis_mock.set.await_args.kwargs
+    assert lock_kwargs["nx"] is True
+    assert lock_kwargs["ex"] > 0
 
 
 @pytest.mark.asyncio

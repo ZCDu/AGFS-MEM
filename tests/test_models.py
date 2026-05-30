@@ -96,6 +96,19 @@ def test_memory_request_empty_user_id():
         MemoryRequest(userId="", sessionId="s1", input=[{"role": "user", "content": "hi"}])
 
 
+@pytest.mark.parametrize("field", ["userId", "sessionId"])
+def test_memory_request_rejects_path_like_identifiers(field):
+    payload = {
+        "userId": "u1",
+        "sessionId": "s1",
+        "input": [{"role": "user", "content": "hi"}],
+    }
+    payload[field] = "../escape"
+
+    with pytest.raises(ValidationError):
+        MemoryRequest(**payload)
+
+
 # ── MemorySettings ───────────────────────────────────────────────────────────
 
 def test_memory_settings_recent_rounds_non_positive():

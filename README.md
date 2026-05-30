@@ -121,6 +121,10 @@ mem0 的提示词（提取 + 更新决策）是公开的，核心逻辑就是 LL
 
 同一个旧记忆可能被多个 fact 的 KNN 搜索命中（例如 fact "喜欢编程" 和 "是工程师" 都搜到了相同旧记忆），通过 `old_memories_map` (key=doc_id) 去重后再传给 LLM 做决策。
 
+### 多用户隔离
+
+长期记忆的 ES `_id` 包含 `user_id` 作用域，同一条事实在不同用户之间不会互相覆盖。ES 查询仍会按 `user_id` 过滤，保证召回只发生在当前用户的记忆集合内。
+
 ### 容错策略
 
 - LLM 提取失败 → 返回空列表，不影响 store 响应
@@ -138,7 +142,9 @@ mem0 的提示词（提取 + 更新决策）是公开的，核心逻辑就是 LL
    - `overlap = |bigrams(query) ∩ bigrams(round_first_q)| / min(|bigrams(query)|, |bigrams(round_first_q)|)`
    - `>= relevance_threshold` → 相关，完整展示全轮
    - `< relevance_threshold` → 不相关，仅保留首条用户问题 + `[previous response omitted]` 占位
-4. 不使用 embedding —— bigram 比较速度远快于向量化，且中文/英文均适用
+4. 长期记忆使用独立的 `MEMORY_SCORE_THRESHOLD` 过滤，不与会话 bigram 阈值混用
+5. 召回的长期记忆会作为“非指令型参考上下文”注入，避免把用户可写记忆提升成高优先级系统指令
+6. 不使用 embedding 压缩会话历史 —— bigram 比较速度远快于向量化，且中文/英文均适用
 
 ### 为什么用重叠系数而不是标准 Jaccard？
 
@@ -178,7 +184,8 @@ mem0 的提示词（提取 + 更新决策）是公开的，核心逻辑就是 LL
 | `ES_USE_SSL` | 启用 HTTPS | `false` |
 | `ES_VERIFY_CERTS` | 验证 TLS 证书 | `false` |
 | `ES_INDEX_NAME` | ES 索引名 | `mem0` |
-| `RELEVANCE_THRESHOLD` | bigram 相似度阈值 | `0.35` |
+| `RELEVANCE_THRESHOLD` | 会话历史 bigram 相似度阈值 | `0.35` |
+| `MEMORY_SCORE_THRESHOLD` | 长期记忆 ES 向量分数阈值 | `1.2` |
 | `MEM_RETRIEVAL_TOP_K` | ES 检索数量 | `10` |
 | `SESSION_TTL_SECONDS` | 会话过期时间 | `86400` |
 | `ARCHIVED_ROUNDS_MAX` | 最大保留轮次 | `50` |

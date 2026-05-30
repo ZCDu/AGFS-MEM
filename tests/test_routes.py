@@ -132,3 +132,7 @@ def test_health_endpoint(client):
     resp = client.get("/health")
     assert resp.status_code == 200
     assert resp.json() == {"status": "ok"}
+
+
+def test_app_exposes_memory_service_on_state(app):
+    assert app.state.memory_service is not None

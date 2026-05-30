@@ -13,6 +13,7 @@ class Settings(BaseSettings):
 
     # Search
     relevance_threshold: float = Field(default=0.35, ge=0, le=1)
+    memory_score_threshold: float = Field(default=1.2, ge=0, le=2)
     mem_retrieval_top_k: int = Field(default=10, gt=0)
 
     # Redis

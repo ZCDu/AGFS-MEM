@@ -55,8 +55,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         local_storage=local_storage,
     )
 
-    set_memory_service(memory_service)
-
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         # Ensure ES index exists
@@ -67,6 +65,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             await local_storage.close()
 
     app = FastAPI(title="Memory System", version="0.2.0", lifespan=lifespan)
+    app.state.memory_service = memory_service
+    set_memory_service(memory_service)
     app.include_router(router)
     return app
 
