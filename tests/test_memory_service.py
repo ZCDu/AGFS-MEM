@@ -109,6 +109,47 @@ async def test_recall_minimal_request(settings, services):
 
 
 @pytest.mark.asyncio
+async def test_memory_service_accepts_replaceable_modules(settings, services):
+    from memory_system.api.models import MemoryRequest, Message, HistoryMessage
+
+    long_term_memory = AsyncMock()
+    long_term_memory.store_messages.return_value = Usage(total_tokens=7)
+
+    history_builder = AsyncMock()
+    history_builder.build.return_value = (
+        [HistoryMessage(role="user", content="from custom history builder")],
+        [],
+    )
+
+    svc = MemoryService(
+        settings,
+        services["session_mgr"],
+        services["extractor"],
+        services["embedding_client"],
+        services["es_client"],
+        redis_client=services["redis_client"],
+        local_storage=services["local_storage"],
+        long_term_memory=long_term_memory,
+        history_builder=history_builder,
+    )
+    svc._redis_client.get_redis.return_value = AsyncMock()
+
+    request = MemoryRequest(
+        userId="u1",
+        sessionId="s1",
+        input=[Message(role="user", content="hello")],
+    )
+
+    store_resp = await svc.store(request)
+    recall_resp = await svc.recall(request)
+
+    assert store_resp.usage.total_tokens == 7
+    assert recall_resp.history[0].content == "from custom history builder"
+    long_term_memory.store_messages.assert_awaited_once()
+    history_builder.build.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_recall_with_retrieved_memories(settings, services):
     services["es_client"].search_knn.return_value = [
         {

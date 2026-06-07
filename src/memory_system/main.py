@@ -8,6 +8,9 @@ from memory_system.config import Settings
 from memory_system.api.routes import router, set_memory_service
 from memory_system.core.memory_service import MemoryService
 from memory_system.core.extractor import MemoryExtractor
+from memory_system.core.history_builder import HistoryBuilder
+from memory_system.core.local_journal import LocalJournalPipeline
+from memory_system.core.long_term_memory import LongTermMemoryEngine
 from memory_system.core.session_manager import SessionManager
 from memory_system.clients.redis_client import RedisClient
 from memory_system.clients.embedding_client import EmbeddingClient
@@ -45,6 +48,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # Core services
     extractor = MemoryExtractor(llm_client)
     session_manager = SessionManager(settings)
+    long_term_memory = LongTermMemoryEngine(
+        settings,
+        extractor,
+        embedding_client,
+        es_client,
+    )
+    history_builder = HistoryBuilder(settings, session_manager, long_term_memory)
+    local_journal = LocalJournalPipeline(local_storage)
     memory_service = MemoryService(
         settings,
         session_manager,
@@ -53,6 +64,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         es_client,
         redis_client=redis_client,
         local_storage=local_storage,
+        long_term_memory=long_term_memory,
+        history_builder=history_builder,
+        local_journal=local_journal,
     )
 
     @asynccontextmanager

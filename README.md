@@ -10,10 +10,12 @@ Client
   ▼
 MemoryService (编排层)
   ├── SessionManager           ── Redis (会话轮次, bigram 相似度)
-  ├── MemoryExtractor          ── LLM HTTP (事实提取, 更新决策)
-  ├── EmbeddingClient          ── DashScope HTTP (文本 → 向量)
-  ├── ESHttpClient             ── ES HTTP REST (向量检索, CRUD)
-  └── LocalStorage             ── 本地文件 (附件 + 日志)
+  ├── HistoryBuilder           ── 召回历史组装 (会话 + 长期记忆上下文)
+  ├── LongTermMemoryEngine     ── 长期记忆流程 (提取, 检索, ADD/UPDATE/DELETE)
+  │   ├── MemoryExtractor      ── LLM HTTP (事实提取, 更新决策)
+  │   ├── EmbeddingClient      ── DashScope HTTP (文本 → 向量)
+  │   └── ESHttpClient         ── ES HTTP REST (向量检索, CRUD)
+  └── LocalJournalPipeline     ── LocalStorage/MirageStorage (附件 + 日志)
 ```
 
 ## 依赖
@@ -24,11 +26,47 @@ MemoryService (编排层)
 - **Embedding API** — 文本向量化 (1024 维)
 - 无需 `mem0ai`/`elasticsearch-py` 等第三方重量依赖，全部走 HTTP
 
+## 项目结构
+
+```
+.
+├── src/memory_system/
+│   ├── main.py                    # FastAPI 应用创建与依赖装配
+│   ├── config.py                  # 环境变量配置
+│   ├── prompts.py                 # mem0 风格提取/更新提示词
+│   ├── api/
+│   │   ├── models.py              # 请求/响应模型
+│   │   └── routes.py              # HTTP 路由
+│   ├── core/
+│   │   ├── memory_service.py      # store/recall 编排层
+│   │   ├── long_term_memory.py    # 长期记忆提取、检索、写入
+│   │   ├── history_builder.py     # recall history 组装
+│   │   ├── local_journal.py       # 附件和 journal 后台持久化
+│   │   ├── session_manager.py     # Redis 会话轮次管理
+│   │   └── extractor.py           # LLM 事实提取与更新决策
+│   ├── clients/
+│   │   ├── redis_client.py        # Redis 连接
+│   │   ├── es_http_client.py      # Elasticsearch HTTP 客户端
+│   │   ├── embedding_client.py    # Embedding HTTP 客户端
+│   │   └── llm_client.py          # OpenAI-compatible LLM 客户端
+│   ├── storage/
+│   │   ├── local_storage.py       # 本地附件和日志存储
+│   │   └── mirage_storage.py      # Mirage 可选存储后端
+│   └── utils/
+│       └── text_utils.py          # 文本提取与查询辅助
+├── docker/
+│   ├── redis/docker-compose.yml           # 测试用 Redis
+│   └── elasticsearch/docker-compose.yml   # 测试用 Elasticsearch
+├── docs/adr/
+│   └── 0001-modular-memory-pipeline.md    # 模块化架构决策记录
+└── tests/                         # 单元和集成测试
+```
+
 ## API
 
 ### `POST /v1/memory/store`
 
-保存一轮对话到会话，后台异步执行记忆提取和存储。
+保存一轮对话到会话，并执行长期记忆提取和存储；附件和本地 journal 写入在后台执行。
 
 ```json
 {
@@ -75,7 +113,7 @@ MemoryService (编排层)
 
 ## 记忆增加流程 (ADD/UPDATE/DELETE)
 
-`store()` 调用后会在后台异步执行 `_extract_and_store()`，流程如下：
+`store()` 调用会通过 `LongTermMemoryEngine.store_messages()` 执行长期记忆流程，并把 LLM usage 返回给调用方；本地附件和 journal 由 `LocalJournalPipeline` 后台保存。
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
@@ -106,7 +144,7 @@ MemoryService (编排层)
           │ 为每个 fact:   │  │ 对每条旧记忆 +    │
           │ embedding     │  │ 新事实，决定:     │
           │ → ES index    │  │ • ADD → 新文档    │
-          │ doc_id=md5    │  │ • UPDATE → 同 ID  │
+          │ doc_id=sha256 │  │ • UPDATE → 同 ID  │
           └───────────────┘  │   更新 vector+text│
                              │ • DELETE → 删除   │
                              │ • NONE → 跳过     │
@@ -123,7 +161,7 @@ mem0 的提示词（提取 + 更新决策）是公开的，核心逻辑就是 LL
 
 ### 多用户隔离
 
-长期记忆的 ES `_id` 包含 `user_id` 作用域，同一条事实在不同用户之间不会互相覆盖。ES 查询仍会按 `user_id` 过滤，保证召回只发生在当前用户的记忆集合内。
+长期记忆的 ES `_id` 使用 `sha256(user_id + normalized_memory)` 生成，包含 `user_id` 作用域。同一条事实在不同用户之间不会互相覆盖。ES 查询仍会按 `user_id` 过滤，保证召回只发生在当前用户的记忆集合内。
 
 ### 容错策略
 
@@ -134,7 +172,7 @@ mem0 的提示词（提取 + 更新决策）是公开的，核心逻辑就是 LL
 
 ## 会话历史构建
 
-`/recall` 调用 `build_history()` 构建会话上下文：
+`/recall` 通过 `HistoryBuilder` 构建会话上下文：
 
 1. 从 Redis 读取该 session 的所有 rounds
 2. **最后一个 round**（最新）：始终完整保留
@@ -155,6 +193,9 @@ mem0 的提示词（提取 + 更新决策）是公开的，核心逻辑就是 LL
 | 模块 | 文件 | 职责 |
 |------|------|------|
 | `MemoryService` | `core/memory_service.py` | 编排 store/recall 流程 |
+| `LongTermMemoryEngine` | `core/long_term_memory.py` | 长期记忆提取、相似检索、ADD/UPDATE/DELETE 执行 |
+| `HistoryBuilder` | `core/history_builder.py` | 组装 recall history，并注入非指令型长期记忆上下文 |
+| `LocalJournalPipeline` | `core/local_journal.py` | 后台保存附件和本地 journal，可替换存储后端 |
 | `SessionManager` | `core/session_manager.py` | Redis 会话读写 + bigram 相似度筛选 |
 | `MemoryExtractor` | `core/extractor.py` | LLM 事实提取 + ADD/UPDATE/DELETE 决策 |
 | `LLMClient` | `clients/llm_client.py` | OpenAI-compatible HTTP 客户端 |
@@ -196,6 +237,30 @@ mem0 的提示词（提取 + 更新决策）是公开的，核心逻辑就是 LL
 ```bash
 pip install -e ".[dev]"
 python -m pytest tests/ -v
+```
+
+### Docker 测试依赖
+
+项目在 `docker/` 下提供测试用 Redis 和 Elasticsearch Compose 文件，两个依赖独立管理：
+
+```bash
+docker compose -f docker/redis/docker-compose.yml up -d
+docker compose -f docker/elasticsearch/docker-compose.yml up -d
+
+docker compose -f docker/redis/docker-compose.yml ps
+docker compose -f docker/elasticsearch/docker-compose.yml ps
+```
+
+默认端口与 `.env` 对齐：
+
+- Redis: `localhost:6379`，默认密码 `test123`
+- Elasticsearch: `localhost:9200`，用户 `elastic`，密码来自 `.env` 的 `ES_PASSWORD`，未设置时默认 `elastic`
+
+如果本机已有 Redis 占用 `6379`，可以临时换端口：
+
+```bash
+REDIS_PORT=6381 docker compose -f docker/redis/docker-compose.yml up -d
+REDIS_URL=redis://:test123@localhost:6381/0 python -m uvicorn memory_system.main:get_app --factory --host 127.0.0.1 --port 8000
 ```
 
 ### ES 本地环境

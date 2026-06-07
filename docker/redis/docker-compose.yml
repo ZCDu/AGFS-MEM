@@ -1,0 +1,21 @@
+# Local test dependency for Memory System.
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: agfs-mem-test-redis
+    environment:
+      REDIS_PASSWORD: "${REDIS_PASSWORD:-test123}"
+    command: ["redis-server", "--appendonly", "yes", "--requirepass", "${REDIS_PASSWORD:-test123}"]
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    volumes:
+      - redis-test-data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -a \"$${REDIS_PASSWORD:-test123}\" ping | grep PONG"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+volumes:
+  redis-test-data:
