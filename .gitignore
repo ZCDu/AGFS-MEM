@@ -20,3 +20,5 @@ env/
 
 # Environment
 .env
+.env.*
+!.env.example

@@ -102,6 +102,10 @@ class MemoryService:
             usage=Usage(),
         )
 
+    async def retrieve_context(self, context_hash: str) -> dict | None:
+        redis = await self._get_redis()
+        return await self._session.retrieve_context(redis, context_hash)
+
     async def _extract_and_store(self, user_id: str, raw_messages: list[dict]) -> Usage:
         """Backward-compatible wrapper around the long-term memory module."""
         return await self._long_term_memory.store_messages(user_id, raw_messages)

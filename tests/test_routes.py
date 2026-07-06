@@ -86,6 +86,43 @@ def test_recall_endpoint(client):
         assert "history" in data
 
 
+def test_retrieve_context_endpoint(client):
+    with patch(
+        "memory_system.api.routes.get_memory_service"
+    ) as mock_get_svc:
+        mock_svc = AsyncMock()
+        mock_svc.retrieve_context.return_value = {
+            "hash": "abc123",
+            "user_id": "user_123",
+            "session_id": "sess_abc",
+            "round_id": "r1",
+            "messages": [{"role": "assistant", "content": "full answer"}],
+            "query_text": "query",
+            "created_at": "2026-06-07T00:00:00+00:00",
+        }
+        mock_get_svc.return_value = mock_svc
+
+        resp = client.get("/v1/memory/context/abc123")
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["object"] == "memory.context"
+        assert data["messages"][0]["content"] == "full answer"
+
+
+def test_retrieve_context_endpoint_404(client):
+    with patch(
+        "memory_system.api.routes.get_memory_service"
+    ) as mock_get_svc:
+        mock_svc = AsyncMock()
+        mock_svc.retrieve_context.return_value = None
+        mock_get_svc.return_value = mock_svc
+
+        resp = client.get("/v1/memory/context/missing")
+
+        assert resp.status_code == 404
+
+
 def test_missing_user_id(client):
     resp = client.post(
         "/v1/memory/store",

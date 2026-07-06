@@ -109,6 +109,30 @@ async def test_recall_minimal_request(settings, services):
 
 
 @pytest.mark.asyncio
+async def test_retrieve_context_delegates_to_session_manager(settings, services):
+    svc = MemoryService(
+        settings,
+        services["session_mgr"],
+        services["extractor"],
+        services["embedding_client"],
+        services["es_client"],
+        redis_client=services["redis_client"],
+        local_storage=services["local_storage"],
+    )
+    mock_redis = AsyncMock()
+    svc._redis_client.get_redis.return_value = mock_redis
+    services["session_mgr"].retrieve_context.return_value = {
+        "hash": "abc123",
+        "messages": [],
+    }
+
+    result = await svc.retrieve_context("abc123")
+
+    assert result["hash"] == "abc123"
+    services["session_mgr"].retrieve_context.assert_awaited_once_with(mock_redis, "abc123")
+
+
+@pytest.mark.asyncio
 async def test_memory_service_accepts_replaceable_modules(settings, services):
     from memory_system.api.models import MemoryRequest, Message, HistoryMessage
 

@@ -10,6 +10,7 @@ Client
   ▼
 MemoryService (编排层)
   ├── SessionManager           ── Redis (会话轮次, bigram 相似度)
+  │   └── SessionContextCompressor ── 可逆压缩旧轮次回复, hash 取回
   ├── HistoryBuilder           ── 召回历史组装 (会话 + 长期记忆上下文)
   ├── LongTermMemoryEngine     ── 长期记忆流程 (提取, 检索, ADD/UPDATE/DELETE)
   │   ├── MemoryExtractor      ── LLM HTTP (事实提取, 更新决策)
@@ -41,6 +42,7 @@ MemoryService (编排层)
 │   │   ├── memory_service.py      # store/recall 编排层
 │   │   ├── long_term_memory.py    # 长期记忆提取、检索、写入
 │   │   ├── history_builder.py     # recall history 组装
+│   │   ├── session_context.py     # 旧轮次回复可逆压缩和取回
 │   │   ├── local_journal.py       # 附件和 journal 后台持久化
 │   │   ├── session_manager.py     # Redis 会话轮次管理
 │   │   └── extractor.py           # LLM 事实提取与更新决策
@@ -111,6 +113,35 @@ MemoryService (编排层)
 
 健康检查。
 
+### `GET /v1/memory/context/{hash}`
+
+取回被会话历史压缩 marker 省略的原始消息。`/recall` 如果压缩了不相关旧轮次，会返回类似：
+
+```text
+[previous response omitted] Retrieve more: hash=546bc2ee54a844d86420a245]
+```
+
+使用其中的 hash 可取回原始 assistant/tool 消息：
+
+```bash
+curl http://localhost:8000/v1/memory/context/546bc2ee54a844d86420a245
+```
+
+响应：
+
+```json
+{
+  "object": "memory.context",
+  "hash": "546bc2ee54a844d86420a245",
+  "user_id": "user_123",
+  "session_id": "sess_abc",
+  "round_id": "r1",
+  "messages": [
+    {"role": "assistant", "content": "完整的历史回复"}
+  ]
+}
+```
+
 ## 记忆增加流程 (ADD/UPDATE/DELETE)
 
 `store()` 调用会通过 `LongTermMemoryEngine.store_messages()` 执行长期记忆流程，并把 LLM usage 返回给调用方；本地附件和 journal 由 `LocalJournalPipeline` 后台保存。
@@ -172,17 +203,22 @@ mem0 的提示词（提取 + 更新决策）是公开的，核心逻辑就是 LL
 
 ## 会话历史构建
 
-`/recall` 通过 `HistoryBuilder` 构建会话上下文：
+`/recall` 通过 `HistoryBuilder` 构建会话上下文。旧轮次压缩策略可通过 `HISTORY_COMPRESSION_STRATEGY` 替换：
+
+- `reversible`：默认策略，借鉴 Headroom 的 CCR (Compress-Cache-Retrieve) 思路。上下文里放短 marker，原文存在 Redis，必要时按 hash 取回。
+- `omit`：原始策略，只返回不可逆的 `[previous response omitted]` 占位，不保存可取回原文。
 
 1. 从 Redis 读取该 session 的所有 rounds
 2. **最后一个 round**（最新）：始终完整保留
 3. **历史 rounds**：用**bigram 重叠系数**与当前查询做相似度计算
    - `overlap = |bigrams(query) ∩ bigrams(round_first_q)| / min(|bigrams(query)|, |bigrams(round_first_q)|)`
    - `>= relevance_threshold` → 相关，完整展示全轮
-   - `< relevance_threshold` → 不相关，仅保留首条用户问题 + `[previous response omitted]` 占位
+   - `< relevance_threshold` → 不相关，仅保留首条用户问题 + 策略生成的压缩占位
 4. 长期记忆使用独立的 `MEMORY_SCORE_THRESHOLD` 过滤，不与会话 bigram 阈值混用
 5. 召回的长期记忆会作为“非指令型参考上下文”注入，避免把用户可写记忆提升成高优先级系统指令
 6. 不使用 embedding 压缩会话历史 —— bigram 比较速度远快于向量化，且中文/英文均适用
+
+`reversible` 策略下，被压缩的旧回复保存在 Redis key `memory:ctx:{hash}`，默认 TTL 为 `CONTEXT_COMPRESSION_TTL_SECONDS=86400`。这个设计比不可逆省略更安全：模型看到的是短上下文，但系统仍保留按需恢复原文的能力。
 
 ### 为什么用重叠系数而不是标准 Jaccard？
 
@@ -195,6 +231,9 @@ mem0 的提示词（提取 + 更新决策）是公开的，核心逻辑就是 LL
 | `MemoryService` | `core/memory_service.py` | 编排 store/recall 流程 |
 | `LongTermMemoryEngine` | `core/long_term_memory.py` | 长期记忆提取、相似检索、ADD/UPDATE/DELETE 执行 |
 | `HistoryBuilder` | `core/history_builder.py` | 组装 recall history，并注入非指令型长期记忆上下文 |
+| `SessionContextStrategy` | `core/session_context.py` | 旧轮次回复压缩策略接口，支持 `omit` / `reversible` 替换 |
+| `ReversibleSessionContextStrategy` | `core/session_context.py` | 生成 hash marker，将原文缓存到 Redis 并支持取回 |
+| `OmitSessionContextStrategy` | `core/session_context.py` | 原始不可逆省略策略，只返回占位符 |
 | `LocalJournalPipeline` | `core/local_journal.py` | 后台保存附件和本地 journal，可替换存储后端 |
 | `SessionManager` | `core/session_manager.py` | Redis 会话读写 + bigram 相似度筛选 |
 | `MemoryExtractor` | `core/extractor.py` | LLM 事实提取 + ADD/UPDATE/DELETE 决策 |
@@ -212,9 +251,10 @@ mem0 的提示词（提取 + 更新决策）是公开的，核心逻辑就是 LL
 | 变量 | 说明 | 默认值 |
 |------|------|--------|
 | `REDIS_URL` | Redis 连接 | `redis://localhost:6379/0` |
+| `LLM_PROVIDER` | LLM Provider (`openai-compatible` / `deepseek`) | `openai-compatible` |
 | `LLM_API_URL` | LLM API 地址 | — |
 | `LLM_API_KEY` | LLM API 密钥 | — |
-| `LLM_MODEL` | LLM 模型名 | `qwen-plus` |
+| `LLM_MODEL` | LLM 模型名；为空时由 provider 决定 | — |
 | `EMBEDDING_API_URL` | Embedding API 地址 | — |
 | `EMBEDDING_API_KEY` | Embedding API 密钥 | — |
 | `EMBEDDING_DIM` | 向量维度 | `1024` |
@@ -230,7 +270,67 @@ mem0 的提示词（提取 + 更新决策）是公开的，核心逻辑就是 LL
 | `MEM_RETRIEVAL_TOP_K` | ES 检索数量 | `10` |
 | `SESSION_TTL_SECONDS` | 会话过期时间 | `86400` |
 | `ARCHIVED_ROUNDS_MAX` | 最大保留轮次 | `50` |
+| `HISTORY_COMPRESSION_STRATEGY` | 旧轮次压缩策略 (`reversible` / `omit`) | `reversible` |
+| `CONTEXT_COMPRESSION_TTL_SECONDS` | 可逆压缩上下文取回 TTL | `86400` |
 | `STORAGE_BASE_PATH` | 本地存储路径 | `~/memory_system_data` |
+
+### LLM Provider
+
+模型调用通过 `LLMClient` 门面抽象，业务层 `MemoryExtractor` 只依赖结构化 JSON 生成接口。当前支持：
+
+- `openai-compatible`：默认，适配 OpenAI-compatible `/chat/completions` 服务；未设置 `LLM_MODEL` 时默认 `qwen-plus`。
+- `deepseek`：适配 DeepSeek OpenAI-compatible API；未设置 `LLM_API_URL` 时默认 `https://api.deepseek.com`，未设置 `LLM_MODEL` 时默认 `deepseek-chat`。
+
+OpenAI-compatible 示例：
+
+```env
+LLM_PROVIDER=openai-compatible
+LLM_API_URL=http://localhost:8081/v1
+LLM_API_KEY=sk-local
+LLM_MODEL=qwen-plus
+```
+
+DeepSeek 示例：
+
+```env
+LLM_PROVIDER=deepseek
+LLM_API_KEY=sk-your-deepseek-key
+# LLM_API_URL=https://api.deepseek.com
+# LLM_MODEL=deepseek-chat
+```
+
+DeepSeek 的 `/chat/completions` 接口兼容 OpenAI 格式，本项目会继续使用 `response_format={"type":"json_object"}` 来要求模型返回 JSON。
+
+### 多环境配置
+
+真实环境文件不会提交到 git：`.gitignore` 会忽略 `.env` 和 `.env.*`，只保留可提交的 `.env.example`。
+
+推荐按环境拆分：
+
+```bash
+.env              # 默认本地配置，可选
+.env.local        # 本地开发
+.env.test         # 测试依赖
+.env.prod         # 生产配置
+.env.example      # 示例配置，可提交
+```
+
+切换方式有两种：
+
+```bash
+# 读取 .env，然后读取 .env.test 覆盖同名配置
+MEMORY_ENV=test python -m uvicorn memory_system.main:get_app --factory --host 127.0.0.1 --port 8000
+
+# 只读取指定文件
+MEMORY_ENV_FILE=.env.local python -m uvicorn memory_system.main:get_app --factory --host 127.0.0.1 --port 8000
+```
+
+优先级规则：
+
+1. 系统环境变量优先级最高。
+2. `MEMORY_ENV_FILE` 指定时，只读取该文件。
+3. `MEMORY_ENV=test` 时，先读 `.env`，再读 `.env.test`，后者覆盖前者。
+4. 未设置时默认读取 `.env`。
 
 ## 开发
 

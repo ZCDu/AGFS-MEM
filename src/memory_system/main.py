@@ -25,6 +25,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     # HTTP clients
     llm_client = LLMClient(
+        provider=settings.llm_provider,
         base_url=settings.llm_api_url,
         api_key=settings.llm_api_key.get_secret_value(),
         model=settings.llm_model,
