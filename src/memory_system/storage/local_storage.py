@@ -22,7 +22,10 @@ class LocalStorage:
         self._base = Path(base_path).expanduser().resolve()
 
     def _user_dir(self, user_id: str) -> Path:
-        return self._base / user_id
+        user_dir = (self._base / user_id).resolve()
+        if not user_dir.is_relative_to(self._base):
+            raise ValueError("user_id resolves outside storage base path")
+        return user_dir
 
     def _ensure_dirs(self, user_id: str):
         root = self._user_dir(user_id)

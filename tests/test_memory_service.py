@@ -109,6 +109,71 @@ async def test_recall_minimal_request(settings, services):
 
 
 @pytest.mark.asyncio
+async def test_retrieve_context_delegates_to_session_manager(settings, services):
+    svc = MemoryService(
+        settings,
+        services["session_mgr"],
+        services["extractor"],
+        services["embedding_client"],
+        services["es_client"],
+        redis_client=services["redis_client"],
+        local_storage=services["local_storage"],
+    )
+    mock_redis = AsyncMock()
+    svc._redis_client.get_redis.return_value = mock_redis
+    services["session_mgr"].retrieve_context.return_value = {
+        "hash": "abc123",
+        "messages": [],
+    }
+
+    result = await svc.retrieve_context("abc123")
+
+    assert result["hash"] == "abc123"
+    services["session_mgr"].retrieve_context.assert_awaited_once_with(mock_redis, "abc123")
+
+
+@pytest.mark.asyncio
+async def test_memory_service_accepts_replaceable_modules(settings, services):
+    from memory_system.api.models import MemoryRequest, Message, HistoryMessage
+
+    long_term_memory = AsyncMock()
+    long_term_memory.store_messages.return_value = Usage(total_tokens=7)
+
+    history_builder = AsyncMock()
+    history_builder.build.return_value = (
+        [HistoryMessage(role="user", content="from custom history builder")],
+        [],
+    )
+
+    svc = MemoryService(
+        settings,
+        services["session_mgr"],
+        services["extractor"],
+        services["embedding_client"],
+        services["es_client"],
+        redis_client=services["redis_client"],
+        local_storage=services["local_storage"],
+        long_term_memory=long_term_memory,
+        history_builder=history_builder,
+    )
+    svc._redis_client.get_redis.return_value = AsyncMock()
+
+    request = MemoryRequest(
+        userId="u1",
+        sessionId="s1",
+        input=[Message(role="user", content="hello")],
+    )
+
+    store_resp = await svc.store(request)
+    recall_resp = await svc.recall(request)
+
+    assert store_resp.usage.total_tokens == 7
+    assert recall_resp.history[0].content == "from custom history builder"
+    long_term_memory.store_messages.assert_awaited_once()
+    history_builder.build.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_recall_with_retrieved_memories(settings, services):
     services["es_client"].search_knn.return_value = [
         {
@@ -148,6 +213,47 @@ async def test_recall_with_retrieved_memories(settings, services):
 
     assert len(resp.retrieved_memories) == 1
     assert resp.retrieved_memories[0].memory == "user likes Python"
+    assert resp.history[0].role == "system"
+    assert "Untrusted retrieved user memories" in resp.history[0].content
+    assert "user likes Python" in resp.history[0].content
+
+
+@pytest.mark.asyncio
+async def test_recall_filters_long_term_memory_with_dedicated_score_threshold(settings, services):
+    settings.memory_score_threshold = 1.1
+    services["es_client"].search_knn.return_value = [
+        {
+            "id": "mem_1",
+            "memory": "weakly related memory",
+            "score": 0.95,
+            "user_id": "u1",
+            "created_at": "2026-05-01T10:00:00Z",
+        }
+    ]
+
+    svc = MemoryService(
+        settings,
+        services["session_mgr"],
+        services["extractor"],
+        services["embedding_client"],
+        services["es_client"],
+        redis_client=services["redis_client"],
+        local_storage=services["local_storage"],
+    )
+    svc._redis_client.get_redis.return_value = AsyncMock()
+
+    from memory_system.api.models import MemoryRequest, Message
+
+    resp = await svc.recall(
+        MemoryRequest(
+            userId="u1",
+            sessionId="s1",
+            input=[Message(role="user", content="what do I like?")],
+        )
+    )
+
+    assert resp.retrieved_memories == []
+    assert all("weakly related memory" not in m.content for m in resp.history)
 
 
 @pytest.mark.asyncio
@@ -175,6 +281,32 @@ async def test_extract_and_store_adds_new_facts(settings, services):
     ])
 
     assert services["es_client"].index_document.call_count == 2
+
+
+@pytest.mark.asyncio
+async def test_extract_and_store_scopes_generated_doc_ids_by_user(settings, services):
+    """Same fact for different users should not overwrite the same ES document."""
+    services["extractor"].extract.return_value = (
+        ["Likes Python"],
+        Usage(input_tokens=10, output_tokens=5, total_tokens=15),
+    )
+    services["es_client"].search_knn.return_value = []
+
+    svc = MemoryService(
+        settings,
+        services["session_mgr"],
+        services["extractor"],
+        services["embedding_client"],
+        services["es_client"],
+        redis_client=services["redis_client"],
+        local_storage=services["local_storage"],
+    )
+
+    await svc._extract_and_store("u1", [{"role": "user", "content": "I like Python"}])
+    await svc._extract_and_store("u2", [{"role": "user", "content": "I like Python"}])
+
+    calls = services["es_client"].index_document.call_args_list
+    assert calls[0].kwargs["doc_id"] != calls[1].kwargs["doc_id"]
 
 
 @pytest.mark.asyncio

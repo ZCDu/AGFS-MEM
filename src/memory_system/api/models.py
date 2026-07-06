@@ -28,8 +28,8 @@ class MemorySettings(BaseModel):
 
 class MemoryRequest(BaseModel):
     model: str = "memory-v1"
-    userId: str = Field(min_length=1)
-    sessionId: str = Field(min_length=1)
+    userId: str = Field(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9][A-Za-z0-9_.:-]*$")
+    sessionId: str = Field(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9][A-Za-z0-9_.:-]*$")
     reasoning: dict | None = None
     memory_settings: MemorySettings | None = None
     input: list[Message] = Field(min_length=1)
@@ -86,3 +86,16 @@ class MemoryRecallResponse(BaseModel):
     history: list[HistoryMessage] = []
     retrieved_memories: list[RetrievedMemory] = []
     usage: Usage = Field(default_factory=Usage)
+
+
+class ContextRetrieveResponse(BaseModel):
+    """Response for reversible session context retrieval."""
+    id: str = Field(default_factory=lambda: f"ctx_{uuid.uuid4().hex[:12]}")
+    object: Literal["memory.context"] = "memory.context"
+    hash: str
+    user_id: str
+    session_id: str
+    round_id: str
+    messages: list[HistoryMessage]
+    query_text: str = ""
+    created_at: str = ""

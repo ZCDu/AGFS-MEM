@@ -1,13 +1,23 @@
+import asyncio
 import json
 import uuid
 from datetime import datetime, timezone
 from memory_system.config import Settings
+from memory_system.core.session_context import (
+    SessionContextStrategy,
+    create_session_context_strategy,
+)
 from memory_system.utils.text_utils import extract_text
 
 
 class SessionManager:
-    def __init__(self, settings: Settings):
+    def __init__(
+        self,
+        settings: Settings,
+        context_strategy: SessionContextStrategy | None = None,
+    ):
         self._settings = settings
+        self._context_strategy = context_strategy or create_session_context_strategy(settings)
 
     def _key(self, user_id: str, session_id: str) -> str:
         return f"memory:sess:{user_id}:{session_id}"
@@ -24,6 +34,19 @@ class SessionManager:
         self, redis, user_id: str, session_id: str, messages: list[dict]
     ):
         """Store messages as one round. No embedding — uses text similarity instead."""
+        key = self._key(user_id, session_id)
+        lock_key = f"{key}:lock"
+        token = uuid.uuid4().hex
+
+        await self._acquire_lock(redis, lock_key, token)
+        try:
+            await self._add_round_unlocked(redis, user_id, session_id, messages)
+        finally:
+            await self._release_lock(redis, lock_key, token)
+
+    async def _add_round_unlocked(
+        self, redis, user_id: str, session_id: str, messages: list[dict]
+    ):
         key = self._key(user_id, session_id)
         session = await self.get_session(redis, user_id, session_id)
         now = datetime.now(timezone.utc).isoformat()
@@ -54,6 +77,25 @@ class SessionManager:
             },
         )
         await redis.expire(key, self._settings.session_ttl_seconds)
+
+    @staticmethod
+    async def _acquire_lock(redis, lock_key: str, token: str):
+        for _ in range(20):
+            acquired = await redis.set(lock_key, token, nx=True, ex=5)
+            if acquired:
+                return
+            await asyncio.sleep(0.05)
+        raise TimeoutError(f"Could not acquire session lock: {lock_key}")
+
+    @staticmethod
+    async def _release_lock(redis, lock_key: str, token: str):
+        script = """
+        if redis.call("get", KEYS[1]) == ARGV[1] then
+            return redis.call("del", KEYS[1])
+        end
+        return 0
+        """
+        await redis.eval(script, 1, lock_key, token)
 
     async def build_history(
         self,
@@ -109,11 +151,19 @@ class SessionManager:
                 if len(q_text) > 200:
                     q_text = q_text[:200] + "..."
                 history_str_parts.append(f"{q_msg['role']}: {q_text}")
-                history_str_parts.append("assistant: [previous response omitted]")
                 history_messages.append(q_msg)
-                history_messages.append(
-                    {"role": "assistant", "content": "[previous response omitted]"}
+                omitted_messages = entry["messages"][1:]
+                marker_msg = await self._context_strategy.compress_round(
+                    redis,
+                    user_id=user_id,
+                    session_id=session_id,
+                    round_entry=entry,
+                    kept_message=q_msg,
+                    omitted_messages=omitted_messages,
+                    query_text=query_text,
                 )
+                history_str_parts.append(f"assistant: {marker_msg['content']}")
+                history_messages.append(marker_msg)
 
         # Recent rounds: always full, no bigram filtering
         for entry in recent_rounds:
@@ -127,6 +177,9 @@ class SessionManager:
             "history_messages": history_messages,
             "history_str": "\n".join(history_str_parts),
         }
+
+    async def retrieve_context(self, redis, context_hash: str) -> dict | None:
+        return await self._context_strategy.retrieve(redis, context_hash)
 
     @staticmethod
     def _bigrams(text: str) -> set[str]:

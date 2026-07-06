@@ -1,6 +1,13 @@
 import json
+import re
 import pytest
 from unittest.mock import AsyncMock
+from memory_system.config import Settings
+from memory_system.core.session_context import (
+    OmitSessionContextStrategy,
+    ReversibleSessionContextStrategy,
+    create_session_context_strategy,
+)
 from memory_system.core.session_manager import SessionManager
 
 
@@ -12,6 +19,20 @@ def redis_mock():
 @pytest.fixture
 def session_mgr(settings):
     return SessionManager(settings)
+
+
+def test_create_session_context_strategy(settings):
+    settings.history_compression_strategy = "omit"
+    assert isinstance(create_session_context_strategy(settings), OmitSessionContextStrategy)
+
+    settings.history_compression_strategy = "reversible"
+    assert isinstance(create_session_context_strategy(settings), ReversibleSessionContextStrategy)
+
+
+def test_create_session_context_strategy_rejects_unknown(settings):
+    settings.history_compression_strategy = "unknown"
+    with pytest.raises(ValueError):
+        create_session_context_strategy(settings)
 
 
 @pytest.mark.asyncio
@@ -37,6 +58,7 @@ async def test_get_session_existing(session_mgr, redis_mock):
 async def test_add_round_single_block(session_mgr, redis_mock):
     """All input messages stored as one block. No embedding calls."""
     redis_mock.hgetall.return_value = {"rounds": "[]"}
+    redis_mock.set.return_value = True
 
     new_msgs = [
         {"role": "user", "content": "q1"},
@@ -56,6 +78,10 @@ async def test_add_round_single_block(session_mgr, redis_mock):
     assert rounds[0]["messages"][0]["content"] == "q1"
     assert rounds[0]["messages"][3]["content"] == "a2"
     assert rounds[0]["first_user_text"] == "q1"
+    redis_mock.set.assert_awaited_once()
+    lock_kwargs = redis_mock.set.await_args.kwargs
+    assert lock_kwargs["nx"] is True
+    assert lock_kwargs["ex"] > 0
 
 
 @pytest.mark.asyncio
@@ -178,8 +204,74 @@ async def test_build_history_irrelevant_archived(session_mgr, redis_mock):
 
     assert "unrelated question about weather" in result["history_str"]
     assert "[previous response omitted]" in result["history_str"]
+    assert re.search(r"hash=[a-f0-9]{24}", result["history_str"])
     assert "unrelated answer" not in result["history_str"]
     assert "recent a" in result["history_str"]
+
+    hset_calls = redis_mock.hset.await_args_list
+    context_call = hset_calls[-1]
+    assert context_call.args[0].startswith("memory:ctx:")
+    stored = context_call.kwargs["mapping"]
+    omitted_messages = json.loads(stored["omitted_messages"])
+    assert omitted_messages[0]["content"] == "unrelated answer about weather"
+
+
+@pytest.mark.asyncio
+async def test_build_history_irrelevant_archived_with_omit_strategy(settings, redis_mock):
+    """Original strategy: Q kept, A replaced with irreversible placeholder."""
+    mgr = SessionManager(settings, context_strategy=OmitSessionContextStrategy())
+    rounds = [
+        {
+            "round_id": "r1",
+            "messages": [
+                {"role": "user", "content": "unrelated question about weather"},
+                {"role": "assistant", "content": "unrelated answer about weather"},
+            ],
+            "first_user_text": "unrelated question about weather",
+        },
+        {
+            "round_id": "r2",
+            "messages": [
+                {"role": "user", "content": "recent q"},
+                {"role": "assistant", "content": "recent a"},
+            ],
+            "first_user_text": "recent q",
+        },
+    ]
+    redis_mock.hgetall.return_value = {"rounds": json.dumps(rounds)}
+
+    result = await mgr.build_history(
+        redis_mock,
+        "u1",
+        "s1",
+        "python programming code",
+        recent_rounds_full=1,
+    )
+
+    assert "[previous response omitted]" in result["history_str"]
+    assert "hash=" not in result["history_str"]
+    assert "unrelated answer" not in result["history_str"]
+    assert redis_mock.hset.await_count == 0
+
+
+@pytest.mark.asyncio
+async def test_retrieve_compressed_context(session_mgr, redis_mock):
+    redis_mock.hgetall.return_value = {
+        "hash": "abc123",
+        "user_id": "u1",
+        "session_id": "s1",
+        "round_id": "r1",
+        "omitted_messages": json.dumps([
+            {"role": "assistant", "content": "full old answer"},
+        ]),
+        "query_text": "current query",
+        "created_at": "2026-06-07T00:00:00+00:00",
+    }
+
+    result = await session_mgr.retrieve_context(redis_mock, "abc123")
+
+    assert result["hash"] == "abc123"
+    assert result["messages"][0]["content"] == "full old answer"
 
 
 @pytest.mark.asyncio
@@ -255,6 +347,7 @@ async def test_build_history_recent_rounds_full(session_mgr, redis_mock):
     assert "recent python answer" in result["history_str"]
     assert "latest a" in result["history_str"]
     assert "[previous response omitted]" in result["history_str"]
+    assert re.search(r"hash=[a-f0-9]{24}", result["history_str"])
 
     # r1+r2 Q-only = 2 user msgs, r2 irrelevant = 2 placeholders
     # = 4 msgs for old. r3,r4,r5 = 6 msgs → total 10

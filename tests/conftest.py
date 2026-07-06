@@ -14,5 +14,6 @@ def settings():
         session_ttl_seconds=86400,
         archived_rounds_max=10,
         relevance_threshold=0.7,
+        memory_score_threshold=0.7,
         mem_retrieval_top_k=5,
     )
