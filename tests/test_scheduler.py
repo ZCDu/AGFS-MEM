@@ -27,6 +27,33 @@ def test_scheduler_ignores_interrupted_conversations() -> None:
     assert scheduler.pending_event_ids() == ("evt-completed",)
 
 
+def test_scheduler_pops_only_the_requested_scope() -> None:
+    scheduler = DreamScheduler(review_threshold=10)
+    alice = _event("evt-alice")
+    bob = TaskCompletedEvent(
+        **{
+            **alice.__dict__,
+            "event_id": "evt-bob",
+            "scope": ScopeIds("acme", "assistant", "bob"),
+        }
+    )
+    scheduler.enqueue(alice)
+    scheduler.enqueue(bob)
+
+    assert scheduler.pop_pending(bob.scope) == bob
+    assert scheduler.pending_event_ids() == ("evt-alice",)
+
+
+def test_scheduler_does_not_enqueue_the_same_pending_event_twice() -> None:
+    scheduler = DreamScheduler(review_threshold=10)
+    completed = _event("evt-completed")
+
+    scheduler.enqueue_unless_pending(completed)
+    scheduler.enqueue_unless_pending(completed)
+
+    assert scheduler.pending_event_ids() == ("evt-completed",)
+
+
 def test_curator_registry_runs_only_due_curators() -> None:
     class RecordingCurator:
         name = "recording"

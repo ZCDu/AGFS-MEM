@@ -17,6 +17,7 @@ from dream.reports import DreamReportStore
 from dream.review.backend import DeterministicReviewBackend, ReviewBackend
 from dream.review.models import ArtifactKind
 from dream.review.orchestrator import BackgroundReviewOrchestrator
+from dream.review.progress import ReviewProgressStore
 from dream.rollback import RollbackService
 from dream.scheduler import DreamScheduler
 from dream.scope import ScopeIds, resolve_scope
@@ -36,11 +37,20 @@ class DreamService:
     ) -> None:
         self.home = home
         self.ledger = EventLedger(home / "ledger" / "events.jsonl")
+        self.review_progress = ReviewProgressStore(
+            home / "ledger" / "reviewed-events.jsonl"
+        )
         self.scheduler = DreamScheduler(review_threshold=review_threshold)
         self.reviewer = BackgroundReviewOrchestrator(
             backend or DeterministicReviewBackend()
         )
         self.semantic_curator_backend = semantic_curator_backend
+        self.recover_pending()
+
+    def recover_pending(self) -> None:
+        for event in self.ledger.read_all():
+            if not self.review_progress.contains(event.event_id):
+                self.scheduler.enqueue_unless_pending(event)
 
     def ingest_conversation(self, event: TaskCompletedEvent) -> None:
         resolve_scope(self.home, event.scope)
@@ -76,9 +86,10 @@ class DreamService:
             "decision_cards": cards,
         }
 
-    def run_pending(self) -> list[dict[str, object]]:
+    def run_pending(self, ids: ScopeIds | None = None) -> list[dict[str, object]]:
+        self.recover_pending()
         runs: list[dict[str, object]] = []
-        while event := self.scheduler.pop_pending():
+        while event := self.scheduler.pop_pending(ids):
             paths = resolve_scope(self.home, event.scope)
             snapshot = SnapshotStore(
                 paths, AtomicArtifactStore(paths.agent_root)
@@ -106,9 +117,15 @@ class DreamService:
                     applied_kinds.append(action.kind.value)
                 except Exception as exc:
                     errors.append(f"{action.kind.value}: {type(exc).__name__}: {exc}")
-            self.scheduler.mark_review_accepted(event.scope)
+            if result.error:
+                errors.append(result.error)
             run_id = f"review-{uuid4().hex}"
-            status = "success" if not errors else "partial"
+            if result.status == "failed":
+                status = "failed"
+            elif errors or result.status == "partial":
+                status = "partial"
+            else:
+                status = "success"
             DreamReportStore(paths).write(
                 {
                     "run_id": run_id,
@@ -121,9 +138,13 @@ class DreamService:
                     "review_summary": result.summary,
                 }
             )
+            if status == "success":
+                self.review_progress.append(event.event_id)
+                self.scheduler.mark_review_accepted(event.scope)
             runs.append(
                 {
                     "run_id": run_id,
+                    "source_event_ids": [event.event_id],
                     "status": status,
                     "artifact_kinds": applied_kinds,
                     "errors": errors,
