@@ -21,6 +21,7 @@ from dream.rollback import RollbackService
 from dream.scheduler import DreamScheduler
 from dream.scope import ScopeIds, resolve_scope
 from dream.snapshots import SnapshotStore
+from dream.sources.manual import manual_record_to_event, parse_manual_ndjson
 
 
 class DreamService:
@@ -45,6 +46,18 @@ class DreamService:
         resolve_scope(self.home, event.scope)
         self.ledger.append(event)
         self.scheduler.enqueue(event)
+
+    def import_manual_ndjson(self, text: str) -> dict[str, int]:
+        imported = 0
+        duplicates = 0
+        for record in parse_manual_ndjson(text):
+            event = manual_record_to_event(record)
+            if self.ledger.contains(event.event_id):
+                duplicates += 1
+                continue
+            self.ingest_conversation(event)
+            imported += 1
+        return {"imported": imported, "duplicates": duplicates}
 
     def start_context(self, ids: ScopeIds) -> dict[str, object]:
         paths = resolve_scope(self.home, ids)

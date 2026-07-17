@@ -8,7 +8,7 @@ import os
 from pathlib import Path
 from typing import Callable
 
-from fastapi import FastAPI, HTTPException, Response, status
+from fastapi import FastAPI, HTTPException, Request, Response, status
 import httpx
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -18,6 +18,7 @@ from dream.scope import ScopeIds
 from dream.service import DreamService
 from dream.source_sync import InternshipSourceSync
 from dream.sources.internship import InternshipSourceClient
+from dream.sources.manual import ManualSourceError
 
 
 class ScopeRequest(BaseModel):
@@ -163,6 +164,17 @@ def create_app(
         except ValueError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         return {"event_id": payload.event_id, "status": "queued"}
+
+    @application.post("/v1/validation/import")
+    async def import_manual_ndjson(request: Request) -> dict[str, int]:
+        try:
+            text = (await request.body()).decode("utf-8")
+            return service.import_manual_ndjson(text)
+        except (ManualSourceError, UnicodeDecodeError) as exc:
+            raise HTTPException(
+                status_code=422,
+                detail="invalid manual completed-task NDJSON",
+            ) from exc
 
     @application.post("/v1/dream/run-pending")
     def run_pending() -> dict[str, object]:
