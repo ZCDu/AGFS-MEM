@@ -8,6 +8,11 @@ from typing import Callable
 from dream.curators.llm_backend import OpenAICuratorBackend, SemanticCuratorBackend
 from dream.review.backend import DeterministicReviewBackend, ReviewBackend
 from dream.review.llm_backend import OpenAIReviewBackend
+from dream.writeback import (
+    DeterministicWritebackBackend,
+    OpenAIWritebackBackend,
+    WritebackBackend,
+)
 
 
 @dataclass(frozen=True)
@@ -36,6 +41,8 @@ class DreamSettings:
     curator_base_url: str | None = None
     curator_api_key: str = ""
     curator_max_completion_tokens: int = 3000
+    character_definition_limit: int = 3200
+    user_persona_limit: int = 1200
     internship_source: InternshipSourceSettings = field(
         default_factory=InternshipSourceSettings
     )
@@ -163,6 +170,14 @@ def load_settings(path: Path | None = None) -> DreamSettings:
             value("DREAM_CURATOR_MAX_COMPLETION_TOKENS", "3000"),
             "DREAM_CURATOR_MAX_COMPLETION_TOKENS",
         ),
+        character_definition_limit=_positive_int(
+            value("DREAM_CHARACTER_DEFINITION_LIMIT", "3200"),
+            "DREAM_CHARACTER_DEFINITION_LIMIT",
+        ),
+        user_persona_limit=_positive_int(
+            value("DREAM_USER_PERSONA_LIMIT", "1200"),
+            "DREAM_USER_PERSONA_LIMIT",
+        ),
         internship_source=source,
     )
 
@@ -231,4 +246,32 @@ def build_curator_backend(
         model=model,
         max_completion_tokens=settings.curator_max_completion_tokens,
         structured_mode=settings.llm_structured_mode,
+    )
+
+
+def build_writeback_backend(
+    settings: DreamSettings,
+    *,
+    client_factory: Callable[..., object] | None = None,
+) -> WritebackBackend:
+    if settings.review_backend == "deterministic":
+        return DeterministicWritebackBackend()
+    if not settings.review_model or not settings.review_api_key:
+        raise ValueError("writeback requires DREAM_REVIEW_MODEL and DREAM_LLM_API_KEY")
+    if client_factory is None:
+        from openai import OpenAI
+
+        client_factory = OpenAI
+    client_kwargs: dict[str, object] = {
+        "api_key": settings.review_api_key,
+        "max_retries": 0,
+    }
+    if settings.review_base_url:
+        client_kwargs["base_url"] = settings.review_base_url
+    client = client_factory(**client_kwargs)
+    return OpenAIWritebackBackend(
+        client=client,
+        model=settings.review_model,
+        structured_mode=settings.llm_structured_mode,
+        max_completion_tokens=settings.curator_max_completion_tokens,
     )

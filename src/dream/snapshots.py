@@ -33,8 +33,10 @@ class SnapshotStore:
         fixed = [
             Path("SOUL.md"),
             Path("DECISION_RULES.md"),
+            Path("CHARACTER_DEFINITION.md"),
             Path("MEMORY.md"),
             Path("users") / ids.user_id / "USER.md",
+            Path("users") / ids.user_id / "USER_PERSONA.md",
             Path("users") / ids.user_id / "MEMORY.md",
             Path("users") / ids.user_id / "TODOS.md",
         ]
@@ -92,3 +94,32 @@ class SnapshotStore:
             json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
         )
         return snapshot
+
+    def restore(self, snapshot_id: str, ids: ScopeIds) -> None:
+        raw = self.artifacts.read_text(
+            Path("snapshots") / snapshot_id / "context.json"
+        )
+        if not raw:
+            raise FileNotFoundError(f"context snapshot not found: {snapshot_id}")
+        payload = json.loads(raw)
+        scope = payload.get("scope", {})
+        expected = {
+            "tenant_id": ids.tenant_id,
+            "agent_id": ids.agent_id,
+            "user_id": ids.user_id,
+        }
+        if scope != expected or payload.get("snapshot_id") != snapshot_id:
+            raise ValueError("context snapshot identity mismatch")
+        files = payload["files"]
+        captured_cards = {
+            key
+            for key in files
+            if key.startswith("decision-cards/") and key.endswith(".md")
+        }
+        if self.paths.decision_cards_dir.exists():
+            for card in self.paths.decision_cards_dir.glob("*.md"):
+                relative = card.relative_to(self.paths.agent_root).as_posix()
+                if relative not in captured_cards:
+                    card.unlink()
+        for key, value in files.items():
+            self.artifacts.write_text(Path(key), str(value["content"]))

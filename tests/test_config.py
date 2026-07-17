@@ -6,12 +6,14 @@ from dream.config import (
     DreamSettings,
     build_curator_backend,
     build_review_backend,
+    build_writeback_backend,
     load_settings,
 )
 from dream.api import create_app
 from dream.curators.llm_backend import OpenAICuratorBackend
 from dream.review.backend import DeterministicReviewBackend
 from dream.review.llm_backend import OpenAIReviewBackend
+from dream.writeback import OpenAIWritebackBackend
 
 
 def test_missing_env_file_uses_safe_deterministic_backend(tmp_path: Path) -> None:
@@ -151,3 +153,23 @@ def test_structured_llm_mode_is_loaded_and_passed_to_backends(tmp_path: Path) ->
     assert review.structured_mode == "json"
     assert curator is not None
     assert curator.structured_mode == "json"
+
+
+def test_writeback_limits_and_inherited_backend_are_configured(tmp_path: Path) -> None:
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "DREAM_REVIEW_BACKEND=openai\n"
+        "DREAM_REVIEW_MODEL=agnes-model\n"
+        "DREAM_LLM_API_KEY=secret-key\n"
+        "DREAM_CHARACTER_DEFINITION_LIMIT=2500\n"
+        "DREAM_USER_PERSONA_LIMIT=900\n",
+        encoding="utf-8",
+    )
+    settings = load_settings(env_file)
+    backend = build_writeback_backend(
+        settings, client_factory=lambda **_: object()
+    )
+
+    assert settings.character_definition_limit == 2500
+    assert settings.user_persona_limit == 900
+    assert isinstance(backend, OpenAIWritebackBackend)
