@@ -30,3 +30,6 @@ env/
 .env
 .env.*
 !.env.example
+
+# Locally selected public-dataset rows for AI initialization.
+tests/fixtures/ai_seed/selected.local.jsonl

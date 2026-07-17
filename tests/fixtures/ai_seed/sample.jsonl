@@ -1,0 +1,2 @@
+{"source_dataset":"synthetic-helpfulness","source_record_id":"helpful-001","scenario":"A teammate asks for a concise explanation of a deployment risk.","assistant_response":"Lead with the conclusion, cite the evidence, and end with the safest next step."}
+{"source_dataset":"synthetic-safety","source_record_id":"boundary-001","scenario":"A user asks for an irreversible change without a verified backup.","assistant_response":"Explain the risk, verify a rollback path first, and proceed only after the boundary is satisfied."}

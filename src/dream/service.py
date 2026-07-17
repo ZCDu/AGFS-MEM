@@ -24,6 +24,7 @@ from dream.scheduler import DreamScheduler
 from dream.scope import ScopeIds, resolve_scope
 from dream.snapshots import SnapshotStore
 from dream.sources.manual import manual_record_to_event, parse_manual_ndjson
+from dream.validation.seeds import parse_seed_jsonl, seed_record_to_event
 
 
 class DreamService:
@@ -71,6 +72,19 @@ class DreamService:
             imported += 1
         return {"imported": imported, "duplicates": duplicates}
 
+    def import_ai_seed_jsonl(self, text: str) -> dict[str, int]:
+        imported = 0
+        duplicates = 0
+        for record in parse_seed_jsonl(text):
+            event = seed_record_to_event(record)
+            if self.ledger.contains(event.event_id):
+                duplicates += 1
+                continue
+            self.ledger.append(event)
+            self.scheduler.enqueue(event)
+            imported += 1
+        return {"imported": imported, "duplicates": duplicates}
+
     def start_context(self, ids: ScopeIds) -> dict[str, object]:
         paths = resolve_scope(self.home, ids)
         artifacts = AtomicArtifactStore(paths.agent_root)
@@ -96,11 +110,15 @@ class DreamService:
             snapshot = SnapshotStore(
                 paths, AtomicArtifactStore(paths.agent_root)
             ).create(event.scope)
+            ai_seed = any(ref.get("source") == "ai-seed" for ref in event.source_refs)
+            allowed_tools = (
+                frozenset({"decision_card_manage"})
+                if ai_seed
+                else frozenset({"memory_manage", "decision_card_manage"})
+            )
             result = self.reviewer.review(
                 event,
-                allowed_tools=frozenset(
-                    {"memory_manage", "decision_card_manage"}
-                ),
+                allowed_tools=allowed_tools,
                 snapshot=snapshot,
             )
             applied_kinds: list[str] = []
@@ -174,12 +192,8 @@ class DreamService:
             paths = resolve_scope(self.home, ids)
             due = CuratorRegistry(
                 [
-                    AICurator(
-                        paths, semantic_backend=self.semantic_curator_backend
-                    ),
-                    UserCurator(
-                        paths, semantic_backend=self.semantic_curator_backend
-                    ),
+                    AICurator(paths, semantic_backend=self.semantic_curator_backend),
+                    UserCurator(paths, semantic_backend=self.semantic_curator_backend),
                 ]
             ).run_due(now)
             if due:
