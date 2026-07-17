@@ -5,6 +5,7 @@ import httpx
 import pytest
 
 from dream.api import create_app
+from dream.writeback import DeterministicWritebackBackend
 
 
 def _manual_line(**overrides: object) -> str:
@@ -225,3 +226,100 @@ async def test_validation_api_blocks_next_task_until_dream_is_active(
     assert confirmed.json()["character_definition_written"] is True
     assert active.json()["status"] == "active"
     assert started.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_two_api_cycles_preserve_last_active_version_when_next_dream_fails(
+    tmp_path: Path,
+) -> None:
+    class FailingWritebackBackend(DeterministicWritebackBackend):
+        def render_user_persona(self, user_profile: str, limit: int) -> str:
+            raise RuntimeError("simulated provider outage")
+
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "DREAM_VALIDATION_REQUIRE_ACTIVE_WRITEBACK=true\n",
+        encoding="utf-8",
+    )
+    app = create_app(tmp_path, env_file=env_file)
+    transport = httpx.ASGITransport(app=app)
+    scope = {
+        "tenant_id": "dream-lab",
+        "agent_id": "enterprise-colleague",
+        "user_id": "project-manager",
+    }
+
+    async def import_event(client: httpx.AsyncClient, number: int) -> None:
+        assistant = "Always verify before risky action."
+        response = await client.post(
+            "/v1/validation/import",
+            content=_manual_line(
+                event_id=f"evt-cycle-{number}",
+                session_id=f"session-{number}",
+                task_id=f"task-{number}",
+                messages=[
+                    {"role": "user", "content": "I prefer concise answers"},
+                    {"role": "assistant", "content": assistant},
+                ],
+                final_response=assistant,
+            )
+            + "\n",
+            headers={"Content-Type": "application/x-ndjson"},
+        )
+        assert response.status_code == 200
+
+    async def activate_latest(client: httpx.AsyncClient) -> dict[str, object]:
+        candidate = await client.post("/v1/validation/dream", json=scope)
+        assert candidate.status_code == 200, candidate.text
+        version = candidate.json()["version"]
+        assert (
+            await client.post(
+                f"/v1/validation/publications/{version}/approve",
+                json=scope,
+            )
+        ).status_code == 200
+        assert (
+            await client.post(
+                f"/v1/validation/publications/{version}/confirm-writeback",
+                json={
+                    **scope,
+                    "character_definition_written": True,
+                    "user_persona_written": True,
+                },
+            )
+        ).status_code == 200
+        activated = await client.post(
+            f"/v1/validation/publications/{version}/activate",
+            json=scope,
+        )
+        assert activated.status_code == 200
+        return activated.json()
+
+    async with httpx.AsyncClient(
+        transport=transport, base_url="http://dream.test"
+    ) as client:
+        await import_event(client, 1)
+        await activate_latest(client)
+        await import_event(client, 2)
+        second = await activate_latest(client)
+        stable_context = app.state.dream_service.start_context(
+            app.state.dream_service.ledger.read_all()[-1].scope
+        )
+        app.state.closed_loop.writeback_backend = FailingWritebackBackend()
+        await import_event(client, 3)
+        failed = await client.post("/v1/validation/dream", json=scope)
+        status_response = await client.get(
+            "/v1/validation/publications/status",
+            params=scope,
+        )
+
+    status_payload = status_response.json()
+    restored_context = app.state.dream_service.start_context(
+        app.state.dream_service.ledger.read_all()[-1].scope
+    )
+    assert second["version"] == 2
+    assert failed.status_code == 503
+    assert status_payload["active"]["version"] == 2
+    assert status_payload["latest"]["status"] == "failed"
+    assert restored_context["user_profile"] == stable_context["user_profile"]
+    assert restored_context["decision_rules"] == stable_context["decision_rules"]

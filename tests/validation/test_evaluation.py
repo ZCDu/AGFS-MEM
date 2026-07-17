@@ -1,0 +1,166 @@
+import json
+from pathlib import Path
+
+import pytest
+
+from dream.sources.manual import parse_manual_ndjson
+from dream.validation.evaluation import (
+    EvaluationReportError,
+    UserEvaluationInput,
+    ValidationRunInput,
+    evaluate_validation_run,
+    main,
+    verify_report,
+)
+
+
+def user(user_id: str, *, task_count: int = 10) -> UserEvaluationInput:
+    return UserEvaluationInput(
+        user_id=user_id,
+        task_count=task_count,
+        supported_profile_facts=17,
+        total_profile_facts=20,
+        personalized_successes=8,
+        personalized_tasks=10,
+    )
+
+
+def passing_run(**overrides: object) -> ValidationRunInput:
+    values: dict[str, object] = {
+        "users": [
+            user("project-manager"),
+            user("python-beginner"),
+            user("technical-lead"),
+        ],
+        "severe_hallucinations": 0,
+        "cross_user_leaks": 0,
+        "evolved_ai_successes": 8,
+        "evolved_ai_tasks": 10,
+        "completed_dream_writeback_cycles": 2,
+        "change_conflict_case_passed": True,
+        "failure_fallback_or_rollback_passed": True,
+        "missing_source_event_ids": 0,
+        "incomplete_writebacks": 0,
+        "inactive_publications": 0,
+        "decision_cards_with_private_user_data": 0,
+        "agnes_advisory": "advisory only",
+    }
+    values.update(overrides)
+    return ValidationRunInput.model_validate(values)
+
+
+def test_acceptance_requires_evidence_personalization_and_zero_leakage() -> None:
+    report = evaluate_validation_run(passing_run())
+
+    assert report.profile_evidence_rate == 0.85
+    assert report.personalization_rate == 0.80
+    assert report.ai_evolution_rate == 0.80
+    assert report.passed is True
+
+
+@pytest.mark.parametrize(
+    "field,value,reason",
+    [
+        ("severe_hallucinations", 1, "severe hallucinations"),
+        ("cross_user_leaks", 1, "cross-user leaks"),
+        ("missing_source_event_ids", 1, "missing source event IDs"),
+        ("incomplete_writebacks", 1, "incomplete writebacks"),
+        ("inactive_publications", 1, "inactive publications"),
+        (
+            "decision_cards_with_private_user_data",
+            1,
+            "private user data in decision cards",
+        ),
+        ("completed_dream_writeback_cycles", 1, "dream/writeback cycles"),
+        ("change_conflict_case_passed", False, "preference-change case"),
+        (
+            "failure_fallback_or_rollback_passed",
+            False,
+            "failure fallback or rollback",
+        ),
+    ],
+)
+def test_any_structural_or_safety_failure_blocks_acceptance(
+    field: str, value: object, reason: str
+) -> None:
+    report = evaluate_validation_run(passing_run(**{field: value}))
+
+    assert report.passed is False
+    assert any(reason in item for item in report.failure_reasons)
+
+
+def test_fewer_than_ten_tasks_for_any_user_fails_acceptance() -> None:
+    users = [
+        user("project-manager"),
+        user("python-beginner", task_count=9),
+        user("technical-lead"),
+    ]
+
+    report = evaluate_validation_run(passing_run(users=users))
+
+    assert report.passed is False
+    assert any("python-beginner" in item for item in report.failure_reasons)
+
+
+def test_agnes_advisory_cannot_override_failed_human_evidence() -> None:
+    weak = user("project-manager").model_copy(update={"supported_profile_facts": 0})
+    report = evaluate_validation_run(
+        passing_run(
+            users=[
+                weak,
+                user("python-beginner"),
+                user("technical-lead"),
+            ],
+            agnes_advisory="Agnes says everything passed",
+        )
+    )
+
+    assert report.profile_evidence_rate < 0.85
+    assert report.passed is False
+
+
+def test_saved_report_is_recomputed_and_cli_returns_acceptance_status(
+    tmp_path: Path,
+) -> None:
+    passed_path = tmp_path / "passed.json"
+    failed_path = tmp_path / "failed.json"
+    passed_path.write_text(
+        evaluate_validation_run(passing_run()).model_dump_json(indent=2),
+        encoding="utf-8",
+    )
+    failed_path.write_text(
+        evaluate_validation_run(passing_run(cross_user_leaks=1)).model_dump_json(
+            indent=2
+        ),
+        encoding="utf-8",
+    )
+
+    assert verify_report(passed_path).passed is True
+    assert main(["verify", str(passed_path)]) == 0
+    assert main(["verify", str(failed_path)]) == 1
+
+
+def test_tampered_computed_rates_are_rejected(tmp_path: Path) -> None:
+    path = tmp_path / "tampered.json"
+    payload = json.loads(evaluate_validation_run(passing_run()).model_dump_json())
+    payload["profile_evidence_rate"] = 1.0
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(EvaluationReportError, match="does not match"):
+        verify_report(path)
+
+
+def test_small_conversation_fixtures_are_valid_but_below_task_threshold() -> None:
+    root = Path(__file__).parents[1] / "fixtures" / "conversations"
+    users = []
+    for name in ("project_manager", "python_beginner", "technical_lead"):
+        records = parse_manual_ndjson(
+            (root / f"{name}.jsonl").read_text(encoding="utf-8")
+        )
+        assert len(records) == 2
+        users.append(user(records[0].user_id, task_count=len(records)))
+
+    report = evaluate_validation_run(passing_run(users=users))
+
+    assert report.passed is False
+    assert sum(item.task_count for item in report.run.users) == 6
