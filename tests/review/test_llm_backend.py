@@ -107,3 +107,43 @@ def test_llm_review_keeps_user_facts_out_of_shared_ai_cards() -> None:
     system_prompt = completions.kwargs["messages"][0]["content"]
     assert "Never copy a user's personal facts" in system_prompt
     assert "user-agnostic" in system_prompt
+
+
+def test_llm_review_accepts_json_only_provider() -> None:
+    class JsonOnlyCompletions:
+        def create(self, **kwargs: object) -> object:
+            if "tools" in kwargs:
+                raise RuntimeError("tools unsupported")
+            content = json.dumps(
+                {
+                    "tool_calls": [
+                        {
+                            "name": "memory_manage",
+                            "arguments": {
+                                "action": "add",
+                                "content": "Prefers concise answers.",
+                            },
+                        }
+                    ]
+                }
+            )
+            return SimpleNamespace(
+                choices=[SimpleNamespace(message=SimpleNamespace(content=content))]
+            )
+
+    client = SimpleNamespace(
+        chat=SimpleNamespace(completions=JsonOnlyCompletions())
+    )
+    backend = OpenAIReviewBackend(client=client, model="agnes-model")
+
+    result = backend.review(
+        ReviewRequest(
+            event_id="evt-json",
+            transcript_text="User: concise please",
+            final_response="Understood.",
+            allowed_tools=frozenset({"memory_manage"}),
+        )
+    )
+
+    assert result.status == "success"
+    assert result.actions[0].kind is ArtifactKind.USER_PROFILE

@@ -30,6 +30,7 @@ class DreamSettings:
     review_base_url: str | None = None
     review_api_key: str = ""
     review_max_completion_tokens: int = 2000
+    llm_structured_mode: str = "auto"
     curator_backend: str = "inherit"
     curator_model: str = ""
     curator_base_url: str | None = None
@@ -112,6 +113,9 @@ def load_settings(path: Path | None = None) -> DreamSettings:
         raise ValueError(
             "DREAM_CURATOR_BACKEND must be inherit, deterministic, or openai"
         )
+    structured_mode = value("DREAM_LLM_STRUCTURED_MODE", "auto").lower()
+    if structured_mode not in {"auto", "tools", "json"}:
+        raise ValueError("DREAM_LLM_STRUCTURED_MODE must be auto, tools, or json")
 
     source = InternshipSourceSettings(
         enabled=_boolean(
@@ -150,6 +154,7 @@ def load_settings(path: Path | None = None) -> DreamSettings:
             value("DREAM_REVIEW_MAX_COMPLETION_TOKENS", "2000"),
             "DREAM_REVIEW_MAX_COMPLETION_TOKENS",
         ),
+        llm_structured_mode=structured_mode,
         curator_backend=curator_backend,
         curator_model=value("DREAM_CURATOR_MODEL"),
         curator_base_url=value("DREAM_CURATOR_BASE_URL") or None,
@@ -177,7 +182,10 @@ def build_review_backend(
         from openai import OpenAI
 
         client_factory = OpenAI
-    client_kwargs: dict[str, object] = {"api_key": settings.review_api_key}
+    client_kwargs: dict[str, object] = {
+        "api_key": settings.review_api_key,
+        "max_retries": 0,
+    }
     if settings.review_base_url:
         client_kwargs["base_url"] = settings.review_base_url
     client = client_factory(**client_kwargs)
@@ -185,6 +193,7 @@ def build_review_backend(
         client=client,
         model=settings.review_model,
         max_completion_tokens=settings.review_max_completion_tokens,
+        structured_mode=settings.llm_structured_mode,
     )
 
 
@@ -213,7 +222,7 @@ def build_curator_backend(
 
         client_factory = OpenAI
     base_url = settings.curator_base_url or settings.review_base_url
-    client_kwargs: dict[str, object] = {"api_key": api_key}
+    client_kwargs: dict[str, object] = {"api_key": api_key, "max_retries": 0}
     if base_url:
         client_kwargs["base_url"] = base_url
     client = client_factory(**client_kwargs)
@@ -221,4 +230,5 @@ def build_curator_backend(
         client=client,
         model=model,
         max_completion_tokens=settings.curator_max_completion_tokens,
+        structured_mode=settings.llm_structured_mode,
     )

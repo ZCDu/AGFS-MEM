@@ -8,6 +8,10 @@ from dream.hermes_compat.curator_prompts import (
     AI_CURATOR_PROMPT,
     USER_CURATOR_PROMPT,
 )
+from dream.structured_llm import (
+    StructuredCompletionClient,
+    StructuredCompletionError,
+)
 
 
 @dataclass(frozen=True)
@@ -74,47 +78,38 @@ _USER_TOOL = {
 }
 
 
-def _attribute(value: object, name: str, default: object = None) -> object:
-    if isinstance(value, dict):
-        return value.get(name, default)
-    return getattr(value, name, default)
-
-
 class OpenAICuratorBackend:
     def __init__(
-        self, *, client: Any, model: str, max_completion_tokens: int = 3000
+        self,
+        *,
+        client: Any,
+        model: str,
+        max_completion_tokens: int = 3000,
+        structured_mode: str = "auto",
     ) -> None:
         self.client = client
         self.model = model
         self.max_completion_tokens = max_completion_tokens
+        self.structured_mode = structured_mode
+        self.structured = StructuredCompletionClient(
+            client,
+            model,
+            max_completion_tokens=max_completion_tokens,
+        )
 
     def _call(self, *, prompt: str, content: str, tool: dict[str, object]) -> dict[str, object]:
         tool_name = str(tool["function"]["name"])
-        response = self.client.chat.completions.create(
-            model=self.model,
-            messages=[
-                {"role": "system", "content": prompt},
-                {"role": "user", "content": content},
-            ],
-            tools=[tool],
-            tool_choice={"type": "function", "function": {"name": tool_name}},
-            temperature=0,
-            max_completion_tokens=self.max_completion_tokens,
-        )
-        choices = _attribute(response, "choices", [])
-        if not choices:
-            raise RuntimeError("curator LLM returned no choices")
-        message = _attribute(choices[0], "message")
-        calls = _attribute(message, "tool_calls", []) or []
-        if not calls:
-            raise RuntimeError("curator LLM returned no management plan")
-        function = _attribute(calls[0], "function")
-        if _attribute(function, "name", "") != tool_name:
-            raise RuntimeError("curator LLM returned an unexpected tool")
-        payload = json.loads(str(_attribute(function, "arguments", "{}")))
-        if not isinstance(payload, dict):
-            raise RuntimeError("curator plan must be a JSON object")
-        return payload
+        try:
+            calls = self.structured.call(
+                system=prompt,
+                content=content,
+                tools=(tool,),
+                forced_tool=tool_name,
+                mode=self.structured_mode,
+            )
+        except StructuredCompletionError as exc:
+            raise RuntimeError("curator structured completion failed") from exc
+        return dict(calls[0].arguments)
 
     def curate_ai(
         self, *, cards: tuple[tuple[str, str], ...], current_rules: str

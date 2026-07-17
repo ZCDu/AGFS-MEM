@@ -55,3 +55,43 @@ def test_llm_curator_backend_returns_ai_and_user_semantic_plans() -> None:
     assert "Evidence cards" in ai.decision_rules_markdown
     assert "evt-1" in user.user_profile_markdown
     assert "evt-2" in user.user_profile_markdown
+
+
+def test_llm_curator_accepts_json_only_provider() -> None:
+    class JsonOnlyCompletions:
+        def create(self, **kwargs: object) -> object:
+            if "tools" in kwargs:
+                raise RuntimeError("tools unsupported")
+            content = json.dumps(
+                {
+                    "tool_calls": [
+                        {
+                            "name": "curate_user_profile",
+                            "arguments": {
+                                "user_profile_markdown": (
+                                    "Prefers concise answers.\n"
+                                    "<!-- dream-sources: evt-1 -->\n"
+                                ),
+                                "summary": "Kept one preference.",
+                            },
+                        }
+                    ]
+                }
+            )
+            return SimpleNamespace(
+                choices=[SimpleNamespace(message=SimpleNamespace(content=content))]
+            )
+
+    backend = OpenAICuratorBackend(
+        client=SimpleNamespace(
+            chat=SimpleNamespace(completions=JsonOnlyCompletions())
+        ),
+        model="agnes-model",
+    )
+
+    result = backend.curate_user(
+        "Prefers concise answers.\n<!-- dream-source: evt-1 -->\n"
+    )
+
+    assert result.summary == "Kept one preference."
+    assert "evt-1" in result.user_profile_markdown

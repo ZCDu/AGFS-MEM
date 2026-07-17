@@ -72,6 +72,7 @@ def test_openai_compatible_backend_uses_env_file_values(tmp_path: Path) -> None:
     assert captured == {
         "api_key": "secret-key",
         "base_url": "https://llm.example/v1",
+        "max_retries": 0,
     }
 
 
@@ -130,3 +131,23 @@ def test_curator_backend_can_inherit_the_review_model(tmp_path: Path) -> None:
     )
     assert isinstance(backend, OpenAICuratorBackend)
     assert backend.model == "shared-model"
+
+
+def test_structured_llm_mode_is_loaded_and_passed_to_backends(tmp_path: Path) -> None:
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "DREAM_REVIEW_BACKEND=openai\n"
+        "DREAM_REVIEW_MODEL=agnes-model\n"
+        "DREAM_LLM_API_KEY=secret-key\n"
+        "DREAM_LLM_STRUCTURED_MODE=json\n",
+        encoding="utf-8",
+    )
+    settings = load_settings(env_file)
+
+    review = build_review_backend(settings, client_factory=lambda **_: object())
+    curator = build_curator_backend(settings, client_factory=lambda **_: object())
+
+    assert settings.llm_structured_mode == "json"
+    assert review.structured_mode == "json"
+    assert curator is not None
+    assert curator.structured_mode == "json"

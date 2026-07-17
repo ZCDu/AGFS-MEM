@@ -1,6 +1,5 @@
 """OpenAI-compatible Hermes-style Background Review backend."""
 
-import json
 from typing import Any
 
 from dream.hermes_compat.prompts import DREAM_COMBINED_REVIEW_PROMPT
@@ -9,6 +8,10 @@ from dream.review.models import (
     ReviewAction,
     ReviewRequest,
     ReviewResult,
+)
+from dream.structured_llm import (
+    StructuredCompletionClient,
+    StructuredCompletionError,
 )
 
 
@@ -71,12 +74,6 @@ _TOOLS = {
 }
 
 
-def _attribute(value: object, name: str, default: object = None) -> object:
-    if isinstance(value, dict):
-        return value.get(name, default)
-    return getattr(value, name, default)
-
-
 class OpenAIReviewBackend:
     def __init__(
         self,
@@ -84,10 +81,17 @@ class OpenAIReviewBackend:
         client: Any,
         model: str,
         max_completion_tokens: int = 2000,
+        structured_mode: str = "auto",
     ) -> None:
         self.client = client
         self.model = model
         self.max_completion_tokens = max_completion_tokens
+        self.structured_mode = structured_mode
+        self.structured = StructuredCompletionClient(
+            client,
+            model,
+            max_completion_tokens=max_completion_tokens,
+        )
 
     def review(self, request: ReviewRequest) -> ReviewResult:
         tools = [
@@ -115,36 +119,30 @@ class OpenAIReviewBackend:
             f"{current_cards}\n"
             "</current_decision_cards>"
         )
-        response = self.client.chat.completions.create(
-            model=self.model,
-            messages=[
-                {"role": "system", "content": DREAM_COMBINED_REVIEW_PROMPT},
-                {"role": "user", "content": review_input},
-            ],
-            tools=tools,
-            tool_choice="auto",
-            temperature=0,
-            max_completion_tokens=self.max_completion_tokens,
-        )
-        choices = _attribute(response, "choices", [])
-        if not choices:
-            return ReviewResult(
-                actions=(), summary="LLM review returned no choices.", status="failed"
+        try:
+            tool_calls = self.structured.call(
+                system=DREAM_COMBINED_REVIEW_PROMPT,
+                content=review_input,
+                tools=tuple(tools),
+                forced_tool=None,
+                mode=self.structured_mode,
+                allow_empty=True,
             )
-        message = _attribute(choices[0], "message")
-        tool_calls = _attribute(message, "tool_calls", []) or []
+        except StructuredCompletionError:
+            return ReviewResult(
+                actions=(),
+                summary="LLM review returned invalid structured output.",
+                status="failed",
+                error="structured completion failed",
+            )
         actions: list[ReviewAction] = []
         errors: list[str] = []
         for tool_call in tool_calls:
-            function = _attribute(tool_call, "function")
-            name = str(_attribute(function, "name", ""))
+            name = tool_call.name
             if name not in request.allowed_tools or name not in _TOOLS:
                 continue
             try:
-                arguments = _attribute(function, "arguments", "{}")
-                payload = json.loads(str(arguments))
-                if not isinstance(payload, dict):
-                    raise ValueError("tool arguments must decode to an object")
+                payload = dict(tool_call.arguments)
                 if name == "memory_manage":
                     kind = ArtifactKind.USER_PROFILE
                     payload.setdefault("target", "user")
@@ -158,7 +156,7 @@ class OpenAIReviewBackend:
                         source_event_id=request.event_id,
                     )
                 )
-            except (TypeError, ValueError, json.JSONDecodeError) as exc:
+            except (TypeError, ValueError) as exc:
                 errors.append(f"{name}: {exc}")
         status = "partial" if errors and actions else "failed" if errors else "success"
         summary = (
