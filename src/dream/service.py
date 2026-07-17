@@ -13,6 +13,7 @@ from dream.events import TaskCompletedEvent
 from dream.ledger import EventLedger
 from dream.managers.decision_cards import DecisionCardManager
 from dream.managers.memory import MemoryManager
+from dream.publication import PublicationStore
 from dream.reports import DreamReportStore
 from dream.review.backend import DeterministicReviewBackend, ReviewBackend
 from dream.review.models import ArtifactKind
@@ -53,9 +54,10 @@ class DreamService:
                 self.scheduler.enqueue_unless_pending(event)
 
     def ingest_conversation(self, event: TaskCompletedEvent) -> None:
-        resolve_scope(self.home, event.scope)
+        paths = resolve_scope(self.home, event.scope)
         self.ledger.append(event)
         self.scheduler.enqueue(event)
+        PublicationStore(paths).note_completed_event(event.event_id)
 
     def import_manual_ndjson(self, text: str) -> dict[str, int]:
         imported = 0
