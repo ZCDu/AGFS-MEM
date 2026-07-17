@@ -21,6 +21,7 @@ env/
 # IDE and operating system
 .idea/
 .vscode/
+.worktrees/
 *.swp
 *.swo
 .DS_Store
