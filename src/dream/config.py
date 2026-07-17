@@ -43,6 +43,7 @@ class DreamSettings:
     curator_max_completion_tokens: int = 3000
     character_definition_limit: int = 3200
     user_persona_limit: int = 1200
+    validation_require_active_writeback: bool = False
     internship_source: InternshipSourceSettings = field(
         default_factory=InternshipSourceSettings
     )
@@ -177,6 +178,10 @@ def load_settings(path: Path | None = None) -> DreamSettings:
         user_persona_limit=_positive_int(
             value("DREAM_USER_PERSONA_LIMIT", "1200"),
             "DREAM_USER_PERSONA_LIMIT",
+        ),
+        validation_require_active_writeback=_boolean(
+            value("DREAM_VALIDATION_REQUIRE_ACTIVE_WRITEBACK", "false"),
+            "DREAM_VALIDATION_REQUIRE_ACTIVE_WRITEBACK",
         ),
         internship_source=source,
     )

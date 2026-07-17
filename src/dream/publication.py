@@ -110,6 +110,16 @@ class PublicationStore:
     def active(self) -> PublicationVersion | None:
         return self._read_pointer("active.json")
 
+    def restore_active(self, version: int) -> PublicationVersion:
+        selected = self.get(version)
+        if selected.status is not PublicationStatus.ACTIVE:
+            raise PublicationTransitionError("rollback target was never active")
+        self.artifacts.write_text(
+            self.root / "active.json",
+            json.dumps({"version": selected.version}, sort_keys=True) + "\n",
+        )
+        return selected
+
     def pending_event_ids(self) -> tuple[str, ...]:
         raw = self.artifacts.read_text(self.root / "pending.json")
         if not raw:
@@ -202,9 +212,7 @@ class PublicationStore:
 
     def activate(self, version: int) -> PublicationVersion:
         current = self.get(version)
-        if not (
-            current.character_definition_written and current.user_persona_written
-        ):
+        if not (current.character_definition_written and current.user_persona_written):
             raise PublicationTransitionError(
                 "both writebacks must be confirmed before activation"
             )

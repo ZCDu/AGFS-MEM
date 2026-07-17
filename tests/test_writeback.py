@@ -55,6 +55,7 @@ def test_writeback_backend_receives_ai_and_user_sources_separately(
     assert backend.character_input.startswith("# AI Decision Rules")
     assert "用户偏好" not in backend.character_input
     assert backend.persona_input.startswith("用户偏好")
+    assert "dream-source" not in backend.persona_input
     assert artifacts.character.sha256
     assert artifacts.user_persona.sha256
 
@@ -67,9 +68,7 @@ def test_oversized_writeback_does_not_replace_stable_files(tmp_path: Path) -> No
     service = prepared_service(tmp_path, OversizedBackend())
     store = service.artifacts
     store.write_text(Path("CHARACTER_DEFINITION.md"), "stable character\n")
-    store.write_text(
-        Path("users/project-manager/USER_PERSONA.md"), "stable persona\n"
-    )
+    store.write_text(Path("users/project-manager/USER_PERSONA.md"), "stable persona\n")
 
     with pytest.raises(WritebackValidationError, match="limit"):
         service.generate()
@@ -125,9 +124,7 @@ def test_openai_writeback_uses_two_separate_structured_requests() -> None:
 
     completions = RoutingCompletions()
     backend = OpenAIWritebackBackend(
-        client=SimpleNamespace(
-            chat=SimpleNamespace(completions=completions)
-        ),
+        client=SimpleNamespace(chat=SimpleNamespace(completions=completions)),
         model="agnes-model",
     )
 

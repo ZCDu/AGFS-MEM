@@ -2,6 +2,7 @@
 
 import asyncio
 from contextlib import asynccontextmanager, suppress
+from dataclasses import asdict
 from datetime import datetime, timezone
 import logging
 import os
@@ -12,8 +13,15 @@ from fastapi import FastAPI, HTTPException, Request, Response, status
 import httpx
 from pydantic import BaseModel, ConfigDict, Field
 
-from dream.config import build_curator_backend, build_review_backend, load_settings
+from dream.closed_loop import ClosedLoopCoordinator, ClosedLoopError, TaskStartBlocked
+from dream.config import (
+    build_curator_backend,
+    build_review_backend,
+    build_writeback_backend,
+    load_settings,
+)
 from dream.events import TaskCompletedEvent
+from dream.publication import PublicationTransitionError, PublicationVersion
 from dream.scope import ScopeIds
 from dream.service import DreamService
 from dream.source_sync import InternshipSourceSync
@@ -70,6 +78,11 @@ class ConversationRequest(ScopeRequest):
         )
 
 
+class WritebackConfirmationRequest(ScopeRequest):
+    character_definition_written: bool
+    user_persona_written: bool
+
+
 logger = logging.getLogger(__name__)
 
 
@@ -81,18 +94,25 @@ def create_app(
     client_factory: Callable[..., object] | None = None,
     source_transport: httpx.BaseTransport | None = None,
 ) -> FastAPI:
-    resolved_env_file = env_file or Path(
-        os.environ.get("DREAM_ENV_FILE", ".env")
-    ).expanduser()
+    resolved_env_file = (
+        env_file or Path(os.environ.get("DREAM_ENV_FILE", ".env")).expanduser()
+    )
     settings = load_settings(resolved_env_file)
     backend = build_review_backend(settings, client_factory=client_factory)
     semantic_curator_backend = build_curator_backend(
         settings, client_factory=client_factory
     )
+    writeback_backend = build_writeback_backend(settings, client_factory=client_factory)
     service = DreamService(
         home,
         backend=backend,
         semantic_curator_backend=semantic_curator_backend,
+    )
+    closed_loop = ClosedLoopCoordinator(
+        service,
+        writeback_backend=writeback_backend,
+        character_limit=settings.character_definition_limit,
+        user_persona_limit=settings.user_persona_limit,
     )
     source_sync: InternshipSourceSync | None = None
     if settings.internship_source.enabled:
@@ -123,13 +143,14 @@ def create_app(
                             )
                     except Exception:
                         logger.exception("DREAM source sync iteration failed")
-                try:
-                    await asyncio.to_thread(service.run_pending)
-                    await asyncio.to_thread(
-                        service.run_due_curators, datetime.now(timezone.utc)
-                    )
-                except Exception:
-                    logger.exception("DREAM background worker iteration failed")
+                if not settings.validation_require_active_writeback:
+                    try:
+                        await asyncio.to_thread(service.run_pending)
+                        await asyncio.to_thread(
+                            service.run_due_curators, datetime.now(timezone.utc)
+                        )
+                    except Exception:
+                        logger.exception("DREAM background worker iteration failed")
                 try:
                     await asyncio.wait_for(stop.wait(), timeout=worker_interval_seconds)
                 except TimeoutError:
@@ -146,18 +167,39 @@ def create_app(
 
     application = FastAPI(title="DREAM", version="0.1.0", lifespan=lifespan)
     application.state.dream_service = service
+    application.state.closed_loop = closed_loop
     application.state.internship_source_sync = source_sync
+
+    def publication_payload(value: PublicationVersion) -> dict[str, object]:
+        payload = asdict(value)
+        payload["status"] = value.status.value
+        payload["source_event_ids"] = list(value.source_event_ids)
+        return payload
+
+    def transition_error(exc: Exception) -> HTTPException:
+        return HTTPException(status_code=409, detail=str(exc))
 
     @application.post("/v1/tasks/start")
     def start_task(scope: ScopeRequest) -> dict[str, object]:
         try:
+            if settings.validation_require_active_writeback:
+                closed_loop.assert_task_can_start(scope.to_ids())
             return service.start_context(scope.to_ids())
+        except TaskStartBlocked as exc:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "latest_completed_event_id": exc.latest_event_id,
+                    "active_processed_through_event_id": exc.active_event_id,
+                    "next_action": (
+                        "complete and activate the pending dream publication"
+                    ),
+                },
+            ) from exc
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
 
-    @application.post(
-        "/v1/dream/conversations", status_code=status.HTTP_202_ACCEPTED
-    )
+    @application.post("/v1/dream/conversations", status_code=status.HTTP_202_ACCEPTED)
     def ingest_conversation(payload: ConversationRequest) -> dict[str, object]:
         try:
             service.ingest_conversation(payload.to_event())
@@ -175,6 +217,81 @@ def create_app(
                 status_code=422,
                 detail="invalid manual completed-task NDJSON",
             ) from exc
+
+    @application.post("/v1/validation/dream")
+    def run_validation_dream(scope: ScopeRequest) -> dict[str, object]:
+        try:
+            return publication_payload(closed_loop.dream(scope.to_ids()))
+        except ClosedLoopError as exc:
+            raise HTTPException(
+                status_code=503,
+                detail="dream candidate generation failed; previous state restored",
+            ) from exc
+        except ValueError as exc:
+            raise transition_error(exc) from exc
+
+    @application.post("/v1/validation/publications/{version}/approve")
+    def approve_publication(version: int, scope: ScopeRequest) -> dict[str, object]:
+        try:
+            return publication_payload(closed_loop.approve(scope.to_ids(), version))
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except PublicationTransitionError as exc:
+            raise transition_error(exc) from exc
+
+    @application.post("/v1/validation/publications/{version}/confirm-writeback")
+    def confirm_publication_writeback(
+        version: int, payload: WritebackConfirmationRequest
+    ) -> dict[str, object]:
+        try:
+            confirmed = closed_loop.confirm_writeback(
+                payload.to_ids(),
+                version,
+                character_written=payload.character_definition_written,
+                user_written=payload.user_persona_written,
+            )
+            return publication_payload(confirmed)
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except PublicationTransitionError as exc:
+            raise transition_error(exc) from exc
+
+    @application.post("/v1/validation/publications/{version}/activate")
+    def activate_publication(version: int, scope: ScopeRequest) -> dict[str, object]:
+        try:
+            return publication_payload(closed_loop.activate(scope.to_ids(), version))
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except PublicationTransitionError as exc:
+            raise transition_error(exc) from exc
+
+    @application.post("/v1/validation/publications/{version}/reject")
+    def reject_publication(version: int, scope: ScopeRequest) -> dict[str, object]:
+        try:
+            return publication_payload(closed_loop.reject(scope.to_ids(), version))
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except (PublicationTransitionError, ValueError) as exc:
+            raise transition_error(exc) from exc
+
+    @application.post("/v1/validation/publications/{version}/rollback")
+    def rollback_publication(version: int, scope: ScopeRequest) -> dict[str, object]:
+        try:
+            return publication_payload(closed_loop.rollback(scope.to_ids(), version))
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except (PublicationTransitionError, ValueError) as exc:
+            raise transition_error(exc) from exc
+
+    @application.get("/v1/validation/publications/status")
+    def publication_status(
+        tenant_id: str, agent_id: str, user_id: str
+    ) -> dict[str, object]:
+        values = closed_loop.status(ScopeIds(tenant_id, agent_id, user_id))
+        return {
+            name: publication_payload(value) if value is not None else None
+            for name, value in values.items()
+        }
 
     @application.post("/v1/dream/run-pending")
     def run_pending() -> dict[str, object]:
@@ -224,9 +341,7 @@ def create_app(
     def read_report(
         run_id: str, tenant_id: str, agent_id: str, user_id: str
     ) -> Response:
-        report = service.read_report(
-            ScopeIds(tenant_id, agent_id, user_id), run_id
-        )
+        report = service.read_report(ScopeIds(tenant_id, agent_id, user_id), run_id)
         if not report:
             raise HTTPException(status_code=404, detail="report not found")
         return Response(content=report, media_type="application/json")

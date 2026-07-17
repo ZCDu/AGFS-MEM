@@ -24,6 +24,17 @@ def test_missing_env_file_uses_safe_deterministic_backend(tmp_path: Path) -> Non
 def test_internship_source_defaults_to_disabled(tmp_path: Path) -> None:
     settings = load_settings(tmp_path / ".env")
     assert settings.internship_source.enabled is False
+    assert settings.validation_require_active_writeback is False
+
+
+def test_validation_barrier_can_be_enabled(tmp_path: Path) -> None:
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "DREAM_VALIDATION_REQUIRE_ACTIVE_WRITEBACK=true\n",
+        encoding="utf-8",
+    )
+
+    assert load_settings(env_file).validation_require_active_writeback is True
 
 
 def test_internship_source_loads_pull_settings(tmp_path: Path) -> None:
@@ -166,9 +177,7 @@ def test_writeback_limits_and_inherited_backend_are_configured(tmp_path: Path) -
         encoding="utf-8",
     )
     settings = load_settings(env_file)
-    backend = build_writeback_backend(
-        settings, client_factory=lambda **_: object()
-    )
+    backend = build_writeback_backend(settings, client_factory=lambda **_: object())
 
     assert settings.character_definition_limit == 2500
     assert settings.user_persona_limit == 900

@@ -134,14 +134,94 @@ async def test_conversation_dream_updates_only_next_context_and_current_user(
         assert first["snapshot_id"] != second["snapshot_id"]
         assert "Prefers concise answers" not in first["user_profile"]
         assert "Prefers concise answers" in second["user_profile"]
-        assert any(
-            "高风险操作前先验证" in card for card in second["decision_cards"]
-        )
+        assert any("高风险操作前先验证" in card for card in second["decision_cards"])
         assert "Prefers concise answers" not in bob["user_profile"]
 
         curated = await client.post("/v1/dream/run-curators", json=scope)
         assert curated.status_code == 200
         after_curator = (await client.post("/v1/tasks/start", json=scope)).json()
-        assert "先完成只读验证，再决定是否执行。" in after_curator[
-            "decision_rules"
-        ]
+        assert "先完成只读验证，再决定是否执行。" in after_curator["decision_rules"]
+
+
+@pytest.mark.asyncio
+async def test_validation_api_blocks_next_task_until_dream_is_active(
+    tmp_path: Path,
+) -> None:
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "DREAM_VALIDATION_REQUIRE_ACTIVE_WRITEBACK=true\n",
+        encoding="utf-8",
+    )
+    app = create_app(tmp_path, env_file=env_file)
+    transport = httpx.ASGITransport(app=app)
+    scope = {
+        "tenant_id": "dream-lab",
+        "agent_id": "enterprise-colleague",
+        "user_id": "project-manager",
+    }
+    async with httpx.AsyncClient(
+        transport=transport, base_url="http://dream.test"
+    ) as client:
+        imported = await client.post(
+            "/v1/validation/import",
+            content=_manual_line(
+                messages=[
+                    {"role": "user", "content": "I prefer concise answers"},
+                    {
+                        "role": "assistant",
+                        "content": (
+                            "Always verify before risky action; verified "
+                            "before applying the change."
+                        ),
+                    },
+                ],
+                final_response=(
+                    "Always verify before risky action; verified before "
+                    "applying the change."
+                ),
+            )
+            + "\n",
+            headers={"Content-Type": "application/x-ndjson"},
+        )
+        blocked = await client.post("/v1/tasks/start", json=scope)
+        candidate = await client.post("/v1/validation/dream", json=scope)
+        assert candidate.status_code == 200, candidate.text
+        version = candidate.json()["version"]
+        status_before = await client.get(
+            "/v1/validation/publications/status",
+            params=scope,
+        )
+        approved = await client.post(
+            f"/v1/validation/publications/{version}/approve", json=scope
+        )
+        incomplete = await client.post(
+            f"/v1/validation/publications/{version}/activate", json=scope
+        )
+        confirmed = await client.post(
+            f"/v1/validation/publications/{version}/confirm-writeback",
+            json={
+                **scope,
+                "character_definition_written": True,
+                "user_persona_written": True,
+            },
+        )
+        active = await client.post(
+            f"/v1/validation/publications/{version}/activate", json=scope
+        )
+        started = await client.post("/v1/tasks/start", json=scope)
+
+    assert imported.status_code == 200
+    assert blocked.status_code == 409
+    assert blocked.json()["detail"] == {
+        "latest_completed_event_id": "evt-project-1",
+        "active_processed_through_event_id": "",
+        "next_action": "complete and activate the pending dream publication",
+    }
+    assert candidate.json()["status"] == "ready_for_review"
+    assert status_before.json()["active"] is None
+    assert status_before.json()["latest"]["version"] == version
+    assert approved.json()["status"] == "ready_for_writeback"
+    assert incomplete.status_code == 409
+    assert confirmed.json()["character_definition_written"] is True
+    assert active.json()["status"] == "active"
+    assert started.status_code == 200

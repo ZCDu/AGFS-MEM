@@ -2,6 +2,7 @@
 
 from dataclasses import dataclass
 from pathlib import Path
+import re
 from typing import Any, Protocol
 
 from dream.artifacts import ArtifactVersion, AtomicArtifactStore
@@ -163,18 +164,22 @@ class WritebackService:
         profile = self.artifacts.read_text(user_relative)
         if "dream-source" not in profile:
             raise WritebackValidationError("user profile lacks source evidence")
+        public_profile = re.sub(
+            r"\n?<!-- dream-sources?:\s*[^>]+ -->",
+            "",
+            profile,
+        ).strip()
         persona = self._validate(
-            self.backend.render_user_persona(profile, self.user_persona_limit),
+            self.backend.render_user_persona(
+                public_profile,
+                self.user_persona_limit,
+            ),
             self.user_persona_limit,
             "User Persona",
         )
         character_relative = Path("CHARACTER_DEFINITION.md")
-        persona_relative = (
-            Path("users") / self.paths.user_root.name / "USER_PERSONA.md"
-        )
-        snapshot_id = self.rollback.capture(
-            (character_relative, persona_relative)
-        )
+        persona_relative = Path("users") / self.paths.user_root.name / "USER_PERSONA.md"
+        snapshot_id = self.rollback.capture((character_relative, persona_relative))
         character_version = self.artifacts.write_text(character_relative, character)
         persona_version = self.artifacts.write_text(persona_relative, persona)
         return WritebackArtifacts(
