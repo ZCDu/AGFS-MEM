@@ -1,101 +1,82 @@
-# Test Agent Profile and Evolution Simulation Implementation Plan
+# Independent Codex Task Evolution Validation Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Generate and lock a Character Building-style synthetic bank Agent profile, simulate three isolated users talking to that Agent, periodically distill the completed tasks into user profiles and AI decision rules, and measure whether loading those artifacts improves later tasks.
+**Goal:** Validate DREAM with one locked Character Building-style test profile and 36 traceable conversations produced by fresh Codex Agent tasks, with dream cycles after task 5 and task 10 for each of three isolated users.
 
-**Architecture:** Keep the existing ledger, Background Review, Curators, publication state, snapshots, and evaluation code as the memory core. Add a validation-only profile generator and approval store, a replaceable OpenAI-compatible test Agent backend, a synthetic conversation runner that never persists hidden personas, and a campaign coordinator that runs fixed baseline/evolved phases while recording the profile hash. The generated profile is a test fixture, not a production profile service and not a replacement for the bank Agent's existing System Prompt.
+**Architecture:** The current Codex task is the orchestrator. It generates one synthetic customer message, creates a projectless Codex task containing only the locked Agent profile, active decision rules, the current user's active profile, and that message, then records the returned answer and Codex thread ID through DREAM's existing manual JSONL adapter. Repository code only validates the fixed profile, generalizes source provenance, enforces the 5/5/2 campaign state, and verifies the final report; Codex task creation remains an operator action and does not become a DREAM runtime dependency.
 
-**Tech Stack:** Python 3.11-3.13, Pydantic 2, OpenAI-compatible chat completions, Markdown/JSON/JSONL, pytest 9, pytest-asyncio, Ruff.
+**Tech Stack:** Python 3.11-3.13, Pydantic 2, Markdown/JSON/JSONL, Codex App task tools, pytest 9, Ruff.
 
 ## Global Constraints
 
-- Do not add a production-facing Agent profile API or customer-facing Agent creator.
-- The test profile belongs to the logical Agent, not to the external model provider.
-- Generate the profile from structured synthetic inputs only; never use real bank names, customer data, account data, internal policy, or credentials.
-- A generated draft cannot be used by the test Agent until a human approval record locks its SHA-256.
-- The approved profile hash must remain identical before and after every evolution phase in one campaign.
-- Only `decision-cards/*.md`, `DECISION_RULES.md`, `users/<user_id>/USER.md`, and bounded publication artifacts may evolve.
-- Hidden persona files may be read only by the simulator and evaluator; they must never enter DREAM events, reports, snapshots, decision cards, profiles, or Agent prompts.
-- Use the existing fixed scope `tenant_id=dream-lab`, `agent_id=enterprise-colleague`; users remain `project-manager`, `python-beginner`, and `technical-lead`.
-- Use the same external Agent model, endpoint, temperature (`0`), and token limit for baseline and evolved comparisons.
-- Each completed simulated task contains exactly one synthetic user message and one Agent response; `final_response` equals the assistant message.
-- Collect 12 tasks per user: tasks 1-5 baseline, dream cycle 1, tasks 6-10 evolved, dream cycle 2, tasks 11-12 evolved again.
-- Keep the previously required 30 manually selected public AI seed records: 20 HelpSteer2 and 10 PKU-SafeRLHF, each with a stable source row ID.
-- Never fabricate public rows, simulated conversations, human scores, successful writebacks, or `tests/evaluation/latest.json`.
+- Do not add an external model Agent backend, public Agent creator, production profile API, Character.AI dependency, or public seed dataset.
+- The test profile is synthetic, belongs to the logical bank Agent, and never claims to be the company's real System Prompt.
+- A human must approve the exact profile SHA-256 before task 1.
+- The same approved profile hash must be used in all 36 Codex Agent tasks.
+- Use fixed scope `tenant_id=dream-lab`, `agent_id=enterprise-colleague`.
+- Use exactly three users: `project-manager`, `python-beginner`, and `technical-lead`.
+- Use exactly 12 Agent tasks per user: baseline tasks 1-5, evolved-v1 tasks 6-10, evolved-v2 tasks 11-12.
+- Dream cycle 1 must be active before task 6; dream cycle 2 must be active before task 11.
+- Every Agent response comes from a newly created projectless Codex task with no forked history.
+- The Agent task receives no hidden persona, raw prior conversation, other user's profile, candidate artifact, repository path, or secret.
+- Every JSONL `session_id` is the real Codex thread ID returned for that task.
+- `final_response` equals the exact final assistant response read from that Codex task.
+- Hidden persona fixtures remain visible only to the orchestrator and evaluator.
+- AI decision cards contain reusable Agent decisions only, never a user's identity or preferences.
+- `tests/evaluation/latest.json` is created only from actual completed tasks and human review; never fabricate a passing report.
 - Follow red-green-refactor and commit each independently testable task.
 
 ---
 
 ## File Map
 
-- `src/dream/validation/profile.py`: strict profile seed, draft, approval, Markdown validation, and disk store.
-- `src/dream/validation/profile_backend.py`: deterministic and OpenAI-compatible profile draft generation.
-- `src/dream/validation/profile_prompts.py`: isolated Character Building-style profile generation prompt and tool schema.
-- `src/dream/validation/agent.py`: fixed-profile test Agent context composition and external model call.
-- `src/dream/validation/simulation.py`: one-task synthetic user/Agent runner and append-only local conversation store.
-- `src/dream/validation/campaign.py`: fixed 5/5/2 phase boundaries and periodic dream activation.
-- `src/dream/validation/evaluation.py`: profile-hash and model-identity acceptance fields.
-- `src/dream/config.py`: validation-only provider settings and builders.
-- `tests/fixtures/agent_profile/`: synthetic profile seed and approved offline sample.
-- `tests/fixtures/personas/`: synthetic hidden personas used only by simulator/evaluator.
-- `docs/validation/test-agent-evolution-runbook.md`: exact operational procedure.
+- `src/dream/validation/profile.py`: validate and hash the fixed test Agent profile and its approval.
+- `src/dream/sources/manual.py`: identify completed records as generic Codex validation tasks instead of Character.AI-specific input.
+- `src/dream/validation/campaign.py`: store Codex task receipts and enforce exact 5/5/2 phase gates.
+- `src/dream/validation/evaluation.py`: require fixed-profile and Codex-thread provenance in the formal report.
+- `tests/fixtures/agent_profile/`: committed synthetic input, approved Markdown, and approval metadata.
+- `tests/fixtures/personas/`: hidden synthetic user traits used only to create customer messages and score results.
+- `docs/validation/codex-task-evolution-runbook.md`: exact operator and Codex task procedure.
 
-### Task 1: Strict Character Building profile contract
+### Task 1: Fixed Character Building profile and approval verifier
 
 **Files:**
 - Create: `src/dream/validation/profile.py`
 - Create: `tests/validation/test_profile.py`
+- Create: `tests/fixtures/agent_profile/bank-assistant.input.json`
+- Create: `tests/fixtures/agent_profile/TEST_AGENT_PROFILE.md`
+- Create: `tests/fixtures/agent_profile/approval.json`
 
 **Interfaces:**
-- Consumes: synthetic profile input dictionaries and generated Markdown.
-- Produces: `AgentProfileSeed`, `ProfileDraft`, `ProfileApproval`, `ProfileValidationError`, `validate_profile_markdown(seed, markdown) -> None`, and `sha256_text(text) -> str`.
+- Consumes: synthetic profile input JSON, approved Markdown, and approval JSON.
+- Produces: `AgentProfileSeed`, `ProfileApproval`, `ProfileValidationError`, `validate_profile_markdown(seed, markdown)`, `verify_approved_profile(root) -> ProfileApproval`, and CLI `python -m dream.validation.profile verify ROOT`.
 
-- [ ] **Step 1: Write failing model and validation tests**
-
-Add tests that define the exact required fields, reject extras and real-looking account data, and require all ten Markdown sections:
+- [ ] **Step 1: Write failing profile contract tests**
 
 ```python
-from dream.validation.profile import (
-    AgentProfileSeed,
-    ProfileValidationError,
-    sha256_text,
-    validate_profile_markdown,
-)
+def test_approved_profile_contains_complete_character_building_sections() -> None:
+    root = Path(__file__).parents[1] / "fixtures" / "agent_profile"
+    approval = verify_approved_profile(root)
+    assert approval.status == "approved"
+    assert approval.version == 1
 
 
-def valid_seed() -> AgentProfileSeed:
-    return AgentProfileSeed(
-        name="小银",
-        tagline="可靠、清晰的银行业务智能助手",
-        role="银行智能客服",
-        service_scope=("银行卡常见问题", "转账流程说明"),
-        personality=("专业", "耐心", "谨慎", "有边界感"),
-        response_style=("先回答核心问题", "再给操作步骤"),
-        greeting="您好，我是小银，请问您需要了解什么银行业务？",
-    )
+def test_changed_profile_fails_locked_hash(tmp_path: Path) -> None:
+    root = copy_profile_fixture(tmp_path)
+    profile = root / "TEST_AGENT_PROFILE.md"
+    profile.write_text(profile.read_text(encoding="utf-8") + "changed\n", encoding="utf-8")
+    with pytest.raises(ProfileValidationError, match="hash mismatch"):
+        verify_approved_profile(root)
 
 
-def test_profile_seed_forbids_unknown_and_sensitive_fields() -> None:
-    with pytest.raises(ValidationError):
-        AgentProfileSeed.model_validate({
-            **valid_seed().model_dump(),
-            "real_account_number": "6222021234567890",
-        })
-
-
-def test_profile_markdown_requires_complete_character_building_sections() -> None:
-    with pytest.raises(ProfileValidationError, match="示例对话"):
-        validate_profile_markdown(valid_seed(), "# 小银\n\n## 身份与职责\n银行客服\n")
-
-
-def test_profile_hash_is_stable() -> None:
-    assert sha256_text("same\n") == sha256_text("same\n")
+def test_profile_rejects_account_like_numbers(tmp_path: Path) -> None:
+    seed = valid_seed()
+    with pytest.raises(ProfileValidationError, match="account-like"):
+        validate_profile_markdown(seed, complete_profile() + "6222021234567890")
 ```
 
-- [ ] **Step 2: Run the focused test and verify RED**
-
-Run:
+- [ ] **Step 2: Run the test and verify RED**
 
 ```bash
 PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src /Users/fenghao/PycharmProjects/dream/.venv/bin/python \
@@ -104,782 +85,427 @@ PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src /Users/fenghao/PycharmProjects/dream/.v
 
 Expected: collection fails because `dream.validation.profile` does not exist.
 
-- [ ] **Step 3: Implement strict frozen Pydantic models**
-
-Implement these public models and exact status values:
+- [ ] **Step 3: Implement strict profile input and approval models**
 
 ```python
 class AgentProfileSeed(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
-
     name: str = Field(min_length=2, max_length=40)
     tagline: str = Field(min_length=4, max_length=120)
     role: str = Field(min_length=2, max_length=80)
     service_scope: tuple[str, ...] = Field(min_length=1, max_length=12)
     personality: tuple[str, ...] = Field(min_length=2, max_length=12)
     response_style: tuple[str, ...] = Field(min_length=1, max_length=12)
-    greeting: str = Field(default="", max_length=500)
-
-
-class ProfileStatus(StrEnum):
-    DRAFT = "draft"
-    APPROVED = "approved"
-
-
-class ProfileDraft(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
-    status: Literal["draft"] = "draft"
-    markdown: str = Field(min_length=1)
-    sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    greeting: str = Field(min_length=1, max_length=500)
 
 
 class ProfileApproval(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
-    status: Literal["approved"] = "approved"
+    status: Literal["approved"]
     version: int = Field(ge=1)
     approver: str = Field(min_length=1, max_length=80)
     approved_at: str = Field(min_length=1)
     sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
 ```
 
-Normalize every tuple item by stripping whitespace, reject blanks and case-folded duplicates, and reject NUL characters. The seed input must contain only the seven declared fields.
+Strip every string, reject blanks, NUL characters, duplicate tuple items, extra fields, and timestamps without time zones.
 
-- [ ] **Step 4: Implement deterministic Markdown validation**
+- [ ] **Step 4: Implement exact Markdown and hash validation**
 
-Require these exact headings:
+Require the title `# {seed.name}`, the ten headings from the approved design, at least four `### 示例` headings, every service-scope item, and safety concepts `验证码`, `密码`, `银行卡号`, `真实交易`, `贷款`, and `收益`. Reject files over 12,000 characters and any 12-19 digit sequence. `verify_approved_profile` validates all three files, recomputes SHA-256 from UTF-8 bytes, and compares it to `approval.json`.
 
-```python
-REQUIRED_HEADINGS = (
-    "## 简短定位",
-    "## 身份与职责",
-    "## 核心目标",
-    "## 性格与行为",
-    "## 服务范围",
-    "## 回答风格",
-    "## 安全边界",
-    "## 转人工条件",
-    "## 开场白",
-    "## 示例对话",
-)
-```
+- [ ] **Step 5: Create the complete synthetic bank profile fixtures**
 
-`validate_profile_markdown` must reject blank/NUL content, text over 12,000 characters, a title other than `# {seed.name}`, a missing heading, fewer than four `### 示例` headings, a missing seed service-scope item, and any 12-19 digit sequence. Require the safety section to contain the normalized concepts `验证码`, `密码`, `银行卡号`, `真实交易`, `贷款`, and `收益`. Error messages identify only the failed rule and never echo the input text.
+`bank-assistant.input.json` contains only the seven schema fields. `TEST_AGENT_PROFILE.md` contains a synthetic bank assistant named `小银`, all ten sections, and four safe examples. `approval.json` records version 1, approver `fenghao`, an actual timezone-aware timestamp, and the actual Markdown SHA-256.
 
-- [ ] **Step 5: Run the test and verify GREEN**
-
-Run the same command from Step 2.
-
-Expected: all profile contract tests pass.
-
-- [ ] **Step 6: Commit the profile contract**
-
-```bash
-git add src/dream/validation/profile.py tests/validation/test_profile.py
-git commit -m "feat: validate synthetic agent profiles"
-```
-
-### Task 2: Structured profile draft generation
-
-**Files:**
-- Create: `src/dream/validation/profile_prompts.py`
-- Create: `src/dream/validation/profile_backend.py`
-- Create: `tests/validation/test_profile_backend.py`
-
-**Interfaces:**
-- Consumes: `AgentProfileSeed` and an OpenAI-compatible client.
-- Produces: `ProfileDraftBackend.generate(seed) -> str`, `DeterministicProfileDraftBackend`, and `OpenAIProfileDraftBackend`.
-
-- [ ] **Step 1: Write failing backend isolation and structure tests**
-
-Use a recording completion client and assert that the backend sends only the seed fields, forces `generate_agent_profile`, and rejects malformed output:
-
-```python
-def test_openai_profile_backend_sends_only_structured_seed() -> None:
-    completions = RecordingCompletions(markdown=complete_markdown())
-    backend = OpenAIProfileDraftBackend(
-        client=client_for(completions),
-        model="test-model",
-        structured_mode="tools",
-    )
-
-    result = backend.generate(valid_seed())
-
-    assert result == complete_markdown()
-    payload = completions.calls[0]["messages"][1]["content"]
-    assert "real customer" not in payload
-    assert set(json.loads(payload)) == set(valid_seed().model_dump())
-
-
-def test_profile_backend_rejects_unvalidated_markdown() -> None:
-    backend = OpenAIProfileDraftBackend(
-        client=client_returning("# incomplete"),
-        model="test-model",
-        structured_mode="tools",
-    )
-    with pytest.raises(ProfileGenerationError, match="profile generation failed"):
-        backend.generate(valid_seed())
-```
-
-- [ ] **Step 2: Run focused tests and verify RED**
+- [ ] **Step 6: Run tests and CLI verification**
 
 ```bash
 PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src /Users/fenghao/PycharmProjects/dream/.venv/bin/python \
-  -m pytest -q -p no:cacheprovider tests/validation/test_profile_backend.py
+  -m pytest -q -p no:cacheprovider tests/validation/test_profile.py
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src /Users/fenghao/PycharmProjects/dream/.venv/bin/python \
+  -m dream.validation.profile verify tests/fixtures/agent_profile
 ```
 
-Expected: collection fails because the profile backend modules do not exist.
+Expected: all tests pass and CLI reports one approved, hash-verified profile.
 
-- [ ] **Step 3: Define the tool schema and fixed generation prompt**
-
-`PROFILE_GENERATION_TOOL` must expose exactly one argument:
-
-```python
-PROFILE_GENERATION_TOOL = {
-    "type": "function",
-    "function": {
-        "name": "generate_agent_profile",
-        "description": "Return a synthetic test Agent profile in Markdown.",
-        "parameters": {
-            "type": "object",
-            "properties": {"markdown": {"type": "string"}},
-            "required": ["markdown"],
-            "additionalProperties": False,
-        },
-    },
-}
-```
-
-The system prompt must require all ten headings, four example categories, no real bank facts, no real user data, no credentials, no account access, and no chain-of-thought. It must say the returned document remains a draft until human approval.
-
-- [ ] **Step 4: Implement both backends**
-
-Use the existing `StructuredCompletionClient` with three total attempts, `temperature=0`, and safe errors:
-
-```python
-class ProfileDraftBackend(Protocol):
-    def generate(self, seed: AgentProfileSeed) -> str: ...
-
-
-class OpenAIProfileDraftBackend:
-    def generate(self, seed: AgentProfileSeed) -> str:
-        calls = self.structured.call(
-            system=PROFILE_GENERATION_PROMPT,
-            content=json.dumps(seed.model_dump(), ensure_ascii=False, sort_keys=True),
-            tools=(PROFILE_GENERATION_TOOL,),
-            forced_tool="generate_agent_profile",
-            mode=self.structured_mode,
-        )
-        markdown = calls[0].arguments.get("markdown")
-        if not isinstance(markdown, str):
-            raise ProfileGenerationError("profile generation failed")
-        validate_profile_markdown(seed, markdown)
-        return markdown.strip() + "\n"
-```
-
-`DeterministicProfileDraftBackend` renders the same required sections from the seed and inserts a fixed synthetic safety section plus four fixed scenario examples. It exists for offline tests, not for the final qualitative evaluation.
-
-- [ ] **Step 5: Run backend tests and verify GREEN**
-
-Run the same command from Step 2.
-
-Expected: all profile backend tests pass in deterministic, tool, JSON, retry, and malformed-output cases.
-
-- [ ] **Step 6: Commit profile generation**
+- [ ] **Step 7: Commit the fixed profile**
 
 ```bash
-git add src/dream/validation/profile_prompts.py src/dream/validation/profile_backend.py tests/validation/test_profile_backend.py
-git commit -m "feat: generate Character Building test profiles"
+git add src/dream/validation/profile.py tests/validation/test_profile.py tests/fixtures/agent_profile
+git commit -m "feat: lock the validation agent profile"
 ```
 
-### Task 3: Draft approval, hash locking, configuration, and CLI
+### Task 2: Generic Codex task conversation provenance
 
 **Files:**
-- Modify: `src/dream/validation/profile.py`
-- Modify: `src/dream/config.py`
-- Modify: `.env.example`
-- Create: `tests/validation/test_profile_store.py`
-- Modify: `tests/test_config.py`
-- Create: `tests/fixtures/agent_profile/bank-assistant.input.json`
-- Create: `tests/fixtures/agent_profile/bank-assistant.approved.md`
-- Create: `tests/fixtures/agent_profile/bank-assistant.approval.json`
+- Modify: `src/dream/sources/manual.py`
+- Modify: `tests/sources/test_manual.py`
+- Modify: `src/dream/service.py`
+- Modify: `tests/test_api_e2e.py`
 
 **Interfaces:**
-- Consumes: `AgentProfileSeed`, `ProfileDraftBackend`, and a validation-run root directory.
-- Produces: `AgentProfileStore.generate(seed, backend)`, `approve(expected_sha256, approver)`, `load_approved()`, `verify_locked()`, and `python -m dream.validation.profile` commands.
+- Consumes: completed JSONL with a real Codex thread ID.
+- Produces: `ManualConversationRecord.source`, generic `source_refs`, and unchanged idempotent DREAM import.
 
-- [ ] **Step 1: Write failing approval and immutability tests**
+- [ ] **Step 1: Write failing source and session tests**
 
 ```python
-def test_draft_cannot_be_loaded_before_human_approval(tmp_path: Path) -> None:
-    store = AgentProfileStore(tmp_path)
-    draft = store.generate(valid_seed(), DeterministicProfileDraftBackend())
-    assert draft.status == "draft"
-    with pytest.raises(ProfileApprovalError, match="not approved"):
-        store.load_approved()
+def test_manual_codex_record_preserves_real_thread_provenance() -> None:
+    record = parse_manual_ndjson(valid_line(
+        source="codex-thread",
+        session_id="019fd149-example-thread-id",
+    ))[0]
+    event = manual_record_to_event(record)
+    assert event.source_refs == ({
+        "source": "codex-thread",
+        "session_id": "019fd149-example-thread-id",
+    },)
 
 
-def test_approval_locks_exact_profile_hash(tmp_path: Path) -> None:
-    store = AgentProfileStore(tmp_path)
-    draft = store.generate(valid_seed(), DeterministicProfileDraftBackend())
-    approval = store.approve(draft.sha256, approver="validation-owner")
-
-    assert approval.sha256 == draft.sha256
-    assert store.verify_locked().sha256 == draft.sha256
-    store.approved_path.write_text("changed\n", encoding="utf-8")
-    with pytest.raises(ProfileApprovalError, match="hash mismatch"):
-        store.verify_locked()
-
-
-def test_approval_rejects_stale_expected_hash(tmp_path: Path) -> None:
-    store = AgentProfileStore(tmp_path)
-    store.generate(valid_seed(), DeterministicProfileDraftBackend())
-    with pytest.raises(ProfileApprovalError, match="draft hash"):
-        store.approve("0" * 64, approver="validation-owner")
+def test_manual_source_accepts_only_validation_sources() -> None:
+    with pytest.raises(ManualSourceError):
+        parse_manual_ndjson(valid_line(source="unknown-source"))
 ```
 
-- [ ] **Step 2: Run focused tests and verify RED**
+- [ ] **Step 2: Run the focused test and verify RED**
 
 ```bash
 PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src /Users/fenghao/PycharmProjects/dream/.venv/bin/python \
-  -m pytest -q -p no:cacheprovider tests/validation/test_profile_store.py tests/test_config.py
+  -m pytest -q -p no:cacheprovider tests/sources/test_manual.py tests/test_api_e2e.py
 ```
 
-Expected: profile-store tests fail because `AgentProfileStore` does not exist.
+Expected: the strict record rejects `source` as an extra field.
 
-- [ ] **Step 3: Implement atomic draft and approval storage**
-
-Use `AtomicArtifactStore(root)` where `root` is the profile directory, and use
-these exact paths relative to that root:
-
-```text
-input.json
-draft.md
-TEST_AGENT_PROFILE.md
-approval.json
-```
-
-`generate` validates the seed, calls the backend, validates Markdown again, writes input and draft atomically, and returns `ProfileDraft`. `approve` compares the caller-supplied hash with the current draft, writes the approved Markdown, and writes `ProfileApproval(version=1, ...)`. Refuse approval if an approved profile already exists. `verify_locked` recomputes the approved file hash on every call.
-
-- [ ] **Step 4: Add profile-provider configuration**
-
-Extend `DreamSettings` with:
+- [ ] **Step 3: Add a strict source field and generic mapping**
 
 ```python
-validation_profile_backend: str = "inherit"
-validation_profile_model: str = ""
-validation_profile_max_completion_tokens: int = 4000
+source: Literal["codex-thread", "manual-import"] = "manual-import"
 ```
 
-Add these environment variables:
+Change `manual_record_to_event` to use `record.source` rather than the hard-coded `manual-character-ai`. Keep `session_id` nonblank and opaque; do not parse or invent a URL. Existing offline fixtures without `source` continue to map to `manual-import`.
 
-```dotenv
-DREAM_VALIDATION_PROFILE_BACKEND=inherit
-DREAM_VALIDATION_PROFILE_MODEL=
-DREAM_VALIDATION_PROFILE_MAX_COMPLETION_TOKENS=4000
-```
-
-Allowed backend values are `inherit`, `deterministic`, and `openai`. `build_profile_backend(settings, client_factory=None)` reuses the review URL and API key; `inherit` selects deterministic only when the review backend is deterministic, otherwise selects OpenAI and uses `DREAM_VALIDATION_PROFILE_MODEL` or `DREAM_REVIEW_MODEL`.
-
-- [ ] **Step 5: Implement CLI commands**
-
-Support:
-
-```text
-python -m dream.validation.profile generate INPUT_JSON RUN_ROOT --env-file .env
-python -m dream.validation.profile approve RUN_ROOT --sha256 HASH --approver NAME
-python -m dream.validation.profile verify RUN_ROOT
-```
-
-`generate` prints only status, output path, and hash. `approve` prints only version and hash. `verify` returns exit 0 only when the approval metadata and approved Markdown hash match. No command prints the API key or complete provider error.
-
-- [ ] **Step 6: Add synthetic committed fixtures**
-
-The input fixture uses the exact seven allowed fields and the approved Markdown contains the ten sections and four examples from the design. `bank-assistant.approval.json` records `approver="offline-fixture"`, version 1, a fixed ISO timestamp, and the actual Markdown SHA-256. Tests must recompute and verify the fixture hash.
-
-- [ ] **Step 7: Run tests and verify GREEN**
-
-Run the command from Step 2. The tests must also load the three committed
-`bank-assistant.*` fixtures, recompute the Markdown hash, and exercise the CLI
-against a temporary approved profile directory.
-
-Expected: selected tests pass and the CLI test observes
-`approved profile verified` with exit 0.
-
-- [ ] **Step 8: Commit the approval workflow**
-
-```bash
-git add src/dream/validation/profile.py src/dream/config.py .env.example tests/test_config.py tests/validation/test_profile_store.py tests/fixtures/agent_profile
-git commit -m "feat: lock approved test agent profiles"
-```
-
-### Task 4: Fixed-profile simulated Agent backend
-
-**Files:**
-- Create: `src/dream/validation/agent.py`
-- Create: `tests/validation/test_agent.py`
-- Modify: `src/dream/config.py`
-- Modify: `.env.example`
-- Modify: `tests/test_config.py`
-
-**Interfaces:**
-- Consumes: an approved `AgentProfileStore`, `DreamService.start_context(ids)`, one user message, and an OpenAI-compatible client.
-- Produces: `AgentReply`, `ValidationAgentBackend.reply(...)`, `OpenAIValidationAgentBackend`, and `ProfiledValidationAgent.respond(ids, user_message, include_dream_context) -> AgentReply`.
-
-- [ ] **Step 1: Write failing context-isolation tests**
-
-```python
-def test_baseline_agent_receives_profile_but_no_dream_artifacts(tmp_path: Path) -> None:
-    backend = RecordingAgentBackend("基线回答")
-    agent = profiled_agent(tmp_path, backend)
-
-    reply = agent.respond(ids("project-manager"), "如何换卡？", include_dream_context=False)
-
-    assert reply.content == "基线回答"
-    assert "# 小银" in backend.system
-    assert "DECISION_RULES" not in backend.system
-    assert "USER.md" not in backend.system
-
-
-def test_evolved_agent_receives_only_current_user_profile(tmp_path: Path) -> None:
-    write_dream_artifacts(tmp_path, alice="需要分步骤", bob="喜欢简短")
-    backend = RecordingAgentBackend("个性化回答")
-    agent = profiled_agent(tmp_path, backend)
-
-    agent.respond(ids("project-manager"), "如何换卡？", include_dream_context=True)
-
-    assert "需要分步骤" in backend.system
-    assert "喜欢简短" not in backend.system
-    assert "Evidence cards" in backend.system
-```
-
-- [ ] **Step 2: Run focused tests and verify RED**
-
-```bash
-PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src /Users/fenghao/PycharmProjects/dream/.venv/bin/python \
-  -m pytest -q -p no:cacheprovider tests/validation/test_agent.py tests/test_config.py
-```
-
-Expected: collection fails because `dream.validation.agent` does not exist.
-
-- [ ] **Step 3: Implement provider-neutral Agent calls**
-
-Use these immutable records:
-
-```python
-class AgentReply(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
-    content: str = Field(min_length=1)
-    model: str = Field(min_length=1)
-    profile_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
-    dream_context_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
-
-
-class ValidationAgentBackend(Protocol):
-    model: str
-    def reply(self, *, system: str, user_message: str) -> str: ...
-```
-
-`OpenAIValidationAgentBackend` calls `client.chat.completions.create` with one system message, one user message, `temperature=0`, no tools, and configured `max_completion_tokens`. Reject tool calls, blank output, and provider failures using safe `ValidationAgentError` messages.
-
-- [ ] **Step 4: Implement deterministic context composition**
-
-`ProfiledValidationAgent` calls `profile_store.verify_locked()` for every task. Baseline system input contains only the approved profile. Evolved input additionally contains the current scope's `decision_rules` and `user_profile` from `DreamService.start_context(ids)`. It never includes raw previous conversation, hidden persona, decision-card files, another user's profile, API keys, or provider responses.
-
-Hash the exact optional DREAM context string; use SHA-256 of the empty string in baseline tasks.
-
-- [ ] **Step 5: Add Agent provider settings**
-
-Extend `DreamSettings` and `.env.example`:
-
-```dotenv
-DREAM_VALIDATION_AGENT_MODEL=
-DREAM_VALIDATION_AGENT_BASE_URL=
-DREAM_VALIDATION_AGENT_API_KEY=
-DREAM_VALIDATION_AGENT_MAX_COMPLETION_TOKENS=1200
-```
-
-`build_validation_agent_backend` requires all credentials only when an operational simulated Agent is requested. It must not affect normal DREAM startup or tests that inject a fake backend.
-
-- [ ] **Step 6: Run tests and verify GREEN**
+- [ ] **Step 4: Run tests and verify GREEN**
 
 Run the command from Step 2.
 
-Expected: tests pass and show that the profile hash is identical in baseline/evolved calls while the DREAM context hash differs.
+Expected: selected tests pass, duplicate imports remain idempotent, and source metadata contains the exact thread ID.
 
-- [ ] **Step 7: Commit the simulated Agent backend**
-
-```bash
-git add src/dream/validation/agent.py src/dream/config.py .env.example tests/validation/test_agent.py tests/test_config.py
-git commit -m "feat: run fixed-profile validation agents"
-```
-
-### Task 5: Synthetic user-to-Agent task capture
-
-**Files:**
-- Create: `src/dream/validation/simulation.py`
-- Create: `tests/validation/test_simulation.py`
-- Modify: `tests/fixtures/personas/project_manager.gold.json`
-- Modify: `tests/fixtures/personas/python_beginner.gold.json`
-- Modify: `tests/fixtures/personas/technical_lead.gold.json`
-- Modify: `.gitignore`
-
-**Interfaces:**
-- Consumes: `AgnesSimulator`, `ProfiledValidationAgent`, hidden persona mapping, and a fixed `ScopeIds`.
-- Produces: `SimulationTaskResult`, `SyntheticTaskRunner.run_task(...)`, and `ValidationConversationStore.append(record)`.
-
-- [ ] **Step 1: Write failing no-leakage and JSONL tests**
-
-```python
-def test_simulated_task_persists_only_public_messages(tmp_path: Path) -> None:
-    runner = synthetic_runner(tmp_path, user_message="请分步骤说明换卡。", reply="第一步……")
-    hidden = {"secret_trait": "step_by_step", "scenario": "card replacement"}
-
-    result = runner.run_task(
-        ids=ids("python-beginner"),
-        hidden_persona=hidden,
-        task_number=1,
-        include_dream_context=False,
-    )
-
-    encoded = result.record.model_dump_json()
-    assert "secret_trait" not in encoded
-    assert "step_by_step" not in encoded
-    assert result.record.final_response == "第一步……"
-
-
-def test_conversation_store_is_idempotent_and_append_only(tmp_path: Path) -> None:
-    store = ValidationConversationStore(tmp_path / "python_beginner.local.jsonl")
-    record = completed_record("evt-python-beginner-001")
-    assert store.append(record) is True
-    assert store.append(record) is False
-    assert parse_manual_ndjson(store.path.read_text(encoding="utf-8")) == (record,)
-```
-
-- [ ] **Step 2: Run focused tests and verify RED**
+- [ ] **Step 5: Commit generic provenance**
 
 ```bash
-PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src /Users/fenghao/PycharmProjects/dream/.venv/bin/python \
-  -m pytest -q -p no:cacheprovider tests/validation/test_simulation.py tests/validation/test_agnes.py
+git add src/dream/sources/manual.py src/dream/service.py tests/sources/test_manual.py tests/test_api_e2e.py
+git commit -m "feat: trace validation events to Codex tasks"
 ```
 
-Expected: collection fails because `dream.validation.simulation` does not exist.
-
-- [ ] **Step 3: Extend synthetic persona fixtures without changing trait keys**
-
-Keep the existing `user_id` and `traits`, and add only synthetic fields used by Agnes:
-
-```json
-{
-  "user_id": "python-beginner",
-  "traits": ["step_by_step", "examples", "low_jargon"],
-  "bank_context": "第一次使用手机银行，需要逐步说明并避免专业术语",
-  "allowed_topics": ["银行卡换卡", "转账限额", "手机银行登录", "可疑短信"],
-  "preference_change_at": 9
-}
-```
-
-Create equivalent bank-context fields for the other two fixed users. All values remain synthetic and must never be sent to DREAM or the Agent backend.
-
-- [ ] **Step 4: Implement one completed task per isolated call**
-
-For each task:
-
-1. Call `AgnesSimulator.next_user_message` with the hidden persona, empty `public_history`, and task number.
-2. Call `ProfiledValidationAgent.respond` with only that returned message.
-3. Build `ManualConversationRecord` with two messages, a stable event ID `evt-{user_id}-{task_number:03d}`, a new session ID per task, and matching `final_response`.
-4. Return profile hash and DREAM context hash separately in `SimulationTaskResult`; do not add them to the public conversation record.
-
-Never persist `hidden_persona`, Agnes request messages, or Agnes provider responses.
-
-- [ ] **Step 5: Implement fsynced idempotent local JSONL storage**
-
-`ValidationConversationStore` reads existing event IDs with `parse_manual_ndjson`, appends one `record.model_dump_json()` line, flushes, and calls `os.fsync`. Add these exact ignore patterns:
-
-```gitignore
-tests/fixtures/conversations/*.local.jsonl
-tests/evaluation/*.local.json
-validation-run/
-```
-
-- [ ] **Step 6: Run tests and verify GREEN**
-
-Run the command from Step 2 and scan test output files for the hidden keys `bank_context`, `allowed_topics`, and `preference_change_at`; expected count outside persona fixtures is zero.
-
-- [ ] **Step 7: Commit task capture**
-
-```bash
-git add src/dream/validation/simulation.py tests/validation/test_simulation.py tests/fixtures/personas .gitignore
-git commit -m "feat: capture synthetic bank agent tasks"
-```
-
-### Task 6: Periodic 5/5/2 dream campaign
+### Task 3: 5/5/2 Codex campaign state and gates
 
 **Files:**
 - Create: `src/dream/validation/campaign.py`
 - Create: `tests/validation/test_campaign.py`
-- Modify: `src/dream/closed_loop.py`
-- Modify: `tests/test_closed_loop.py`
+- Modify: `.gitignore`
 
 **Interfaces:**
-- Consumes: `SyntheticTaskRunner`, `DreamService`, `ClosedLoopCoordinator`, three fixed users, and one approved profile.
-- Produces: `CampaignPhase`, `CampaignState`, `ValidationCampaign.run_next_task(user_id)`, `run_due_dreams()`, and `verify_phase_gate(user_id)`.
+- Consumes: one `ManualConversationRecord`, real Codex thread ID, approved profile hash, active publication version, and DREAM context hash.
+- Produces: `CampaignPhase`, `CodexTaskReceipt`, `UserCampaignState`, `CodexCampaignStore.record(receipt)`, `assert_can_create(user_id, task_number)`, `note_active_cycle(user_id, cycle, version)`, and `summary()`.
 
-- [ ] **Step 1: Write failing 5/5/2 phase and activation tests**
+- [ ] **Step 1: Write failing phase-gate and uniqueness tests**
 
 ```python
-def test_campaign_uses_fixed_profile_across_two_dream_cycles(tmp_path: Path) -> None:
-    campaign = fake_campaign(tmp_path)
-
-    for _ in range(5):
-        campaign.run_next_task("project-manager")
-    first = campaign.run_due_dreams()["project-manager"]
-    for _ in range(5):
-        campaign.run_next_task("project-manager")
-    second = campaign.run_due_dreams()["project-manager"]
-    for _ in range(2):
-        campaign.run_next_task("project-manager")
-
-    state = campaign.state("project-manager")
-    assert state.task_count == 12
-    assert state.active_cycles == 2
-    assert state.profile_sha256_before == state.profile_sha256_after
-    assert first.version < second.version
+def test_task_six_waits_for_first_active_dream(tmp_path: Path) -> None:
+    store = CodexCampaignStore(tmp_path, approved_profile_sha="a" * 64)
+    for number in range(1, 6):
+        store.record(receipt("project-manager", number))
+    with pytest.raises(CampaignBlocked, match="cycle 1"):
+        store.assert_can_create("project-manager", 6)
+    store.note_active_cycle("project-manager", cycle=1, version=1)
+    store.assert_can_create("project-manager", 6)
 
 
-def test_evolved_phase_cannot_start_before_due_dream_is_active(tmp_path: Path) -> None:
-    campaign = fake_campaign(tmp_path)
-    for _ in range(5):
-        campaign.run_next_task("technical-lead")
-    with pytest.raises(CampaignBlocked, match="dream cycle 1"):
-        campaign.run_next_task("technical-lead")
+def test_task_eleven_waits_for_second_active_dream(tmp_path: Path) -> None:
+    store = state_after_ten_tasks(tmp_path)
+    with pytest.raises(CampaignBlocked, match="cycle 2"):
+        store.assert_can_create("python-beginner", 11)
+
+
+def test_thread_id_and_event_id_are_globally_unique(tmp_path: Path) -> None:
+    store = CodexCampaignStore(tmp_path, approved_profile_sha="a" * 64)
+    store.record(receipt("project-manager", 1, thread_id="thread-one"))
+    with pytest.raises(CampaignValidationError, match="thread ID"):
+        store.record(receipt("technical-lead", 1, thread_id="thread-one"))
 ```
 
-- [ ] **Step 2: Run focused tests and verify RED**
+- [ ] **Step 2: Run tests and verify RED**
 
 ```bash
 PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src /Users/fenghao/PycharmProjects/dream/.venv/bin/python \
-  -m pytest -q -p no:cacheprovider tests/validation/test_campaign.py tests/test_closed_loop.py
+  -m pytest -q -p no:cacheprovider tests/validation/test_campaign.py
 ```
 
 Expected: collection fails because `dream.validation.campaign` does not exist.
 
-- [ ] **Step 3: Implement explicit campaign phases**
-
-Use exact phase boundaries:
+- [ ] **Step 3: Implement exact immutable receipt fields**
 
 ```python
 class CampaignPhase(StrEnum):
-    BASELINE = "baseline"       # tasks 1-5
-    EVOLVED_V1 = "evolved_v1"   # tasks 6-10
-    EVOLVED_V2 = "evolved_v2"   # tasks 11-12
-    COMPLETE = "complete"
+    BASELINE = "baseline"
+    EVOLVED_V1 = "evolved_v1"
+    EVOLVED_V2 = "evolved_v2"
+
+
+class CodexTaskReceipt(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    user_id: Literal["project-manager", "python-beginner", "technical-lead"]
+    task_number: int = Field(ge=1, le=12)
+    event_id: str = Field(min_length=1)
+    thread_id: str = Field(min_length=1)
+    profile_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    dream_context_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    active_publication_version: int = Field(ge=0)
 ```
 
-`run_next_task` determines `include_dream_context` from the phase, rejects task 6 until cycle 1 is active, rejects task 11 until cycle 2 is active, imports the completed record through `DreamService.import_manual_ndjson`, and atomically records only event ID, task number, phase, profile hash, DREAM context hash, and active publication version in `validation-run/campaign/users/<user_id>.json`.
+Derive phase from task number rather than accepting caller-provided phase. Baseline receipts require publication version 0 and SHA-256 of empty DREAM context. Evolved receipts require an active version greater than zero.
 
-- [ ] **Step 4: Reuse the existing closed-loop lifecycle for local context publication**
+- [ ] **Step 4: Implement append-only state and gates**
 
-Add `ClosedLoopCoordinator.confirm_local_context(ids, version)` that:
+Store one fsynced JSON line per receipt at `validation-run/campaign/receipts.jsonl` and atomic user summaries at `validation-run/campaign/users/<user_id>.json`. Reject duplicate thread IDs, event IDs, task numbers, skipped task numbers, changed profile hashes, task 6 without cycle 1, task 11 without cycle 2, and more than 12 tasks.
 
-- permits only `READY_FOR_WRITEBACK` candidates;
-- recomputes `CHARACTER_DEFINITION.md` and scoped `USER_PERSONA.md` hashes;
-- compares them with the candidate record;
-- marks both writebacks satisfied only when the files exist and hashes match;
-- does not call an external API or claim that Character.AI was updated.
+`summary()` succeeds only when all three users have 12 tasks and two active cycles.
 
-`ValidationCampaign.run_due_dreams` calls `dream`, requires a human-review callback to return `True`, calls `approve`, `confirm_local_context`, and `activate`. A false callback rejects the candidate and blocks the next phase.
+- [ ] **Step 5: Add local runtime ignores**
 
-- [ ] **Step 5: Require all three users before campaign completion**
+```gitignore
+validation-run/
+tests/fixtures/conversations/*.local.jsonl
+tests/evaluation/*.local.json
+```
 
-`campaign.summary()` succeeds only when every fixed user has 12 tasks, two active cycles, identical initial/final profile hashes, and no missing local conversation file. The shared Agent decision rules remain at agent scope while user personas remain per user.
-
-- [ ] **Step 6: Run focused tests and verify GREEN**
+- [ ] **Step 6: Run tests and verify GREEN**
 
 Run the command from Step 2.
 
-Expected: all selected tests pass, including a rejected cycle, a failed LLM cycle that preserves the previous active version, and a changed profile hash that blocks the campaign.
+Expected: tests pass for phase transitions, restart recovery, profile hash mismatch, duplicated threads, and complete 36-task summary.
 
-- [ ] **Step 7: Commit the periodic campaign**
+- [ ] **Step 7: Commit campaign state**
 
 ```bash
-git add src/dream/validation/campaign.py src/dream/closed_loop.py tests/validation/test_campaign.py tests/test_closed_loop.py
-git commit -m "feat: run periodic evolution campaigns"
+git add src/dream/validation/campaign.py tests/validation/test_campaign.py .gitignore
+git commit -m "feat: track independent Codex validation tasks"
 ```
 
-### Task 7: Evaluation provenance for fixed profile and model identity
+### Task 4: Formal evaluation requires real Codex tasks
 
 **Files:**
 - Modify: `src/dream/validation/evaluation.py`
 - Modify: `tests/validation/test_evaluation.py`
-- Modify: `tests/evaluation/.gitkeep`
 
 **Interfaces:**
-- Consumes: campaign summary, existing human evidence counts, approved profile hash, and external model identity.
-- Produces: an extended `ValidationRunInput` and reproducible `EvaluationReport` that fail when the baseline changed.
+- Consumes: existing human evidence scores plus campaign provenance.
+- Produces: reproducible acceptance that fails for missing threads, changed profile hashes, wrong task counts, or missing cycles.
 
-- [ ] **Step 1: Write failing provenance acceptance tests**
+- [ ] **Step 1: Write failing provenance tests**
 
 ```python
-def test_acceptance_requires_unchanged_profile_and_model() -> None:
-    changed_profile = passing_run(
+def test_acceptance_requires_36_real_codex_tasks() -> None:
+    report = evaluate_validation_run(passing_run(codex_thread_count=35))
+    assert report.passed is False
+    assert any("36 Codex" in reason for reason in report.failure_reasons)
+
+
+def test_acceptance_requires_unchanged_initial_profile() -> None:
+    report = evaluate_validation_run(passing_run(
         agent_profile_sha256_before="a" * 64,
         agent_profile_sha256_after="b" * 64,
-    )
-    changed_model = passing_run(
-        baseline_model="model-a",
-        evolved_model="model-b",
-    )
-
-    assert evaluate_validation_run(changed_profile).passed is False
-    assert evaluate_validation_run(changed_model).passed is False
+    ))
+    assert report.passed is False
+    assert any("profile hash" in reason for reason in report.failure_reasons)
 
 
-def test_acceptance_records_twelve_tasks_and_two_cycles_per_user() -> None:
-    report = evaluate_validation_run(passing_run())
-    assert all(user.task_count == 12 for user in report.run.users)
-    assert report.run.completed_dream_writeback_cycles >= 2
-    assert report.passed is True
+def test_public_seed_data_is_not_an_acceptance_input() -> None:
+    assert "public_seed_count" not in ValidationRunInput.model_fields
 ```
 
-- [ ] **Step 2: Run focused tests and verify RED**
+- [ ] **Step 2: Run tests and verify RED**
 
 ```bash
 PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src /Users/fenghao/PycharmProjects/dream/.venv/bin/python \
   -m pytest -q -p no:cacheprovider tests/validation/test_evaluation.py
 ```
 
-Expected: Pydantic rejects the new fields because the existing model forbids extras.
+Expected: Pydantic rejects the new provenance fields.
 
-- [ ] **Step 3: Add exact provenance fields**
-
-Extend `ValidationRunInput`:
+- [ ] **Step 3: Add exact report fields**
 
 ```python
 agent_profile_version: int = Field(ge=1)
 agent_profile_sha256_before: str = Field(pattern=r"^[0-9a-f]{64}$")
 agent_profile_sha256_after: str = Field(pattern=r"^[0-9a-f]{64}$")
-baseline_model: str = Field(min_length=1)
-evolved_model: str = Field(min_length=1)
-baseline_temperature: float = 0.0
-evolved_temperature: float = 0.0
-public_seed_count: int = Field(ge=0)
-helpsteer2_seed_count: int = Field(ge=0)
-pku_saferlhf_seed_count: int = Field(ge=0)
+codex_thread_count: int = Field(ge=0)
+missing_codex_threads: int = Field(ge=0)
+duplicate_codex_threads: int = Field(ge=0)
 ```
 
-Acceptance additionally requires identical profile hashes, identical model IDs, both temperatures equal to zero, exactly 30 public seeds split 20/10, and exactly three users with at least 10 tasks each. Preserve every existing evidence, safety, isolation, cycle, conflict, and rollback requirement.
+Acceptance additionally requires identical profile hashes, `codex_thread_count == 36`, zero missing/duplicate threads, three users with exactly 12 tasks, and at least two active dream cycles per user. Preserve all existing evidence, personalization, AI evolution, hallucination, leakage, conflict, and rollback checks.
 
-- [ ] **Step 4: Keep saved reports reproducible**
+- [ ] **Step 4: Update recomputation and CLI output**
 
-`verify_report` must recompute the new provenance failures. Update every test fixture and test helper with literal synthetic hashes and model IDs; do not silently default missing fields in saved reports.
+`verify_report` must recompute every new failure. CLI output adds `codex_threads=36` and `profile_unchanged=true`. Saved reports missing these fields are invalid rather than silently defaulted.
 
 - [ ] **Step 5: Run tests and verify GREEN**
 
 Run the command from Step 2.
 
-Expected: all evaluation tests pass; one changed hash, model, temperature, or seed count fails acceptance with a specific reason.
+Expected: tests pass; a changed hash, 35 threads, duplicate thread, missing thread, or user with 11 tasks fails.
 
-- [ ] **Step 6: Commit provenance evaluation**
+- [ ] **Step 6: Commit formal provenance checks**
 
 ```bash
-git add src/dream/validation/evaluation.py tests/validation/test_evaluation.py tests/evaluation/.gitkeep
-git commit -m "test: verify fixed-profile evolution provenance"
+git add src/dream/validation/evaluation.py tests/validation/test_evaluation.py
+git commit -m "test: require real Codex task provenance"
 ```
 
-### Task 8: Runbook, real data, real simulation, and formal report
+### Task 5: Codex task operator runbook
 
 **Files:**
-- Create: `docs/validation/test-agent-evolution-runbook.md`
+- Create: `docs/validation/codex-task-evolution-runbook.md`
 - Modify: `README.md`
-- Create operationally: `tests/fixtures/ai_seed/selected.local.jsonl`
-- Create operationally: `tests/fixtures/conversations/project_manager.local.jsonl`
-- Create operationally: `tests/fixtures/conversations/python_beginner.local.jsonl`
-- Create operationally: `tests/fixtures/conversations/technical_lead.local.jsonl`
-- Create after evidence review: `tests/evaluation/latest.json`
 
 **Interfaces:**
-- Consumes: all implemented validation components, 30 genuine public dataset rows, configured LLM credentials, and human review decisions.
-- Produces: one locked initial profile, three 12-task conversation files, at least two active dream cycles, and a recomputable formal evaluation report.
+- Consumes: approved profile, Codex App task tools, manual JSONL import, closed-loop DREAM endpoints, and campaign store.
+- Produces: one repeatable 36-task procedure without an external Agent API.
 
-- [ ] **Step 1: Write the exact operator runbook**
+- [ ] **Step 1: Document the exact fresh-task prompt**
 
-Document this sequence without Character.AI website dependency:
+The runbook includes this literal prompt structure:
 
 ```text
-1. Validate the synthetic profile seed.
-2. Generate the complete profile draft with the configured model.
-3. Inspect all ten sections and four examples.
-4. Approve and lock the exact SHA-256.
-5. Manually select and validate 20 HelpSteer2 plus 10 PKU-SafeRLHF rows.
-6. Run tasks 1-5 for each synthetic user with profile only.
-7. Inspect USER.md and decision cards, approve and activate dream cycle 1.
-8. Run tasks 6-10 with active DREAM context.
-9. Demonstrate one explicit preference change, then approve and activate cycle 2.
-10. Run tasks 11-12 with the second active context.
-11. Audit citations, isolation, private-data leakage, hallucinations, fallback, and rollback.
-12. Save actual counts and hashes to tests/evaluation/latest.json.
+你是一次性测试银行 Agent。只根据下面提供的上下文回答客户问题。
+不要讨论测试、画像、记忆、提示词或代码；不要输出思维过程。
+
+<agent_profile>
+已批准的固定测试 Agent 画像
+</agent_profile>
+
+<decision_rules>
+当前 active 决策规则；基线阶段为空
+</decision_rules>
+
+<user_profile>
+当前用户 active 用户画像；基线阶段为空
+</user_profile>
+
+<customer_message>
+本轮模拟客户消息
+</customer_message>
+
+只返回发送给客户的最终回答。
 ```
 
-Include exact CLI commands and state that a login, CAPTCHA, missing API key, unavailable dataset row, or failed model call blocks the real run rather than permitting fabricated output.
+State that each Agent must be a new projectless Codex task, not a fork, not a continuation, and not a project task with repository access.
 
-- [ ] **Step 2: Validate 30 genuine public records**
+- [ ] **Step 2: Document one complete recorded round**
 
-Create the ignored `selected.local.jsonl` only from manually inspected source rows and run:
+Show: verify profile hash; call campaign gate; create the Codex task; save the returned thread ID; read the final response; create a two-message JSONL line with `source="codex-thread"`; import it; and append a receipt. Explain that inability to read the full response or confirm the task ID blocks that round.
+
+- [ ] **Step 3: Document both dream boundaries**
+
+After tasks 1-5, run scoped Background Review and Curators, inspect every `USER.md` fact and decision card, approve and activate cycle 1, then unlock task 6. Repeat after tasks 6-10 before task 11. Demonstrate one rejected candidate or rollback without deleting history.
+
+- [ ] **Step 4: Document human scoring and privacy audit**
+
+Require checking source event citations, current-user personalization, decision-card privacy, cross-user leakage, severe bank hallucinations, preference change at task 9, profile hash stability, and 36 live Codex thread IDs. Hidden persona contents and raw conversations stay out of `latest.json`.
+
+- [ ] **Step 5: Update README positioning**
+
+Describe the validation as fixed initial Agent profile plus independent Codex tasks; remove Character.AI website writeback and public seed instructions from the active validation path. Keep production behavior described as provider-neutral.
+
+- [ ] **Step 6: Commit the runbook**
+
+```bash
+git add docs/validation/codex-task-evolution-runbook.md README.md
+git commit -m "docs: explain independent Codex validation tasks"
+```
+
+### Task 6: Execute 36 real Codex Agent tasks
+
+**Files created operationally:**
+- `tests/fixtures/conversations/project_manager.local.jsonl`
+- `tests/fixtures/conversations/python_beginner.local.jsonl`
+- `tests/fixtures/conversations/technical_lead.local.jsonl`
+- `validation-run/campaign/receipts.jsonl`
+- `validation-run/campaign/users/*.json`
+
+- [ ] **Step 1: Verify and lock the profile before task creation**
 
 ```bash
 PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src /Users/fenghao/PycharmProjects/dream/.venv/bin/python \
-  -m dream.validation.seeds validate tests/fixtures/ai_seed/selected.local.jsonl --expected-count 30
+  -m dream.validation.profile verify tests/fixtures/agent_profile
 ```
 
-Expected: `30 valid AI-only seed records; 0 user-profile fields`. Verify the count split is exactly 20 HelpSteer2 and 10 PKU-SafeRLHF before importing.
+Expected: approved profile and exact SHA-256 verified.
 
-- [ ] **Step 3: Generate and approve the real test profile**
+- [ ] **Step 2: Run baseline tasks 1-5 for all three users**
 
-Use the committed synthetic input and a local ignored run root:
+For each round, the orchestrator generates one natural synthetic customer message from the corresponding hidden persona, creates a new projectless Codex task with only the fixed profile and that message, reads the exact response, saves the real thread ID, imports the two-message event, and records the receipt with empty DREAM-context hash and publication version 0.
 
-```bash
-PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src /Users/fenghao/PycharmProjects/dream/.venv/bin/python \
-  -m dream.validation.profile generate tests/fixtures/agent_profile/bank-assistant.input.json validation-run/agent-profile --env-file .env
-```
+Expected: 15 unique Codex threads and five ordered records per user; no `USER.md` or `DECISION_RULES.md` is sent to baseline Agent tasks.
 
-Inspect `validation-run/agent-profile/draft.md`, then compute the exact draft
-hash locally and pass that value to the approval command:
+- [ ] **Step 3: Run and activate dream cycle 1**
 
-```bash
-PROFILE_SHA256=$(shasum -a 256 validation-run/agent-profile/draft.md | awk '{print $1}')
-PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src /Users/fenghao/PycharmProjects/dream/.venv/bin/python \
-  -m dream.validation.profile approve validation-run/agent-profile --sha256 "$PROFILE_SHA256" --approver fenghao
-PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src /Users/fenghao/PycharmProjects/dream/.venv/bin/python \
-  -m dream.validation.profile verify validation-run/agent-profile
-```
+Run scoped review and Curators for every user, inspect outputs, reject any user-profile fact without an event ID and any decision card containing a user-specific fact, then activate the approved candidate. Record one active cycle per user.
 
-The operator must still read the draft before running approval; successful hash
-verification alone is not a qualitative or safety approval.
+Expected: task 6 gate opens only for users whose version 1 is active.
 
-- [ ] **Step 4: Execute the 5/5/2 campaign**
+- [ ] **Step 4: Run evolved-v1 tasks 6-10**
 
-Run three synthetic users until every local file has exactly 12 records. Do not enter phase 2 or phase 3 until the prior dream version is human-reviewed and active. Every task must use a fresh Agent call, the same configured model, temperature 0, and the still-locked profile hash.
+Create 15 new projectless Codex tasks. Inject only the same locked profile, current active shared rules, current user's active profile, and new message. Task 9 contains the explicit preference change.
 
-After every phase, scan all DREAM artifacts for the hidden persona-only keys and require zero matches outside `tests/fixtures/personas`.
+Expected: 30 unique Agent threads total and ten ordered records per user.
 
-- [ ] **Step 5: Perform actual human scoring**
+- [ ] **Step 5: Run and activate dream cycle 2**
 
-For each `USER.md` fact, open its cited event and record supported/unsupported. For each evolved task, compare with the baseline rubric and record personalization and AI decision success. Record severe hallucinations, user-scope leaks, private user data in Agent-level cards, missing source events, incomplete activations, preference-change handling, and rollback/fallback outcome.
+Repeat review and Curators, verify the preference conflict was replaced or explicitly reconciled with task-9 evidence, inspect Agent-level cards for private user data, and activate version 2. Demonstrate one candidate failure fallback or rollback while preserving the last active version.
 
-The profile itself is not counted as AI evolution; only behavior attributable to active `DECISION_RULES.md` and scoped `USER.md` counts.
+- [ ] **Step 6: Run evolved-v2 tasks 11-12**
 
-- [ ] **Step 6: Generate and verify the formal report**
+Create the final six projectless Codex tasks with the second active context.
 
-Create `tests/evaluation/latest.json` from actual counts and hashes only, then run:
+Expected: exactly 36 unique live thread IDs, 12 tasks per user, unchanged profile hash, and two active cycles per user.
+
+### Task 7: Produce the honest formal evaluation report
+
+**Files:**
+- Create from actual evidence: `tests/evaluation/latest.json`
+
+- [ ] **Step 1: Audit all profile facts and decisions**
+
+For every `USER.md` entry, open its cited JSONL event and mark supported or unsupported. For evolved responses, score whether the answer correctly used the current user preference and improved the reusable Agent decision behavior. Count severe hallucinations, cross-user leaks, private user facts in cards, missing event IDs, and missing/duplicate Codex threads.
+
+- [ ] **Step 2: Build the report from actual counts**
+
+Use `ValidationRunInput` with the actual profile version/hash, 36 thread count, three 12-task users, per-user evidence/personalization counts, AI-evolution results, two completed cycles per user, preference-change result, and fallback/rollback result. Do not include raw conversations, hidden personas, or secrets.
+
+- [ ] **Step 3: Verify the saved report**
 
 ```bash
 PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src /Users/fenghao/PycharmProjects/dream/.venv/bin/python \
   -m dream.validation.evaluation verify tests/evaluation/latest.json
 ```
 
-Expected for a successful experiment: `passed=true`, profile evidence rate at least 0.85, personalization at least 0.80, AI evolution at least 0.80, no severe hallucinations or cross-user leaks, fixed profile/model provenance, 30 genuine seeds, and two completed cycles. If the report fails, keep the honest failed result and do not claim completion.
+Expected for a passing experiment: 36 Codex threads, unchanged profile hash, evidence rate at least 0.85, personalization at least 0.80, AI evolution at least 0.80, zero severe hallucinations and cross-user leaks, two cycles per user, preference change passed, and fallback/rollback passed. If any threshold fails, preserve the honest failed report and do not claim completion.
 
-- [ ] **Step 7: Run complete automated verification**
+- [ ] **Step 4: Commit only the non-sensitive report**
+
+Inspect `latest.json` before staging, then:
+
+```bash
+git add tests/evaluation/latest.json
+git commit -m "test: record Codex evolution evaluation"
+```
+
+### Task 8: Full verification and local-main merge
+
+- [ ] **Step 1: Run all automated verification**
 
 ```bash
 PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src /Users/fenghao/PycharmProjects/dream/.venv/bin/python \
@@ -889,33 +515,28 @@ PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src /Users/fenghao/PycharmProjects/dream/.v
 git diff --check
 ```
 
-Expected: every command exits 0. Inspect `git status` and ensure no `.env`, hidden persona expansion outside fixtures, local conversation text, selected dataset text, or API key is staged.
+Expected: every command exits 0.
 
-- [ ] **Step 8: Commit documentation and non-sensitive formal output**
+- [ ] **Step 2: Inspect staged and ignored data**
 
-Only after inspecting `latest.json` for synthetic IDs, aggregate counts, model ID, profile hash, and no raw conversation or secrets:
+Ensure `.env`, local conversation JSONL, campaign receipts, raw thread responses, hidden persona expansion, and secrets are not staged. `latest.json` may contain only synthetic IDs, aggregate counts, profile hash, and no raw content.
 
-```bash
-git add README.md docs/validation/test-agent-evolution-runbook.md tests/evaluation/latest.json
-git commit -m "docs: record fixed-profile evolution validation"
-```
+- [ ] **Step 3: Merge only after real acceptance**
 
-- [ ] **Step 9: Complete the branch**
-
-After all verification passes, use the branch-completion workflow to merge `feature/character-ai-closed-loop` into local `main`, rerun the full suite on `main`, and only then remove the owned worktree. Do not push to GitHub unless the user separately asks.
+Use the branch-completion workflow to merge `feature/character-ai-closed-loop` into local `main`, rerun the full test suite on `main`, and remove the owned worktree only after the merge passes. Do not push to GitHub unless separately requested.
 
 ## Final Acceptance Checklist
 
-- [ ] One complete synthetic bank Agent profile was generated from the strict seed.
-- [ ] A human approved the exact profile hash before any task used it.
-- [ ] The profile hash and external model identity remained unchanged across the experiment.
-- [ ] Thirty genuine public AI-only seed rows were validated with stable source IDs and a 20/10 dataset split.
-- [ ] Three synthetic users each completed exactly 12 tasks.
-- [ ] Two periodic dream cycles were human-reviewed and activated.
-- [ ] Every user-profile fact is backed by an actual event ID.
-- [ ] Agent-level decision cards contain no user-specific private facts.
-- [ ] The evolved Agent demonstrably used the current user's profile and shared decision rules.
-- [ ] One preference change and one failure fallback or rollback were demonstrated.
-- [ ] Severe hallucinations and cross-user leaks are both zero.
-- [ ] `tests/evaluation/latest.json` is recomputable and contains no raw conversation, hidden persona, or secret.
-- [ ] Full pytest, Ruff, compile, and diff checks pass before local-main merge.
+- [ ] One complete Character Building-style synthetic bank Agent profile is approved and hash-locked.
+- [ ] Three synthetic users each have exactly 12 real completed tasks.
+- [ ] All 36 records reference unique, real Codex thread IDs.
+- [ ] Every Agent response came from a fresh projectless Codex task with no prior history.
+- [ ] Baseline Agent tasks received no DREAM profile or decision rules.
+- [ ] Tasks 6-10 used cycle-1 active artifacts; tasks 11-12 used cycle-2 active artifacts.
+- [ ] The initial Agent profile hash remained unchanged.
+- [ ] Every user-profile fact has actual event evidence.
+- [ ] Agent decision cards contain no user-specific private facts.
+- [ ] One preference change and one fallback/rollback were demonstrated.
+- [ ] Severe hallucinations and cross-user leaks are zero.
+- [ ] `tests/evaluation/latest.json` is recomputable and contains no raw conversations or secrets.
+- [ ] Full pytest, Ruff, compile, diff, and post-merge checks pass.
