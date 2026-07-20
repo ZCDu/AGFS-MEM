@@ -74,6 +74,24 @@ def test_recorded_review_respects_allowed_tools() -> None:
     assert result.actions[0].tool_name == "memory_manage"
 
 
+def test_recorded_review_supports_evidence_backed_preference_replacement() -> None:
+    payload = json.loads(document())
+    memory = payload["reviews"][0]["actions"][0]["payload"]
+    memory.update(
+        {
+            "action": "replace",
+            "old_content": "Prefers long explanations.",
+            "content": "Prefers short checklists with risk details only.",
+        }
+    )
+
+    backend = RecordedReviewBackend.from_json_documents((json.dumps(payload),))
+    result = backend.review(request("memory_manage"))
+
+    assert result.actions[0].payload["action"] == "replace"
+    assert result.actions[0].payload["old_content"] == "Prefers long explanations."
+
+
 def test_recorded_review_rejects_duplicate_events() -> None:
     with pytest.raises(RecordedReviewError, match="duplicate event"):
         RecordedReviewBackend.from_json_documents((document(), document()))

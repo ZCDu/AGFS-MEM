@@ -3,7 +3,7 @@
 from pathlib import Path
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from dream.review.models import (
     ArtifactKind,
@@ -20,8 +20,17 @@ class RecordedReviewError(ValueError):
 class _MemoryPayload(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    action: Literal["add"]
+    action: Literal["add", "replace"]
     content: str = Field(min_length=1, max_length=1000)
+    old_content: str | None = Field(default=None, min_length=1, max_length=1000)
+
+    @model_validator(mode="after")
+    def replacement_names_existing_content(self) -> "_MemoryPayload":
+        if self.action == "replace" and self.old_content is None:
+            raise ValueError("replace requires old_content")
+        if self.action == "add" and self.old_content is not None:
+            raise ValueError("add must not include old_content")
+        return self
 
 
 class _DecisionPayload(BaseModel):
@@ -110,7 +119,7 @@ class RecordedReviewBackend:
                 continue
             if isinstance(action, _MemoryAction):
                 kind = ArtifactKind.USER_PROFILE
-                payload = action.payload.model_dump()
+                payload = action.payload.model_dump(exclude_none=True)
                 payload["target"] = "user"
             else:
                 kind = ArtifactKind.DECISION_CARD
