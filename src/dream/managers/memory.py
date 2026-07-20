@@ -11,11 +11,26 @@ from dream.scope import ScopePaths
 
 
 _ENTRY_DELIMITER = "\n§\n"
-_SOURCE_COMMENT = re.compile(r"\n<!-- dream-sources?:\s*[^>]+ -->\s*$")
+_SOURCE_COMMENT = re.compile(r"\n<!-- dream-sources?:\s*([^>]+) -->\s*$")
 
 
 def _entry_content(entry: str) -> str:
     return _SOURCE_COMMENT.sub("", entry).strip()
+
+
+def _entry_sources(entry: str) -> tuple[str, ...]:
+    match = _SOURCE_COMMENT.search(entry)
+    if match is None:
+        return ()
+    return tuple(
+        value.strip() for value in match.group(1).split(",") if value.strip()
+    )
+
+
+def _sourced_entry(content: str, sources: tuple[str, ...]) -> str:
+    unique_sources = tuple(dict.fromkeys(sources))
+    label = "dream-sources" if len(unique_sources) > 1 else "dream-source"
+    return f"{content}\n<!-- {label}: {', '.join(unique_sources)} -->"
 
 
 class MemoryManager:
@@ -44,7 +59,7 @@ class MemoryManager:
         if not content or "\x00" in content:
             raise ValueError("memory content must be non-empty text")
         entries = [entry.strip() for entry in existing.split(_ENTRY_DELIMITER) if entry.strip()]
-        sourced_entry = f"{content}\n<!-- dream-source: {action.source_event_id} -->"
+        sourced_entry = _sourced_entry(content, (action.source_event_id,))
         if operation == "add":
             if not any(_entry_content(entry) == content for entry in entries):
                 entries.append(sourced_entry)
@@ -60,7 +75,11 @@ class MemoryManager:
             )
             if index is None:
                 raise ValueError("old_content was not found")
-            entries[index] = sourced_entry
+            previous_sources = _entry_sources(entries[index])
+            entries[index] = _sourced_entry(
+                content,
+                previous_sources + (action.source_event_id,),
+            )
         elif operation == "remove":
             old_content = str(action.payload.get("old_content", content)).strip()
             entries = [

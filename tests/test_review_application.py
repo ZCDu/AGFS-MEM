@@ -2,7 +2,6 @@ import json
 from pathlib import Path
 
 from dream.artifacts import AtomicArtifactStore
-from dream.curators.user import UserCurator
 from dream.managers.decision_cards import DecisionCardManager
 from dream.managers.memory import MemoryManager
 from dream.reports import DreamReportStore
@@ -78,17 +77,12 @@ def test_memory_replace_accepts_curator_plural_evidence_comment(
     tmp_path: Path,
 ) -> None:
     paths = resolve_scope(tmp_path, ScopeIds("acme", "assistant", "alice"))
+    AtomicArtifactStore(paths.agent_root).write_text(
+        Path("users/alice/USER.md"),
+        "Prefers detailed steps.\n"
+        "<!-- dream-sources: evt-1, evt-2 -->\n",
+    )
     manager = MemoryManager(paths)
-    for event_id in ("evt-1", "evt-2"):
-        manager.apply(
-            ReviewAction(
-                kind=ArtifactKind.USER_PROFILE,
-                tool_name="memory_manage",
-                payload={"action": "add", "content": "Prefers detailed steps."},
-                source_event_id=event_id,
-            )
-        )
-    UserCurator(paths).run()
 
     manager.apply(
         ReviewAction(
@@ -106,6 +100,8 @@ def test_memory_replace_accepts_curator_plural_evidence_comment(
     profile = (paths.user_root / "USER.md").read_text(encoding="utf-8")
     assert "Prefers short checklists." in profile
     assert "Prefers detailed steps." not in profile
+    assert "evt-1" in profile
+    assert "evt-2" in profile
     assert "evt-9" in profile
 
 
