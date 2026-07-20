@@ -2,6 +2,7 @@
 
 import hashlib
 from pathlib import Path
+import re
 
 from dream.artifacts import ArtifactVersion, AtomicArtifactStore
 from dream.review.models import ArtifactKind, ReviewAction
@@ -10,6 +11,11 @@ from dream.scope import ScopePaths
 
 
 _ENTRY_DELIMITER = "\n§\n"
+_SOURCE_COMMENT = re.compile(r"\n<!-- dream-sources?:\s*[^>]+ -->\s*$")
+
+
+def _entry_content(entry: str) -> str:
+    return _SOURCE_COMMENT.sub("", entry).strip()
 
 
 class MemoryManager:
@@ -40,7 +46,7 @@ class MemoryManager:
         entries = [entry.strip() for entry in existing.split(_ENTRY_DELIMITER) if entry.strip()]
         sourced_entry = f"{content}\n<!-- dream-source: {action.source_event_id} -->"
         if operation == "add":
-            if not any(entry.split("\n<!-- dream-source:", 1)[0] == content for entry in entries):
+            if not any(_entry_content(entry) == content for entry in entries):
                 entries.append(sourced_entry)
         elif operation == "replace":
             old_content = str(action.payload.get("old_content", "")).strip()
@@ -48,7 +54,7 @@ class MemoryManager:
                 (
                     i
                     for i, entry in enumerate(entries)
-                    if entry.split("\n<!-- dream-source:", 1)[0] == old_content
+                    if _entry_content(entry) == old_content
                 ),
                 None,
             )
@@ -60,7 +66,7 @@ class MemoryManager:
             entries = [
                 entry
                 for entry in entries
-                if entry.split("\n<!-- dream-source:", 1)[0] != old_content
+                if _entry_content(entry) != old_content
             ]
         else:
             raise ValueError(f"unsupported memory action: {operation}")
@@ -79,4 +85,3 @@ class MemoryManager:
                 updated_at="unchanged",
             )
         return self.artifacts.write_text(relative, rendered)
-
