@@ -31,7 +31,7 @@ env/
 .env.*
 !.env.example
 
-# Locally selected public-dataset rows for AI initialization.
-tests/fixtures/ai_seed/selected.local.jsonl
+# Local validation evidence and runtime state.
+validation-run/
 tests/fixtures/conversations/*.local.jsonl
 tests/evaluation/*.local.json
