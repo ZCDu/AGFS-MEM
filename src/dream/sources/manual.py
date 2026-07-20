@@ -1,4 +1,4 @@
-"""Strict manual JSONL input for completed Character.AI validation tasks."""
+"""Strict JSONL input for completed validation tasks."""
 
 from datetime import datetime
 from typing import Literal
@@ -37,6 +37,7 @@ class ManualConversationRecord(BaseModel):
     tenant_id: str = Field(min_length=1)
     agent_id: str = Field(min_length=1)
     user_id: str = Field(min_length=1)
+    source: Literal["codex-thread", "manual-import"] = "manual-import"
     session_id: str = Field(min_length=1)
     task_id: str = Field(min_length=1)
     completed_at: str = Field(min_length=1)
@@ -115,7 +116,7 @@ def manual_record_to_event(record: ManualConversationRecord) -> TaskCompletedEve
         final_response=record.final_response,
         source_refs=(
             {
-                "source": "manual-character-ai",
+                "source": record.source,
                 "session_id": record.session_id,
             },
         ),

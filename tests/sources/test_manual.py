@@ -16,6 +16,7 @@ def valid_record(**overrides: object) -> dict[str, object]:
         "tenant_id": "dream-lab",
         "agent_id": "enterprise-colleague",
         "user_id": "project-manager",
+        "source": "codex-thread",
         "session_id": "session-001",
         "task_id": "task-001",
         "completed_at": "2026-07-17T10:00:00+08:00",
@@ -50,8 +51,13 @@ def test_manual_record_maps_to_scoped_completed_event() -> None:
         "dream-lab", "enterprise-colleague", "project-manager"
     )
     assert event.source_refs == (
-        {"source": "manual-character-ai", "session_id": "session-001"},
+        {"source": "codex-thread", "session_id": "session-001"},
     )
+
+
+def test_manual_record_rejects_unknown_source() -> None:
+    with pytest.raises(ManualSourceError, match="line 1"):
+        parse_manual_ndjson(valid_line(source="unverified-chat"))
 
 
 def test_manual_record_rejects_mismatched_final_response() -> None:
