@@ -98,7 +98,7 @@ Dreams/
 │   ├── source_sync.py               # NDJSON 与 cursor 增量同步
 │   ├── closed_loop.py               # 做梦、审核、回写、激活与失败回退闭环
 │   ├── publication.py               # 用户级候选版本和 active 版本状态机
-│   ├── writeback.py                 # Character Definition 与 User Persona 生成
+│   ├── writeback.py                 # 下一任务使用的画像与决策上下文生成
 │   ├── review/
 │   │   ├── orchestrator.py          # 会话回顾与产物分类
 │   │   ├── llm_backend.py           # LLM 结构化管理调用
@@ -115,13 +115,13 @@ Dreams/
 │   ├── reports.py                   # 每次做梦的 JSON 报告
 │   ├── artifacts.py                 # 磁盘产物原子写入
 │   └── validation/
-│       ├── agnes.py                 # 隔离的模拟用户消息生成器
-│       ├── seeds.py                 # AI 初始决策种子校验和导入
+│       ├── profile.py               # 固定测试 Agent 画像与批准哈希校验
+│       ├── campaign.py              # 36 个独立任务的阶段门禁与凭证
 │       └── evaluation.py            # 闭环效果评估与通过标准复算
 ├── docs/
 │   ├── api/                         # Session 接入契约
 │   ├── design/                      # 架构说明
-│   └── validation/                  # Character.AI 人工闭环验证手册
+│   └── validation/                  # 独立 Codex 任务闭环验证手册
 ├── tests/                           # 单元与闭环测试
 ├── .env.example                     # 配置示例
 ├── .gitignore
@@ -220,20 +220,20 @@ Dreams/
 
 ### 闭环发布接口
 
-Character.AI 验证使用候选版本，确保上一任务产生的画像和决策经验完成做梦、人工检查和回写后，才影响下一任务。
+闭环验证使用候选版本，确保上一批任务产生的画像和决策经验完成做梦、人工检查和激活后，才影响下一批独立任务。
 
 | 方法 | 路径 | 作用 |
 |------|------|------|
 | `POST` | `/v1/validation/import` | 导入人工整理的完整任务 NDJSON |
 | `POST` | `/v1/validation/dream` | 生成用户画像、决策规则和两份回写候选 |
 | `POST` | `/v1/validation/publications/{version}/approve` | 人工检查通过候选版本 |
-| `POST` | `/v1/validation/publications/{version}/confirm-writeback` | 确认两份文本已经写入 Character.AI |
+| `POST` | `/v1/validation/publications/{version}/confirm-writeback` | 确认两份候选上下文已经完成写入检查 |
 | `POST` | `/v1/validation/publications/{version}/activate` | 激活版本并允许开始下一任务 |
 | `POST` | `/v1/validation/publications/{version}/reject` | 拒绝候选并恢复做梦前快照 |
 | `POST` | `/v1/validation/publications/{version}/rollback` | 恢复一个曾经激活的历史版本 |
 | `GET` | `/v1/validation/publications/status` | 查看当前候选版本和 active 版本 |
 
-完整的人工验证顺序、`curl` 示例和通过标准见 [Character.AI 闭环验证手册](docs/validation/character-ai-runbook.md)。
+完整的 5/5/2 阶段顺序、任务提示和通过标准见 [独立 Codex 任务进化验证手册](docs/validation/codex-task-evolution-runbook.md)。
 
 ## 用户人物画像提纯
 
@@ -482,15 +482,15 @@ cp .env.example .env
 
 真实 `.env` 已被 Git 忽略，不要把 API 密钥提交到仓库。
 
-## Character.AI 闭环验证
+## 独立 Agent 任务闭环验证
 
-项目包含三类离线验证工具：
+当前验证路径先锁定一份完整的银行测试 Agent 初始画像，再让三个合成用户各完成 12 个全新的 projectless Codex Agent 任务。每个用户在第 5 和第 10 个任务后做梦，后续任务只能读取同一份固定初始画像、当前 active AI 决策规则和当前用户自己的 active `USER.md`。
 
-- `python -m dream.validation.seeds validate ...`：检查 AI 初始决策样本只能包含公开场景和回答，不能携带用户画像或隐藏人物设定；
-- `AgnesSimulator`：在单次内存请求中根据隐藏人物设定产生一条模拟用户消息，不把隐藏设定写入 DREAM；
-- `python -m dream.validation.evaluation verify ...`：重新计算画像证据率、个性化成功率、AI 决策进化率和安全隔离指标，防止直接修改报告中的通过结果。
+- `python -m dream.validation.profile verify ...`：校验初始画像结构、批准状态和 SHA-256；
+- `CodexCampaignStore`：保存真实线程凭证并强制执行 5/5/2 阶段门禁；
+- `python -m dream.validation.evaluation verify ...`：复算 36 个任务、两轮做梦、画像证据率、个性化、AI 决策进化和安全隔离指标。
 
-自动化测试使用少量合成会话验证结构。正式效果结论仍需由三个模拟用户分别完成 10～15 个任务，并经过人工证据检查；不能用合成测试结果冒充正式验证结果。
+自动化测试只验证结构和门禁。正式 `tests/evaluation/latest.json` 必须来自 36 个实际完成的 Codex 任务和人工证据检查，不能用样例数据或修改后的汇总数字冒充正式结果。
 
 ## 开发
 
