@@ -19,6 +19,7 @@ class UserEvaluationInput(BaseModel):
 
     user_id: str = Field(min_length=1)
     task_count: int = Field(ge=0)
+    active_dream_cycles: int = Field(ge=0)
     supported_profile_facts: int = Field(ge=0)
     total_profile_facts: int = Field(ge=0)
     personalized_successes: int = Field(ge=0)
@@ -48,6 +49,12 @@ class ValidationRunInput(BaseModel):
     incomplete_writebacks: int = Field(ge=0)
     inactive_publications: int = Field(ge=0)
     decision_cards_with_private_user_data: int = Field(ge=0)
+    agent_profile_version: int = Field(ge=1)
+    agent_profile_sha256_before: str = Field(pattern=r"^[0-9a-f]{64}$")
+    agent_profile_sha256_after: str = Field(pattern=r"^[0-9a-f]{64}$")
+    codex_thread_count: int = Field(ge=0)
+    missing_codex_threads: int = Field(ge=0)
+    duplicate_codex_threads: int = Field(ge=0)
     agnes_advisory: str = ""
 
     @model_validator(mode="after")
@@ -99,11 +106,17 @@ def evaluate_validation_run(run: ValidationRunInput) -> EvaluationReport:
         failures.append("personalization rate is below 0.80")
     if ai_rate < 0.80:
         failures.append("AI evolution rate is below 0.80")
+    expected_users = {"project-manager", "python-beginner", "technical-lead"}
+    actual_users = {item.user_id for item in run.users}
+    if actual_users != expected_users:
+        failures.append("exactly three named validation users are required")
     for item in run.users:
-        if item.task_count < 10:
-            failures.append(f"user {item.user_id} has fewer than 10 tasks")
-    if run.completed_dream_writeback_cycles < 2:
-        failures.append("at least two dream/writeback cycles are required")
+        if item.task_count != 12:
+            failures.append(f"user {item.user_id} must have exactly 12 tasks")
+        if item.active_dream_cycles < 2:
+            failures.append(f"user {item.user_id} requires two active dream cycles")
+    if run.completed_dream_writeback_cycles < 6:
+        failures.append("at least six dream/writeback cycles are required")
     if not run.change_conflict_case_passed:
         failures.append("preference-change case did not pass")
     if not run.failure_fallback_or_rollback_passed:
@@ -116,6 +129,14 @@ def evaluate_validation_run(run: ValidationRunInput) -> EvaluationReport:
         failures.append("inactive publications must be zero")
     if run.decision_cards_with_private_user_data:
         failures.append("private user data in decision cards must be zero")
+    if run.agent_profile_sha256_before != run.agent_profile_sha256_after:
+        failures.append("approved Agent profile hash changed during validation")
+    if run.codex_thread_count != 36:
+        failures.append("exactly 36 Codex tasks are required")
+    if run.missing_codex_threads:
+        failures.append("missing Codex threads must be zero")
+    if run.duplicate_codex_threads:
+        failures.append("duplicate Codex threads must be zero")
 
     return EvaluationReport(
         run=run,
@@ -169,6 +190,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         f"{report.profile_evidence_rate:.2f} "
         f"personalization_rate={report.personalization_rate:.2f} "
         f"ai_evolution_rate={report.ai_evolution_rate:.2f} "
+        f"codex_threads={report.run.codex_thread_count} "
+        "profile_unchanged="
+        f"{str(report.run.agent_profile_sha256_before == report.run.agent_profile_sha256_after).lower()} "
         f"passed={str(report.passed).lower()}"
     )
     return 0 if report.passed else 1

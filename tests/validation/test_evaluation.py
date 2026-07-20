@@ -14,10 +14,16 @@ from dream.validation.evaluation import (
 )
 
 
-def user(user_id: str, *, task_count: int = 10) -> UserEvaluationInput:
+def user(
+    user_id: str,
+    *,
+    task_count: int = 12,
+    active_dream_cycles: int = 2,
+) -> UserEvaluationInput:
     return UserEvaluationInput(
         user_id=user_id,
         task_count=task_count,
+        active_dream_cycles=active_dream_cycles,
         supported_profile_facts=17,
         total_profile_facts=20,
         personalized_successes=8,
@@ -36,13 +42,19 @@ def passing_run(**overrides: object) -> ValidationRunInput:
         "cross_user_leaks": 0,
         "evolved_ai_successes": 8,
         "evolved_ai_tasks": 10,
-        "completed_dream_writeback_cycles": 2,
+        "completed_dream_writeback_cycles": 6,
         "change_conflict_case_passed": True,
         "failure_fallback_or_rollback_passed": True,
         "missing_source_event_ids": 0,
         "incomplete_writebacks": 0,
         "inactive_publications": 0,
         "decision_cards_with_private_user_data": 0,
+        "agent_profile_version": 1,
+        "agent_profile_sha256_before": "a" * 64,
+        "agent_profile_sha256_after": "a" * 64,
+        "codex_thread_count": 36,
+        "missing_codex_threads": 0,
+        "duplicate_codex_threads": 0,
         "agnes_advisory": "advisory only",
     }
     values.update(overrides)
@@ -89,7 +101,7 @@ def test_any_structural_or_safety_failure_blocks_acceptance(
     assert any(reason in item for item in report.failure_reasons)
 
 
-def test_fewer_than_ten_tasks_for_any_user_fails_acceptance() -> None:
+def test_any_user_without_exactly_twelve_tasks_fails_acceptance() -> None:
     users = [
         user("project-manager"),
         user("python-beginner", task_count=9),
@@ -100,6 +112,56 @@ def test_fewer_than_ten_tasks_for_any_user_fails_acceptance() -> None:
 
     assert report.passed is False
     assert any("python-beginner" in item for item in report.failure_reasons)
+
+
+def test_acceptance_requires_36_real_codex_tasks() -> None:
+    report = evaluate_validation_run(passing_run(codex_thread_count=35))
+
+    assert report.passed is False
+    assert any("36 Codex" in reason for reason in report.failure_reasons)
+
+
+def test_acceptance_requires_unchanged_initial_profile() -> None:
+    report = evaluate_validation_run(
+        passing_run(agent_profile_sha256_after="b" * 64)
+    )
+
+    assert report.passed is False
+    assert any("profile hash" in reason for reason in report.failure_reasons)
+
+
+@pytest.mark.parametrize(
+    "field,reason",
+    [
+        ("missing_codex_threads", "missing Codex"),
+        ("duplicate_codex_threads", "duplicate Codex"),
+    ],
+)
+def test_missing_or_duplicate_codex_thread_fails(
+    field: str,
+    reason: str,
+) -> None:
+    report = evaluate_validation_run(passing_run(**{field: 1}))
+
+    assert report.passed is False
+    assert any(reason in item for item in report.failure_reasons)
+
+
+def test_each_user_requires_two_active_dream_cycles() -> None:
+    users = [
+        user("project-manager"),
+        user("python-beginner", active_dream_cycles=1),
+        user("technical-lead"),
+    ]
+
+    report = evaluate_validation_run(passing_run(users=users))
+
+    assert report.passed is False
+    assert any("python-beginner" in item for item in report.failure_reasons)
+
+
+def test_public_seed_data_is_not_an_acceptance_input() -> None:
+    assert "public_seed_count" not in ValidationRunInput.model_fields
 
 
 def test_agnes_advisory_cannot_override_failed_human_evidence() -> None:
