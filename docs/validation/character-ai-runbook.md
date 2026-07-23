@@ -7,7 +7,7 @@ Character.AI 在本阶段没有可依赖的正式写入 API。因此 DREAM 自�
 ## 1. 安全边界
 
 - 只使用合成用户，不使用真实员工信息。
-- `tests/fixtures/personas/*.gold.json` 只交给 Agnes 模拟用户和最终评估程序。
+- `fixtures/personas/*.gold.json` 只交给 Agnes 模拟用户和最终评估程序。
 - 隐藏人物设定不得上传到 DREAM，也不得粘贴到 Character.AI。
 - DREAM 只接收 Character.AI 已经完成的公开 user/assistant 对话。
 - Agnes 模拟用户和 Agnes 提炼模型必须使用新的独立请求，不能共享上下文。
@@ -53,14 +53,14 @@ BASE_URL=http://127.0.0.1:8765
 保存到已被 Git 忽略的：
 
 ```text
-tests/fixtures/ai_seed/selected.local.jsonl
+fixtures/ai_seed/selected.local.jsonl
 ```
 
 严格检查数量、唯一 ID 和字段白名单：
 
 ```bash
 PYTHONPATH=src python -m dream.validation.seeds validate \
-  tests/fixtures/ai_seed/selected.local.jsonl \
+  fixtures/ai_seed/selected.local.jsonl \
   --expected-count 30
 ```
 
@@ -82,7 +82,7 @@ service = DreamService(
     backend=build_review_backend(settings),
     semantic_curator_backend=build_curator_backend(settings),
 )
-text = Path("tests/fixtures/ai_seed/selected.local.jsonl").read_text(encoding="utf-8")
+text = Path("fixtures/ai_seed/selected.local.jsonl").read_text(encoding="utf-8")
 print(service.import_ai_seed_jsonl(text))
 print(service.run_pending(seed_scope()))
 paths = resolve_scope(home, seed_scope())
@@ -109,9 +109,9 @@ print(WritebackService(
 文件建议使用已被 Git 忽略的：
 
 ```text
-tests/fixtures/conversations/project_manager.local.jsonl
-tests/fixtures/conversations/python_beginner.local.jsonl
-tests/fixtures/conversations/technical_lead.local.jsonl
+fixtures/conversations/project_manager.local.jsonl
+fixtures/conversations/python_beginner.local.jsonl
+fixtures/conversations/technical_lead.local.jsonl
 ```
 
 先为每个用户收集 5 个完整任务。不得提前把 `USER_PERSONA.md` 写回 Character.AI，否则第一阶段会泄漏隐藏答案。
@@ -123,7 +123,7 @@ tests/fixtures/conversations/technical_lead.local.jsonl
 ```bash
 curl --fail-with-body -X POST "$BASE_URL/v1/validation/import" \
   -H 'Content-Type: application/x-ndjson' \
-  --data-binary @tests/fixtures/conversations/project_manager.local.jsonl
+  --data-binary @fixtures/conversations/project_manager.local.jsonl
 ```
 
 运行该用户的闭环做梦：
@@ -232,10 +232,10 @@ curl --fail-with-body -X POST "$BASE_URL/v1/validation/publications/1/rollback" 
 人工统计每个用户的任务数、画像事实数、证据支持事实数、个性化成功任务数；再填写 AI 拟人行为成功数、严重幻觉、跨用户泄漏、来源缺失和发布状态。使用 `EvaluationReport` 保存报告到：
 
 ```text
-tests/evaluation/latest.json
+tests/e2e/evaluation/latest.json
 ```
 
-先把原始计数保存为已被 Git 忽略的 `tests/evaluation/run-input.local.json`：
+先把原始计数保存为已被 Git 忽略的 `tests/e2e/evaluation/run-input.local.json`：
 
 ```json
 {
@@ -265,8 +265,8 @@ tests/evaluation/latest.json
 from pathlib import Path
 from dream.validation.evaluation import ValidationRunInput, evaluate_validation_run
 
-source = Path("tests/evaluation/run-input.local.json")
-target = Path("tests/evaluation/latest.json")
+source = Path("tests/e2e/evaluation/run-input.local.json")
+target = Path("tests/e2e/evaluation/latest.json")
 run = ValidationRunInput.model_validate_json(source.read_text(encoding="utf-8"))
 report = evaluate_validation_run(run)
 target.write_text(report.model_dump_json(indent=2) + "\n", encoding="utf-8")
@@ -279,7 +279,7 @@ print(target, report.passed, report.failure_reasons)
 
 ```bash
 PYTHONPATH=src python -m dream.validation.evaluation verify \
-  tests/evaluation/latest.json
+  tests/e2e/evaluation/latest.json
 ```
 
 正式通过必须同时满足：

@@ -490,7 +490,7 @@ cp .env.example .env
 - `CodexCampaignStore`：保存真实线程凭证并强制执行 5/5/2 阶段门禁；
 - `python -m dream.validation.evaluation verify ...`：复算 36 个任务、两轮做梦、画像证据率、个性化、AI 决策进化和安全隔离指标。
 
-自动化测试只验证结构和门禁。正式 `tests/evaluation/latest.json` 必须来自 36 个实际完成的 Codex 任务和人工证据检查，不能用样例数据或修改后的汇总数字冒充正式结果。
+自动化测试只验证结构和门禁。正式 `tests/e2e/evaluation/latest.json` 必须来自 36 个实际完成的 Codex 任务和人工证据检查，不能用样例数据或修改后的汇总数字冒充正式结果。
 
 ## 开发
 

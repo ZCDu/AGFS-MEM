@@ -213,7 +213,7 @@ def test_tampered_computed_rates_are_rejected(tmp_path: Path) -> None:
 
 
 def test_small_conversation_fixtures_are_valid_but_below_task_threshold() -> None:
-    root = Path(__file__).parents[1] / "fixtures" / "conversations"
+    root = Path(__file__).parents[2] / "fixtures" / "conversations"
     users = []
     for name in ("project_manager", "python_beginner", "technical_lead"):
         records = parse_manual_ndjson(

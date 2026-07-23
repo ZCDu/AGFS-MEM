@@ -6,7 +6,7 @@ from dream.integrations.internship.client import (
     SourceFetchError,
     parse_ndjson,
 )
-from tests.source_helpers import source_line, source_settings
+from tests.integrations.source_helpers import source_line, source_settings
 
 
 def test_parse_ndjson_accepts_records_and_empty_lines() -> None:

@@ -143,7 +143,7 @@ def test_seed_file_validation_and_cli_require_exact_count(tmp_path: Path) -> Non
 
 
 def test_committed_seed_fixture_contains_two_valid_synthetic_records() -> None:
-    path = Path(__file__).parents[1] / "fixtures" / "ai_seed" / "sample.jsonl"
+    path = Path(__file__).parents[2] / "fixtures" / "ai_seed" / "sample.jsonl"
 
     records = parse_seed_jsonl(path.read_text(encoding="utf-8"))
 

@@ -41,7 +41,7 @@ Agent 任务不能接收隐藏人物设定、其他用户画像、过去原始�
 
 ## 一轮完整记录
 
-1. 运行 `python -m dream.validation.profile verify tests/fixtures/agent_profile`，确认画像哈希未变化。
+1. 运行 `python -m dream.validation.profile verify fixtures/agent_profile`，确认画像哈希未变化。
 2. 调用 Campaign gate，确认当前用户的任务编号可以创建。
 3. 新建 projectless Codex 任务并保存真实 `thread_id`。
 4. 等待任务完成，读取完整最终回答；读不到完整回答或任务 ID 时，本轮立即停止且不得计数。
@@ -80,11 +80,11 @@ Agent 任务不能接收隐藏人物设定、其他用户画像、过去原始�
 - 固定初始画像前后哈希是否一致；
 - 偏好变化和失败回退是否通过。
 
-只有完成真实审计后才能生成 `tests/evaluation/latest.json`。报告不保存原始对话、隐藏人物设定或密钥；即使结果未达阈值，也必须保留真实失败结果，不得手工改成通过。
+只有完成真实审计后才能生成 `tests/e2e/evaluation/latest.json`。报告不保存原始对话、隐藏人物设定或密钥；即使结果未达阈值，也必须保留真实失败结果，不得手工改成通过。
 
 最终使用以下命令复算：
 
 ```bash
 PYTHONPATH=src python -m dream.validation.evaluation verify \
-  tests/evaluation/latest.json
+  tests/e2e/evaluation/latest.json
 ```

@@ -5,7 +5,7 @@ import httpx
 import pytest
 
 from dream.api import create_app
-from tests.source_helpers import source_line, write_source_env
+from tests.integrations.source_helpers import source_line, write_source_env
 
 
 @pytest.mark.asyncio

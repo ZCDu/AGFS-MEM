@@ -11,7 +11,7 @@ from dream.integrations.internship.sync import (
 )
 from dream.integrations.internship.client import InternshipRecord, SourceFetchError
 from dream.core.scope import ScopeIds
-from tests.source_helpers import source_record, source_settings
+from tests.integrations.source_helpers import source_record, source_settings
 
 
 class FakeSourceClient:
