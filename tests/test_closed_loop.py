@@ -10,7 +10,7 @@ from dream.application.closed_loop import (
     TaskStartBlocked,
 )
 from dream.core.events import TaskCompletedEvent
-from dream.governance.memory_policy import (
+from dream.governance.policy import (
     AutoWritebackDecision,
     GovernanceMode,
     RiskLevel,

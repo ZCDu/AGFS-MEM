@@ -1,4 +1,4 @@
-from dream.governance.memory_policy import (
+from dream.governance.policy import (
     GovernanceArtifact,
     GovernanceMode,
     MemoryGovernancePolicy,

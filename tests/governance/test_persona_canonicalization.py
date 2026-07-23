@@ -1,7 +1,7 @@
 import pytest
 
-from dream.governance.knowledge_adapter import KnowledgeAdapter
-from dream.governance.knowledge_router import KnowledgeRouter
+from dream.governance.canonicalizer import KnowledgeAdapter
+from dream.governance.router import KnowledgeRouter
 from dream.governance.persona_models import (
     PersonaCanonicalizationRequired,
     PersonaMergeType,

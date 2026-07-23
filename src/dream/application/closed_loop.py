@@ -8,7 +8,7 @@ from dream.artifacts import AtomicArtifactStore
 from dream.application.deadline import DreamDeadline, DreamDeadlineExceeded
 from dream.application.service import DreamService
 from dream.governance.candidates import GovernanceCandidateStore
-from dream.governance.memory_policy import (
+from dream.governance.policy import (
     GovernanceArtifact,
     GovernanceMode,
     MemoryGovernancePolicy,

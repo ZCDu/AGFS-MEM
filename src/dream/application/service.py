@@ -22,7 +22,7 @@ from dream.application.scheduler import (
     ReviewSchedulePolicy,
 )
 from dream.core.events import TaskCompletedEvent
-from dream.governance.memory_policy import GovernanceArtifact
+from dream.governance.policy import GovernanceArtifact
 from dream.core.ledger import EventLedger
 from dream.managers.decision_cards import DecisionCardManager
 from dream.managers.memory import MemoryManager

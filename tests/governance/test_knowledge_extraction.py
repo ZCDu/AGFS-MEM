@@ -3,11 +3,11 @@ import json
 import pytest
 
 from dream.governance.knowledge import KnowledgeType
-from dream.governance.knowledge_adapter import (
+from dream.governance.canonicalizer import (
     InvalidKnowledgeProposal,
     KnowledgeAdapter,
 )
-from dream.governance.knowledge_router import KnowledgeRouter
+from dream.governance.router import KnowledgeRouter
 from dream.extraction.models import ArtifactKind
 
 

@@ -6,12 +6,12 @@ from dream.governance.knowledge import (
     KnowledgeProposal,
     KnowledgeType,
 )
-from dream.governance.knowledge_adapter import (
+from dream.governance.canonicalizer import (
     InvalidKnowledgeProposal,
     KnowledgeAdapter,
 )
-from dream.governance.knowledge_router import KnowledgeRouter
-from dream.governance.memory_policy import (
+from dream.governance.router import KnowledgeRouter
+from dream.governance.policy import (
     AutoWritebackDecision,
     GovernanceArtifact,
     GovernanceMode,
