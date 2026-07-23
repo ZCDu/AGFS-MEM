@@ -1,10 +1,10 @@
 from datetime import datetime, timezone
 from pathlib import Path
 
-from dream.artifacts import AtomicArtifactStore
+from dream.memory.artifacts import AtomicArtifactStore
 from dream.curators.llm_backend import AICurationPlan, UserCurationPlan
 from dream.core.events import TaskCompletedEvent
-from dream.managers.decision_cards import DecisionCardManager
+from dream.memory.managers.decision_cards import DecisionCardManager
 from dream.extraction.models import ArtifactKind, ReviewAction
 from dream.core.scope import ScopeIds, resolve_scope
 from dream.application.service import DreamService

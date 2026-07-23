@@ -15,7 +15,7 @@ from dream.governance.policy import (
     GovernanceMode,
     RiskLevel,
 )
-from dream.publication import PublicationStatus, PublicationTransitionError
+from dream.memory.publication import PublicationStatus, PublicationTransitionError
 from dream.extraction.models import (
     ArtifactKind,
     ReviewAction,
@@ -24,7 +24,7 @@ from dream.extraction.models import (
 )
 from dream.core.scope import ScopeIds
 from dream.application.service import DreamService
-from dream.writeback import DeterministicWritebackBackend
+from dream.memory.writeback import DeterministicWritebackBackend
 
 
 IDS = ScopeIds("dream-lab", "enterprise-colleague", "python-beginner")

@@ -4,8 +4,8 @@ from pathlib import Path
 from dream.curators.ai import AICurator
 from dream.curators.user import UserCurator
 from dream.core.events import TaskCompletedEvent
-from dream.managers.decision_cards import DecisionCardManager
-from dream.managers.memory import MemoryManager
+from dream.memory.managers.decision_cards import DecisionCardManager
+from dream.memory.managers.persona import MemoryManager
 from dream.extraction.models import ArtifactKind, ReviewAction
 from dream.core.scope import ScopeIds, resolve_scope
 from dream.application.service import DreamService

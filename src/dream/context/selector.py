@@ -3,7 +3,7 @@
 from dataclasses import dataclass
 import re
 
-from dream.memory_items import ENTRY_DELIMITER, parse_memory_items
+from dream.memory.items import ENTRY_DELIMITER, parse_memory_items
 
 
 _TOKEN = re.compile(r"[A-Za-z0-9]+|[\u4e00-\u9fff]")

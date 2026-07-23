@@ -4,9 +4,9 @@ from types import SimpleNamespace
 
 import pytest
 
-from dream.artifacts import AtomicArtifactStore
+from dream.memory.artifacts import AtomicArtifactStore
 from dream.core.scope import ScopeIds, resolve_scope
-from dream.writeback import (
+from dream.memory.writeback import (
     DeterministicWritebackBackend,
     OpenAIWritebackBackend,
     WritebackService,

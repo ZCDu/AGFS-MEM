@@ -8,7 +8,7 @@ from dream.extraction.models import (
     ReviewRequest,
     ReviewResult,
 )
-from dream.snapshots import ContextSnapshot
+from dream.memory.storage.snapshots import ContextSnapshot
 
 
 class BackgroundReviewOrchestrator:

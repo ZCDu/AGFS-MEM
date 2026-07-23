@@ -7,7 +7,7 @@ from threading import RLock
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
-from dream.artifacts import AtomicArtifactStore
+from dream.memory.artifacts import AtomicArtifactStore
 from dream.curators.ai import AICurator
 from dream.curators.llm_backend import SemanticCuratorBackend
 from dream.curators.schedule import CuratorScheduleStore
@@ -24,18 +24,18 @@ from dream.application.scheduler import (
 from dream.core.events import TaskCompletedEvent
 from dream.governance.policy import GovernanceArtifact
 from dream.core.ledger import EventLedger
-from dream.managers.decision_cards import DecisionCardManager
-from dream.managers.memory import MemoryManager
-from dream.managers.skills import SkillManager
-from dream.publication import PublicationStatus, PublicationStore
-from dream.reports import DreamReportStore
+from dream.memory.managers.decision_cards import DecisionCardManager
+from dream.memory.managers.persona import MemoryManager
+from dream.memory.managers.skill_candidates import SkillManager
+from dream.memory.publication import PublicationStatus, PublicationStore
+from dream.memory.storage.reports import DreamReportStore
 from dream.extraction.backend import DeterministicReviewBackend, ReviewBackend
 from dream.extraction.cache import ReviewStageCache
 from dream.extraction.models import ArtifactKind
 from dream.review.orchestrator import BackgroundReviewOrchestrator
-from dream.rollback import RollbackService
+from dream.memory.storage.rollback import RollbackService
 from dream.core.scope import ScopeIds, resolve_scope
-from dream.snapshots import SnapshotStore
+from dream.memory.storage.snapshots import SnapshotStore
 from dream.sources.manual import manual_record_to_event, parse_manual_ndjson
 from dream.validation.seeds import parse_seed_jsonl, seed_record_to_event
 

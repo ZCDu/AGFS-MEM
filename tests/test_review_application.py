@@ -4,12 +4,12 @@ from pathlib import Path
 
 import pytest
 
-from dream.artifacts import AtomicArtifactStore
-from dream.managers.decision_cards import DecisionCardManager
-from dream.managers.memory import MemoryManager
-from dream.reports import DreamReportStore
+from dream.memory.artifacts import AtomicArtifactStore
+from dream.memory.managers.decision_cards import DecisionCardManager
+from dream.memory.managers.persona import MemoryManager
+from dream.memory.storage.reports import DreamReportStore
 from dream.extraction.models import ArtifactKind, ReviewAction
-from dream.rollback import RollbackService
+from dream.memory.storage.rollback import RollbackService
 from dream.core.scope import ScopeIds, resolve_scope
 
 

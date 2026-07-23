@@ -9,7 +9,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from dream.curators.llm_backend import OpenAICuratorBackend, SemanticCuratorBackend
 from dream.extraction.backend import DeterministicReviewBackend, ReviewBackend
 from dream.extraction.llm_backend import OpenAIReviewBackend
-from dream.writeback import (
+from dream.memory.writeback import (
     DeterministicWritebackBackend,
     WritebackBackend,
 )

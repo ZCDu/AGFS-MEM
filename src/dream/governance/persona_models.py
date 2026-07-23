@@ -5,7 +5,7 @@ from enum import StrEnum
 import re
 
 from dream.governance.knowledge import CandidateKnowledge
-from dream.memory_items import AtomicMemoryItem, memory_id_for, parse_memory_items
+from dream.memory.items import AtomicMemoryItem, memory_id_for, parse_memory_items
 
 
 _WORD = re.compile(r"[a-z0-9]+|[\u4e00-\u9fff]+", re.IGNORECASE)

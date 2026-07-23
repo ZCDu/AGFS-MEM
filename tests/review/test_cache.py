@@ -5,7 +5,7 @@ from dream.core.events import TaskCompletedEvent
 from dream.extraction.cache import ReviewStageCache
 from dream.extraction.models import ReviewEventDisposition, ReviewResult
 from dream.core.scope import ScopeIds
-from dream.snapshots import ContextSnapshot
+from dream.memory.storage.snapshots import ContextSnapshot
 
 
 IDS = ScopeIds("acme", "assistant", "alice")

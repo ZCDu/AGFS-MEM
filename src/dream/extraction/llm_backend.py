@@ -20,7 +20,7 @@ from dream.extraction.structured import (
     StructuredProviderError,
     StructuredToolCall,
 )
-from dream.memory_items import MEMORY_ID_PATTERN, parse_memory_items
+from dream.memory.items import MEMORY_ID_PATTERN, parse_memory_items
 
 
 _SOURCE_EVENT_IDS = {

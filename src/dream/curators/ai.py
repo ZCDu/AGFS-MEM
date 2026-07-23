@@ -6,11 +6,11 @@ from pathlib import Path
 import re
 from uuid import uuid4
 
-from dream.artifacts import AtomicArtifactStore
+from dream.memory.artifacts import AtomicArtifactStore
 from dream.curators.llm_backend import SemanticCuratorBackend
 from dream.curators.protocol import CuratorRunReport
-from dream.reports import DreamReportStore
-from dream.rollback import RollbackService
+from dream.memory.storage.reports import DreamReportStore
+from dream.memory.storage.rollback import RollbackService
 from dream.core.scope import ScopePaths
 
 

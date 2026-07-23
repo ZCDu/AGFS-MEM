@@ -21,7 +21,7 @@ from dream.config import (
     load_settings,
 )
 from dream.core.events import TaskCompletedEvent
-from dream.publication import PublicationTransitionError, PublicationVersion
+from dream.memory.publication import PublicationTransitionError, PublicationVersion
 from dream.core.scope import ScopeIds
 from dream.application.scheduler import ReviewSchedulePolicy
 from dream.application.service import DreamService

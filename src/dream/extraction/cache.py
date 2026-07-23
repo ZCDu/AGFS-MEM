@@ -5,7 +5,7 @@ import hashlib
 import json
 from pathlib import Path
 
-from dream.artifacts import AtomicArtifactStore
+from dream.memory.artifacts import AtomicArtifactStore
 from dream.core.events import TaskCompletedEvent
 from dream.extraction.models import (
     ArtifactKind,
@@ -14,7 +14,7 @@ from dream.extraction.models import (
     ReviewResult,
 )
 from dream.core.scope import ScopeIds
-from dream.snapshots import ContextSnapshot
+from dream.memory.storage.snapshots import ContextSnapshot
 
 
 _CACHE_FORMAT = 2

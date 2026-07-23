@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from dream.artifacts import AtomicArtifactStore
+from dream.memory.artifacts import AtomicArtifactStore
 from dream.context.selector import ContextBudget, ContextSelector, estimated_tokens
 from dream.core.scope import ScopeIds, resolve_scope
 from dream.application.service import DreamService

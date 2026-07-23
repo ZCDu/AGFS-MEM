@@ -4,7 +4,7 @@ from pathlib import Path
 import pytest
 
 from dream.curators.ai import AICurator
-from dream.publication import PublicationStore
+from dream.memory.publication import PublicationStore
 from dream.extraction.models import ArtifactKind, ReviewAction, ReviewResult
 from dream.core.scope import resolve_scope
 from dream.application.service import DreamService
@@ -15,7 +15,7 @@ from dream.validation.seeds import (
     seed_scope,
     validate_seed_file,
 )
-from dream.writeback import DeterministicWritebackBackend, WritebackService
+from dream.memory.writeback import DeterministicWritebackBackend, WritebackService
 
 
 def seed_line(**overrides: object) -> str:

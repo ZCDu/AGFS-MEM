@@ -4,7 +4,7 @@ import hashlib
 import json
 from pathlib import Path
 
-from dream.artifacts import AtomicArtifactStore
+from dream.memory.artifacts import AtomicArtifactStore
 from dream.governance.policy import GovernanceArtifact
 from dream.core.scope import ScopePaths
 

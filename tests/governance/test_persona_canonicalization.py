@@ -6,7 +6,7 @@ from dream.governance.persona_models import (
     PersonaCanonicalizationRequired,
     PersonaMergeType,
 )
-from dream.memory_items import memory_id_for
+from dream.memory.items import memory_id_for
 
 
 OLD_RISK_PREFERENCE = "User values explicit risk controls."

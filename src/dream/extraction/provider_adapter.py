@@ -8,7 +8,7 @@ from typing import Any
 from dream.governance.canonicalizer import KnowledgeAdapter
 from dream.governance.router import KnowledgeRouter
 from dream.governance.persona_models import PersonaCanonicalizationRequired
-from dream.memory_items import (
+from dream.memory.items import (
     InvalidReplaceTarget,
     parse_memory_items,
     require_atomic_text,

@@ -4,7 +4,7 @@ import hashlib
 from datetime import datetime
 from pathlib import Path
 
-from dream.artifacts import AtomicArtifactStore
+from dream.memory.artifacts import AtomicArtifactStore
 from dream.application.deadline import DreamDeadline, DreamDeadlineExceeded
 from dream.application.service import DreamService
 from dream.governance.candidates import GovernanceCandidateStore
@@ -13,21 +13,21 @@ from dream.governance.policy import (
     GovernanceMode,
     MemoryGovernancePolicy,
 )
-from dream.managers.decision_cards import DecisionCardManager
-from dream.managers.memory import MemoryManager
-from dream.managers.skills import SkillManager
-from dream.memory_items import memory_id_for
-from dream.publication import (
+from dream.memory.managers.decision_cards import DecisionCardManager
+from dream.memory.managers.persona import MemoryManager
+from dream.memory.managers.skill_candidates import SkillManager
+from dream.memory.items import memory_id_for
+from dream.memory.publication import (
     PublicationStatus,
     PublicationStore,
     PublicationTransitionError,
     PublicationVersion,
 )
-from dream.reports import DreamReportStore
+from dream.memory.storage.reports import DreamReportStore
 from dream.extraction.models import ArtifactKind, ReviewAction
 from dream.core.scope import ScopeIds, resolve_scope
-from dream.snapshots import SnapshotStore
-from dream.writeback import WritebackBackend, WritebackService
+from dream.memory.storage.snapshots import SnapshotStore
+from dream.memory.writeback import WritebackBackend, WritebackService
 
 
 class ClosedLoopError(RuntimeError):

@@ -2,9 +2,9 @@ from pathlib import Path
 
 import pytest
 
-from dream.artifacts import AtomicArtifactStore
+from dream.memory.artifacts import AtomicArtifactStore
 from dream.core.scope import ScopeIds, resolve_scope
-from dream.snapshots import SnapshotStore
+from dream.memory.storage.snapshots import SnapshotStore
 
 
 def test_background_write_does_not_mutate_existing_snapshot(tmp_path: Path) -> None:

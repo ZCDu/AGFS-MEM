@@ -13,7 +13,7 @@ from dream.api import create_app
 from dream.curators.llm_backend import OpenAICuratorBackend
 from dream.extraction.backend import DeterministicReviewBackend
 from dream.extraction.llm_backend import OpenAIReviewBackend
-from dream.writeback import DeterministicWritebackBackend
+from dream.memory.writeback import DeterministicWritebackBackend
 
 
 def test_missing_env_file_uses_safe_deterministic_backend(tmp_path: Path) -> None:

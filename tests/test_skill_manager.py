@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from dream.managers.skills import SkillManager
+from dream.memory.managers.skill_candidates import SkillManager
 from dream.extraction.models import ArtifactKind, ReviewAction
 from dream.core.scope import ScopeIds, resolve_scope
 

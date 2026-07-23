@@ -11,7 +11,7 @@ from dream.governance.persona_models import (
     parse_persona_atom,
     render_persona_atom,
 )
-from dream.memory_items import AtomicMemoryItem, memory_id_for, parse_memory_items
+from dream.memory.items import AtomicMemoryItem, memory_id_for, parse_memory_items
 
 
 _WORD = re.compile(r"[a-z0-9]+|[\u4e00-\u9fff]+", re.IGNORECASE)

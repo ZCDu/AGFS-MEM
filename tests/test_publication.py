@@ -3,7 +3,7 @@ from pathlib import Path
 import pytest
 
 from dream.core.events import TaskCompletedEvent
-from dream.publication import (
+from dream.memory.publication import (
     PublicationStatus,
     PublicationStore,
     PublicationTransitionError,

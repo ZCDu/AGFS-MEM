@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from dream.artifacts import AtomicArtifactStore
+from dream.memory.artifacts import AtomicArtifactStore
 from dream.core.scope import ScopePaths
 
 

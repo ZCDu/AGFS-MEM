@@ -5,7 +5,7 @@ import httpx
 import pytest
 
 from dream.api import create_app
-from dream.writeback import DeterministicWritebackBackend
+from dream.memory.writeback import DeterministicWritebackBackend
 
 
 def _manual_line(**overrides: object) -> str:
