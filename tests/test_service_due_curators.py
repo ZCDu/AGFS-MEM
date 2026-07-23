@@ -3,7 +3,7 @@ from pathlib import Path
 
 from dream.core.events import TaskCompletedEvent
 from dream.core.scope import ScopeIds
-from dream.service import DreamService
+from dream.application.service import DreamService
 
 
 def test_service_does_not_repeat_immediate_curators_in_daily_fallback(

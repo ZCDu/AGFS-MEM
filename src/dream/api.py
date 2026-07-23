@@ -13,7 +13,7 @@ from fastapi import FastAPI, HTTPException, Request, Response, status
 import httpx
 from pydantic import BaseModel, ConfigDict, Field
 
-from dream.closed_loop import ClosedLoopCoordinator, ClosedLoopError, TaskStartBlocked
+from dream.application.closed_loop import ClosedLoopCoordinator, ClosedLoopError, TaskStartBlocked
 from dream.config import (
     build_curator_backend,
     build_review_backend,
@@ -23,8 +23,8 @@ from dream.config import (
 from dream.core.events import TaskCompletedEvent
 from dream.publication import PublicationTransitionError, PublicationVersion
 from dream.core.scope import ScopeIds
-from dream.scheduler import ReviewSchedulePolicy
-from dream.service import DreamService
+from dream.application.scheduler import ReviewSchedulePolicy
+from dream.application.service import DreamService
 from dream.source_sync import InternshipSourceSync
 from dream.sources.internship import InternshipSourceClient
 from dream.sources.manual import ManualSourceError

@@ -2,7 +2,7 @@ from datetime import datetime, timedelta, timezone
 
 from dream.curators.registry import CuratorRegistry
 from dream.core.events import TaskCompletedEvent
-from dream.scheduler import DreamScheduler, ReviewSchedulePolicy
+from dream.application.scheduler import DreamScheduler, ReviewSchedulePolicy
 from dream.core.scope import ScopeIds
 
 

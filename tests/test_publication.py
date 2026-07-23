@@ -9,7 +9,7 @@ from dream.publication import (
     PublicationTransitionError,
 )
 from dream.core.scope import ScopeIds, resolve_scope
-from dream.service import DreamService
+from dream.application.service import DreamService
 
 
 def store(tmp_path: Path, user: str = "python-beginner") -> PublicationStore:

@@ -3,9 +3,9 @@ from pathlib import Path
 
 from dream.core.events import TaskCompletedEvent
 from dream.review.models import ReviewResult
-from dream.scheduler import ReviewSchedulePolicy
+from dream.application.scheduler import ReviewSchedulePolicy
 from dream.core.scope import ScopeIds
-from dream.service import DreamService
+from dream.application.service import DreamService
 
 
 def _event(

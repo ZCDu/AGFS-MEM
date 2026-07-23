@@ -4,7 +4,7 @@ import time
 
 import pytest
 
-from dream.closed_loop import (
+from dream.application.closed_loop import (
     ClosedLoopCoordinator,
     ClosedLoopError,
     TaskStartBlocked,
@@ -23,7 +23,7 @@ from dream.review.models import (
     ReviewResult,
 )
 from dream.core.scope import ScopeIds
-from dream.service import DreamService
+from dream.application.service import DreamService
 from dream.writeback import DeterministicWritebackBackend
 
 

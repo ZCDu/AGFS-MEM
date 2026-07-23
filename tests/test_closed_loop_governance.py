@@ -3,12 +3,12 @@ from pathlib import Path
 import pytest
 
 from dream.artifacts import AtomicArtifactStore
-from dream.closed_loop import ClosedLoopCoordinator, ClosedLoopError
+from dream.application.closed_loop import ClosedLoopCoordinator, ClosedLoopError
 from dream.core.events import TaskCompletedEvent
 from dream.publication import PublicationStatus, PublicationTransitionError
 from dream.review.models import ArtifactKind, ReviewAction, ReviewResult
 from dream.core.scope import ScopeIds, resolve_scope
-from dream.service import DreamService
+from dream.application.service import DreamService
 from dream.writeback import DeterministicWritebackBackend
 
 

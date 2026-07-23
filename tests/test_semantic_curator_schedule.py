@@ -7,7 +7,7 @@ from dream.core.events import TaskCompletedEvent
 from dream.managers.decision_cards import DecisionCardManager
 from dream.review.models import ArtifactKind, ReviewAction
 from dream.core.scope import ScopeIds, resolve_scope
-from dream.service import DreamService
+from dream.application.service import DreamService
 
 
 IDS = ScopeIds("acme", "assistant", "alice")

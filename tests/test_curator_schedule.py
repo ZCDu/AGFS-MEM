@@ -8,7 +8,7 @@ from dream.managers.decision_cards import DecisionCardManager
 from dream.managers.memory import MemoryManager
 from dream.review.models import ArtifactKind, ReviewAction
 from dream.core.scope import ScopeIds, resolve_scope
-from dream.service import DreamService
+from dream.application.service import DreamService
 
 
 def _event(event_id: str, user_id: str = "alice") -> TaskCompletedEvent:

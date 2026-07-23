@@ -1,7 +1,7 @@
 from datetime import datetime, timezone
 from pathlib import Path
 
-from dream.service import DreamService
+from dream.application.service import DreamService
 from dream.source_sync import (
     InternshipSourceSync,
     SourceSyncState,

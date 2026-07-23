@@ -1,9 +1,9 @@
 from pathlib import Path
 
 from dream.core.events import TaskCompletedEvent
-from dream.review.progress import ReviewProgressStore
+from dream.application.progress import ReviewProgressStore
 from dream.core.scope import ScopeIds
-from dream.service import DreamService
+from dream.application.service import DreamService
 
 
 def event(

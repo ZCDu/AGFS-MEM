@@ -3,7 +3,7 @@ from pathlib import Path
 from dream.artifacts import AtomicArtifactStore
 from dream.context.selector import ContextBudget, ContextSelector, estimated_tokens
 from dream.core.scope import ScopeIds, resolve_scope
-from dream.service import DreamService
+from dream.application.service import DreamService
 
 
 def test_selector_retrieves_relevant_atomic_memory_within_token_budget() -> None:
