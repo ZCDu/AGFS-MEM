@@ -3,7 +3,7 @@
 import asyncio
 from contextlib import asynccontextmanager, suppress
 from dataclasses import asdict
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import logging
 import os
 from pathlib import Path
@@ -23,6 +23,7 @@ from dream.config import (
 from dream.events import TaskCompletedEvent
 from dream.publication import PublicationTransitionError, PublicationVersion
 from dream.scope import ScopeIds
+from dream.scheduler import ReviewSchedulePolicy
 from dream.service import DreamService
 from dream.source_sync import InternshipSourceSync
 from dream.sources.internship import InternshipSourceClient
@@ -94,9 +95,7 @@ def create_app(
     client_factory: Callable[..., object] | None = None,
     source_transport: httpx.BaseTransport | None = None,
 ) -> FastAPI:
-    resolved_env_file = (
-        env_file or Path(os.environ.get("DREAM_ENV_FILE", ".env")).expanduser()
-    )
+    resolved_env_file = env_file if env_file is not None else home / ".env"
     settings = load_settings(resolved_env_file)
     backend = build_review_backend(settings, client_factory=client_factory)
     semantic_curator_backend = build_curator_backend(
@@ -107,12 +106,25 @@ def create_app(
         home,
         backend=backend,
         semantic_curator_backend=semantic_curator_backend,
+        review_schedule=ReviewSchedulePolicy(
+            idle_after=timedelta(hours=settings.review_idle_hours),
+            max_batch_tokens=settings.review_max_batch_tokens,
+            max_batch_events=settings.review_max_batch_events,
+            max_wait=timedelta(hours=settings.review_max_wait_hours),
+        ),
+        timezone_name=settings.timezone,
+        curator_daily_hour=settings.curator_daily_hour,
+        semantic_curator_enabled=settings.curator_consolidate,
+        semantic_curator_interval_hours=(settings.curator_consolidate_interval_hours),
+        semantic_curator_min_idle_hours=(settings.curator_consolidate_min_idle_hours),
+        dream_deadline_seconds=settings.dream_deadline_seconds,
     )
     closed_loop = ClosedLoopCoordinator(
         service,
         writeback_backend=writeback_backend,
         character_limit=settings.character_definition_limit,
         user_persona_limit=settings.user_persona_limit,
+        deadline_seconds=settings.dream_deadline_seconds,
     )
     source_sync: InternshipSourceSync | None = None
     if settings.internship_source.enabled:
@@ -145,9 +157,15 @@ def create_app(
                         logger.exception("DREAM source sync iteration failed")
                 if not settings.validation_require_active_writeback:
                     try:
-                        await asyncio.to_thread(service.run_pending)
+                        await asyncio.to_thread(
+                            closed_loop.run_due_pending, datetime.now(timezone.utc)
+                        )
                         await asyncio.to_thread(
                             service.run_due_curators, datetime.now(timezone.utc)
+                        )
+                        await asyncio.to_thread(
+                            service.run_due_semantic_curators,
+                            datetime.now(timezone.utc),
                         )
                     except Exception:
                         logger.exception("DREAM background worker iteration failed")
@@ -295,7 +313,9 @@ def create_app(
 
     @application.post("/v1/dream/run-pending")
     def run_pending() -> dict[str, object]:
-        return {"runs": service.run_pending()}
+        return {
+            "runs": [publication_payload(value) for value in closed_loop.run_pending()]
+        }
 
     @application.post("/v1/dream/run-curators")
     def run_curators(scope: ScopeRequest) -> dict[str, object]:

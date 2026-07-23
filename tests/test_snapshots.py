@@ -49,3 +49,33 @@ def test_context_snapshot_restores_writeback_and_removes_new_decision_card(
     assert store.read_text(Path("CHARACTER_DEFINITION.md")) == "stable character\n"
     assert store.read_text(Path("users/alice/USER_PERSONA.md")) == "stable persona\n"
     assert not store.resolve(Path("decision-cards/new-card.md")).exists()
+
+
+def test_context_snapshot_restores_archives_curator_state_and_file_existence(
+    tmp_path: Path,
+) -> None:
+    ids = ScopeIds("acme", "assistant", "alice")
+    paths = resolve_scope(tmp_path, ids)
+    store = AtomicArtifactStore(paths.agent_root)
+    store.write_text(Path("decision-cards/keep.md"), "active before\n")
+    store.write_text(Path("decision-cards/.archive/old.md"), "archived before\n")
+    store.write_text(Path("curator-state/schedule.json"), '{"before": true}\n')
+    snapshots = SnapshotStore(paths, store)
+    snapshot = snapshots.create(ids)
+
+    store.resolve(Path("decision-cards/keep.md")).unlink()
+    store.write_text(Path("decision-cards/.archive/keep.md"), "moved by curator\n")
+    store.write_text(Path("decision-cards/.archive/new.md"), "new archive\n")
+    store.write_text(Path("curator-state/schedule.json"), '{"after": true}\n')
+    store.write_text(Path("curator-state/ai.json"), '{"new": true}\n')
+    store.write_text(Path("users/alice/USER_PERSONA.md"), "created candidate\n")
+
+    snapshots.restore(snapshot.snapshot_id, ids)
+
+    assert store.read_text(Path("decision-cards/keep.md")) == "active before\n"
+    assert store.read_text(Path("decision-cards/.archive/old.md")) == "archived before\n"
+    assert not store.resolve(Path("decision-cards/.archive/keep.md")).exists()
+    assert not store.resolve(Path("decision-cards/.archive/new.md")).exists()
+    assert store.read_text(Path("curator-state/schedule.json")) == '{"before": true}\n'
+    assert not store.resolve(Path("curator-state/ai.json")).exists()
+    assert not store.resolve(Path("users/alice/USER_PERSONA.md")).exists()

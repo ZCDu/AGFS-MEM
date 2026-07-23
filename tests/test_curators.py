@@ -109,3 +109,53 @@ def test_curators_can_apply_llm_semantic_plans_within_scope(tmp_path: Path) -> N
     assert "Prefers concise replies." in (paths.user_root / "USER.md").read_text(
         encoding="utf-8"
     )
+
+
+def test_user_curator_storage_is_not_limited_by_context_budget(
+    tmp_path: Path,
+) -> None:
+    class LargeProfileBackend:
+        def curate_user(self, profile):
+            assert "evt-large-user" in profile
+            return UserCurationPlan(
+                user_profile_markdown=(
+                    ("Durable long-term user detail. " * 80)
+                    + "\n<!-- dream-source: evt-large-user -->\n"
+                ),
+                summary="Preserve complete durable profile",
+            )
+
+    paths = resolve_scope(tmp_path, ScopeIds("acme", "assistant", "alice"))
+    AtomicArtifactStore(paths.agent_root).write_text(
+        Path("users/alice/USER.md"),
+        "Seed detail.\n<!-- dream-source: evt-large-user -->\n",
+    )
+
+    UserCurator(paths, semantic_backend=LargeProfileBackend()).run()
+
+    profile = (paths.user_root / "USER.md").read_text(encoding="utf-8")
+    assert len(profile) > 1_375
+    assert "evt-large-user" in profile
+
+
+def test_ai_curator_storage_is_not_limited_by_context_budget(tmp_path: Path) -> None:
+    class LargeRulesBackend:
+        def curate_ai(self, *, cards, current_rules):
+            return AICurationPlan(
+                decision_rules_markdown=(
+                    "# AI Decision Rules\n\n"
+                    + ("Complete durable decision detail. " * 1_700)
+                    + "\n  - Evidence cards: verify-risk-a\n"
+                ),
+                archive_card_ids=(),
+                summary="Preserve complete durable rules",
+            )
+
+    paths = resolve_scope(tmp_path, ScopeIds("acme", "assistant", "alice"))
+    DecisionCardManager(paths).apply(_decision("verify-risk-a", "evt-large-ai"))
+
+    AICurator(paths, semantic_backend=LargeRulesBackend()).run()
+
+    rules = (paths.agent_root / "DECISION_RULES.md").read_text(encoding="utf-8")
+    assert len(rules) > 50_000
+    assert "verify-risk-a" in rules

@@ -14,6 +14,7 @@ class PublicationStatus(StrEnum):
     PENDING = "pending"
     DREAMING = "dreaming"
     READY_FOR_REVIEW = "ready_for_review"
+    READY_FOR_ACTIVATION = "ready_for_activation"
     READY_FOR_WRITEBACK = "ready_for_writeback"
     ACTIVE = "active"
     FAILED = "failed"
@@ -48,6 +49,7 @@ _ALLOWED = {
     },
     PublicationStatus.DREAMING: {
         PublicationStatus.READY_FOR_REVIEW,
+        PublicationStatus.READY_FOR_ACTIVATION,
         PublicationStatus.FAILED,
     },
     PublicationStatus.READY_FOR_REVIEW: {
@@ -55,6 +57,10 @@ _ALLOWED = {
         PublicationStatus.FAILED,
     },
     PublicationStatus.READY_FOR_WRITEBACK: {
+        PublicationStatus.ACTIVE,
+        PublicationStatus.FAILED,
+    },
+    PublicationStatus.READY_FOR_ACTIVATION: {
         PublicationStatus.ACTIVE,
         PublicationStatus.FAILED,
     },
@@ -189,6 +195,23 @@ class PublicationStore:
             user_persona_sha256=user_persona_sha256,
         )
 
+    def mark_ready_for_activation(
+        self,
+        version: int,
+        after_snapshot_id: str,
+        character_definition_sha256: str,
+        user_persona_sha256: str,
+    ) -> PublicationVersion:
+        return self._transition(
+            version,
+            PublicationStatus.READY_FOR_ACTIVATION,
+            after_snapshot_id=after_snapshot_id,
+            character_definition_sha256=character_definition_sha256,
+            user_persona_sha256=user_persona_sha256,
+            character_definition_written=True,
+            user_persona_written=True,
+        )
+
     def approve(self, version: int) -> PublicationVersion:
         return self._transition(version, PublicationStatus.READY_FOR_WRITEBACK)
 
@@ -211,11 +234,7 @@ class PublicationStore:
         )
 
     def activate(self, version: int) -> PublicationVersion:
-        current = self.get(version)
-        if not (current.character_definition_written and current.user_persona_written):
-            raise PublicationTransitionError(
-                "both writebacks must be confirmed before activation"
-            )
+        self.require_activation_ready(version)
         active = self._transition(
             version,
             PublicationStatus.ACTIVE,
@@ -230,6 +249,19 @@ class PublicationStore:
             tuple(value for value in self.pending_event_ids() if value not in consumed)
         )
         return active
+
+    def require_activation_ready(self, version: int) -> PublicationVersion:
+        current = self.get(version)
+        if current.status not in {
+            PublicationStatus.READY_FOR_WRITEBACK,
+            PublicationStatus.READY_FOR_ACTIVATION,
+        }:
+            raise PublicationTransitionError("publication is not ready for activation")
+        if not (current.character_definition_written and current.user_persona_written):
+            raise PublicationTransitionError(
+                "both writebacks must be confirmed before activation"
+            )
+        return current
 
     def fail(self, version: int, reason: str) -> PublicationVersion:
         if not reason.strip():

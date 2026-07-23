@@ -29,3 +29,15 @@ class DreamReportStore:
             json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
         )
         return self.artifacts.resolve(relative)
+
+    def write_trace(self, run_id: str, trace: dict[str, object]) -> Path:
+        if not _RUN_ID.fullmatch(run_id):
+            raise ValueError("invalid run_id")
+        payload = dict(trace)
+        payload.setdefault("written_at", datetime.now(timezone.utc).isoformat())
+        relative = Path("dream-reports") / "review-traces" / f"{run_id}.json"
+        self.artifacts.write_text(
+            relative,
+            json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+        )
+        return self.artifacts.resolve(relative)

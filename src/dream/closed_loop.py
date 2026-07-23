@@ -1,6 +1,21 @@
 """Coordinate dream candidates, manual writeback, activation, and rollback."""
 
+import hashlib
+from datetime import datetime
+from pathlib import Path
+
 from dream.artifacts import AtomicArtifactStore
+from dream.deadline import DreamDeadline, DreamDeadlineExceeded
+from dream.governance.candidates import GovernanceCandidateStore
+from dream.governance.memory_policy import (
+    GovernanceArtifact,
+    GovernanceMode,
+    MemoryGovernancePolicy,
+)
+from dream.managers.decision_cards import DecisionCardManager
+from dream.managers.memory import MemoryManager
+from dream.managers.skills import SkillManager
+from dream.memory_items import memory_id_for
 from dream.publication import (
     PublicationStatus,
     PublicationStore,
@@ -8,6 +23,7 @@ from dream.publication import (
     PublicationVersion,
 )
 from dream.reports import DreamReportStore
+from dream.review.models import ArtifactKind, ReviewAction
 from dream.scope import ScopeIds, resolve_scope
 from dream.service import DreamService
 from dream.snapshots import SnapshotStore
@@ -36,11 +52,17 @@ class ClosedLoopCoordinator:
         writeback_backend: WritebackBackend,
         character_limit: int = 3200,
         user_persona_limit: int = 1200,
+        deadline_seconds: float = 300.0,
+        governance_policy: MemoryGovernancePolicy | None = None,
     ) -> None:
         self.service = service
         self.writeback_backend = writeback_backend
         self.character_limit = character_limit
         self.user_persona_limit = user_persona_limit
+        self.governance_policy = governance_policy or MemoryGovernancePolicy()
+        if deadline_seconds <= 0:
+            raise ValueError("dream deadline must be positive")
+        self.deadline_seconds = deadline_seconds
 
     def _paths(self, ids: ScopeIds):
         return resolve_scope(self.service.home, ids)
@@ -60,7 +82,14 @@ class ClosedLoopCoordinator:
             user_persona_limit=self.user_persona_limit,
         )
 
+    def _candidate_store(self, ids: ScopeIds) -> GovernanceCandidateStore:
+        return GovernanceCandidateStore(self._paths(ids))
+
     def dream(self, ids: ScopeIds) -> PublicationVersion:
+        with self.service.transaction_lock:
+            return self._dream_locked(ids)
+
+    def _dream_locked(self, ids: ScopeIds) -> PublicationVersion:
         publications = self.publications(ids)
         pending = publications.pending_event_ids()
         if not pending:
@@ -68,21 +97,101 @@ class ClosedLoopCoordinator:
         snapshots = self._snapshots(ids)
         before = snapshots.create(ids)
         version = publications.begin(pending, pending[-1], before.snapshot_id)
+        deadline = DreamDeadline(self.deadline_seconds)
         try:
+            deadline.checkpoint()
             version = publications.mark_dreaming(version.version)
-            reviews = self.service.run_pending(ids)
+            reviews = self.service.run_pending(ids, deadline=deadline)
             if not reviews or any(run["status"] != "success" for run in reviews):
                 raise RuntimeError("background review failed")
-            self.service.run_curators(ids)
+            current_governance_artifacts = tuple(
+                GovernanceArtifact.from_dict(artifact)
+                for run in reviews
+                for artifact in run.get("governance_artifacts", [])
+                if isinstance(artifact, dict)
+            )
+            candidate_store = self._candidate_store(ids)
+            governance_artifacts = candidate_store.reinforce(
+                current_governance_artifacts
+            )
+            governance = self.governance_policy.decide_all(governance_artifacts)
+            deadline.checkpoint()
+            if governance.mode is GovernanceMode.OBSERVE:
+                candidate_store.record(governance_artifacts)
+                snapshots.restore(before.snapshot_id, ids)
+                after = snapshots.create(ids)
+                character_hash, persona_hash = self._current_writeback_hashes(ids)
+                ready = publications.mark_ready_for_activation(
+                    version.version,
+                    after.snapshot_id,
+                    character_hash,
+                    persona_hash,
+                )
+                active = publications.activate(ready.version)
+                self._report(
+                    ids,
+                    active,
+                    "observation stored; active memory unchanged",
+                    transaction_committed=True,
+                    governance_mode=governance.mode.value,
+                    risk_level=governance.risk_level.value,
+                    governance_reason=governance.reason,
+                    governance_artifact_count=len(governance_artifacts),
+                )
+                return active
+            self._apply_reinforced_evidence(
+                ids,
+                current=current_governance_artifacts,
+                reinforced=governance_artifacts,
+            )
             writeback = self._writebacks(ids).generate()
+            deadline.checkpoint()
             after = snapshots.create(ids)
+            governance_details = {
+                "governance_mode": governance.mode.value,
+                "risk_level": governance.risk_level.value,
+                "governance_reason": governance.reason,
+                "governance_artifact_count": len(governance_artifacts),
+            }
+            if governance.mode is GovernanceMode.AUTO_ACTIVATE:
+                ready = publications.mark_ready_for_activation(
+                    version.version,
+                    after.snapshot_id,
+                    writeback.character.sha256,
+                    writeback.user_persona.sha256,
+                )
+                self._report(
+                    ids,
+                    ready,
+                    "candidate ready for automatic activation",
+                    transaction_committed=True,
+                    **governance_details,
+                )
+                active = publications.activate(ready.version)
+                candidate_store.remove(governance_artifacts)
+                self._report(
+                    ids,
+                    active,
+                    "version automatically activated",
+                    transaction_committed=True,
+                    **governance_details,
+                )
+                return active
             ready = publications.mark_ready_for_review(
                 version.version,
                 after.snapshot_id,
                 writeback.character.sha256,
                 writeback.user_persona.sha256,
             )
-            self._report(ids, ready, "candidate ready")
+            self._report(
+                ids,
+                ready,
+                "candidate requires review",
+                transaction_committed=True,
+                candidate_staged=True,
+                **governance_details,
+            )
+            snapshots.restore(before.snapshot_id, ids)
             return ready
         except Exception as exc:
             snapshots.restore(before.snapshot_id, ids)
@@ -90,8 +199,89 @@ class ClosedLoopCoordinator:
                 self.service.review_progress.invalidate(event_id)
             self.service.recover_pending()
             failed = publications.fail(version.version, type(exc).__name__)
-            self._report(ids, failed, "candidate failed")
+            self._report(
+                ids,
+                failed,
+                "candidate timed out"
+                if isinstance(exc, DreamDeadlineExceeded)
+                else "candidate failed",
+                timed_out=isinstance(exc, DreamDeadlineExceeded),
+                elapsed_seconds=deadline.elapsed,
+                transaction_rolled_back=True,
+            )
             raise ClosedLoopError("dream candidate failed") from exc
+
+    def run_pending(self) -> list[PublicationVersion]:
+        scopes: list[ScopeIds] = []
+        for event in self.service.ledger.read_all():
+            if event.scope in scopes:
+                continue
+            if self.publications(event.scope).pending_event_ids():
+                scopes.append(event.scope)
+        return [self.dream(ids) for ids in scopes]
+
+    def run_due_pending(self, now: datetime) -> list[PublicationVersion]:
+        return [self.dream(ids) for ids in self.service.due_scopes(now)]
+
+    def _current_writeback_hashes(self, ids: ScopeIds) -> tuple[str, str]:
+        paths = self._paths(ids)
+        artifacts = AtomicArtifactStore(paths.agent_root)
+        character = artifacts.read_text(Path("CHARACTER_DEFINITION.md"))
+        persona = artifacts.read_text(Path("users") / ids.user_id / "USER_PERSONA.md")
+        return (
+            hashlib.sha256(character.encode("utf-8")).hexdigest(),
+            hashlib.sha256(persona.encode("utf-8")).hexdigest(),
+        )
+
+    def _apply_reinforced_evidence(
+        self,
+        ids: ScopeIds,
+        *,
+        current: tuple[GovernanceArtifact, ...],
+        reinforced: tuple[GovernanceArtifact, ...],
+    ) -> None:
+        current_by_key = {
+            GovernanceCandidateStore.key_for(value): value for value in current
+        }
+        paths = self._paths(ids)
+        for artifact in reinforced:
+            original = current_by_key.get(GovernanceCandidateStore.key_for(artifact))
+            if (
+                original is None
+                or artifact.source_event_ids == original.source_event_ids
+            ):
+                continue
+            payload = dict(artifact.attributes)
+            if artifact.artifact_type is ArtifactKind.USER_PROFILE:
+                content = str(payload.get("content", "")).strip()
+                payload.update(
+                    {
+                        "action": "replace",
+                        "content": content,
+                        "old_content": content,
+                        "memory_id": memory_id_for(content),
+                        "target": "user",
+                    }
+                )
+                manager = MemoryManager(paths)
+                tool_name = "memory_manage"
+            elif artifact.artifact_type is ArtifactKind.DECISION_CARD:
+                manager = DecisionCardManager(paths)
+                tool_name = "decision_card_manage"
+            elif artifact.artifact_type is ArtifactKind.SKILL:
+                manager = SkillManager(paths)
+                tool_name = "skill_manage"
+            else:
+                continue
+            manager.apply(
+                ReviewAction(
+                    kind=artifact.artifact_type,
+                    tool_name=tool_name,
+                    payload=payload,
+                    source_event_id=artifact.source_event_ids[0],
+                    source_event_ids=artifact.source_event_ids,
+                )
+            )
 
     def approve(self, ids: ScopeIds, version: int) -> PublicationVersion:
         return self.publications(ids).approve(version)
@@ -122,15 +312,26 @@ class ClosedLoopCoordinator:
         )
 
     def activate(self, ids: ScopeIds, version: int) -> PublicationVersion:
-        active = self.publications(ids).activate(version)
-        self._report(ids, active, "version active")
-        return active
+        with self.service.transaction_lock:
+            publications = self.publications(ids)
+            candidate = publications.require_activation_ready(version)
+            live = self._snapshots(ids).create(ids)
+            try:
+                if candidate.after_snapshot_id:
+                    self._snapshots(ids).restore(candidate.after_snapshot_id, ids)
+                active = publications.activate(version)
+            except Exception:
+                self._snapshots(ids).restore(live.snapshot_id, ids)
+                raise
+            self._report(ids, active, "version active")
+            return active
 
     def reject(self, ids: ScopeIds, version: int) -> PublicationVersion:
         publications = self.publications(ids)
         candidate = publications.get(version)
         if candidate.status not in {
             PublicationStatus.READY_FOR_REVIEW,
+            PublicationStatus.READY_FOR_ACTIVATION,
             PublicationStatus.READY_FOR_WRITEBACK,
         }:
             raise PublicationTransitionError(
@@ -140,7 +341,14 @@ class ClosedLoopCoordinator:
         for event_id in candidate.source_event_ids:
             self.service.review_progress.invalidate(event_id)
         self.service.recover_pending()
-        return publications.fail(version, "rejected")
+        failed = publications.fail(version, "rejected")
+        self._report(
+            ids,
+            failed,
+            "candidate rejected",
+            transaction_rolled_back=True,
+        )
+        return failed
 
     def rollback(self, ids: ScopeIds, version: int) -> PublicationVersion:
         publications = self.publications(ids)
@@ -149,7 +357,12 @@ class ClosedLoopCoordinator:
             raise ValueError("rollback target has no completed snapshot")
         self._snapshots(ids).restore(selected.after_snapshot_id, ids)
         restored = publications.restore_active(version)
-        self._report(ids, restored, "active version rolled back")
+        self._report(
+            ids,
+            restored,
+            "active version rolled back",
+            transaction_rolled_back=True,
+        )
         return restored
 
     def status(self, ids: ScopeIds) -> dict[str, PublicationVersion | None]:
@@ -168,19 +381,25 @@ class ClosedLoopCoordinator:
         if latest != active_event:
             raise TaskStartBlocked(latest, active_event)
 
-    def _report(self, ids: ScopeIds, version: PublicationVersion, summary: str) -> None:
-        DreamReportStore(self._paths(ids)).write(
-            {
-                "run_id": f"publication-{version.version:06d}-{version.status.value}",
-                "curator": "closed_loop",
-                "status": version.status.value,
-                "version": version.version,
-                "source_event_ids": list(version.source_event_ids),
-                "before_snapshot_id": version.before_snapshot_id,
-                "after_snapshot_id": version.after_snapshot_id,
-                "character_definition_sha256": version.character_definition_sha256,
-                "user_persona_sha256": version.user_persona_sha256,
-                "fallback_version": version.fallback_version,
-                "summary": summary,
-            }
-        )
+    def _report(
+        self,
+        ids: ScopeIds,
+        version: PublicationVersion,
+        summary: str,
+        **details: object,
+    ) -> None:
+        report = {
+            "run_id": f"publication-{version.version:06d}-{version.status.value}",
+            "curator": "closed_loop",
+            "status": version.status.value,
+            "version": version.version,
+            "source_event_ids": list(version.source_event_ids),
+            "before_snapshot_id": version.before_snapshot_id,
+            "after_snapshot_id": version.after_snapshot_id,
+            "character_definition_sha256": version.character_definition_sha256,
+            "user_persona_sha256": version.user_persona_sha256,
+            "fallback_version": version.fallback_version,
+            "summary": summary,
+        }
+        report.update(details)
+        DreamReportStore(self._paths(ids)).write(report)

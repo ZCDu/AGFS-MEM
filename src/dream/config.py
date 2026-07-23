@@ -4,13 +4,13 @@ from dataclasses import dataclass, field
 import os
 from pathlib import Path
 from typing import Callable
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from dream.curators.llm_backend import OpenAICuratorBackend, SemanticCuratorBackend
 from dream.review.backend import DeterministicReviewBackend, ReviewBackend
 from dream.review.llm_backend import OpenAIReviewBackend
 from dream.writeback import (
     DeterministicWritebackBackend,
-    OpenAIWritebackBackend,
     WritebackBackend,
 )
 
@@ -34,9 +34,21 @@ class DreamSettings:
     review_model: str = ""
     review_base_url: str | None = None
     review_api_key: str = ""
-    review_max_completion_tokens: int = 2000
+    review_max_completion_tokens: int = 4096
+    review_idle_hours: float = 2.0
+    review_max_batch_tokens: int = 16_000
+    review_max_batch_events: int = 20
+    review_max_wait_hours: float = 24.0
+    timezone: str = "Asia/Shanghai"
+    curator_daily_hour: int = 3
     llm_structured_mode: str = "auto"
+    llm_timeout_seconds: float = 90.0
+    llm_trust_env: bool = True
+    dream_deadline_seconds: float = 300.0
     curator_backend: str = "inherit"
+    curator_consolidate: bool = False
+    curator_consolidate_interval_hours: float = 168.0
+    curator_consolidate_min_idle_hours: float = 2.0
     curator_model: str = ""
     curator_base_url: str | None = None
     curator_api_key: str = ""
@@ -104,6 +116,16 @@ def _boolean(value: str, name: str) -> bool:
     raise ValueError(f"{name} must be true or false")
 
 
+def _daily_hour(value: str) -> int:
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise ValueError("DREAM_CURATOR_DAILY_HOUR must be an integer") from exc
+    if not 0 <= parsed <= 23:
+        raise ValueError("DREAM_CURATOR_DAILY_HOUR must be between 0 and 23")
+    return parsed
+
+
 def load_settings(path: Path | None = None) -> DreamSettings:
     """Load settings from a dotenv file, with process environment taking priority."""
 
@@ -124,6 +146,11 @@ def load_settings(path: Path | None = None) -> DreamSettings:
     structured_mode = value("DREAM_LLM_STRUCTURED_MODE", "auto").lower()
     if structured_mode not in {"auto", "tools", "json"}:
         raise ValueError("DREAM_LLM_STRUCTURED_MODE must be auto, tools, or json")
+    timezone_name = value("DREAM_TIMEZONE", "Asia/Shanghai")
+    try:
+        ZoneInfo(timezone_name)
+    except ZoneInfoNotFoundError as exc:
+        raise ValueError("DREAM_TIMEZONE must name an installed IANA timezone") from exc
 
     source = InternshipSourceSettings(
         enabled=_boolean(
@@ -159,11 +186,53 @@ def load_settings(path: Path | None = None) -> DreamSettings:
         review_base_url=value("DREAM_REVIEW_BASE_URL") or None,
         review_api_key=value("DREAM_LLM_API_KEY"),
         review_max_completion_tokens=_positive_int(
-            value("DREAM_REVIEW_MAX_COMPLETION_TOKENS", "2000"),
+            value("DREAM_REVIEW_MAX_COMPLETION_TOKENS", "4096"),
             "DREAM_REVIEW_MAX_COMPLETION_TOKENS",
         ),
+        review_idle_hours=_positive_float(
+            value("DREAM_REVIEW_IDLE_HOURS", "2"),
+            "DREAM_REVIEW_IDLE_HOURS",
+        ),
+        review_max_batch_tokens=_positive_int(
+            value("DREAM_REVIEW_MAX_BATCH_TOKENS", "16000"),
+            "DREAM_REVIEW_MAX_BATCH_TOKENS",
+        ),
+        review_max_batch_events=_positive_int(
+            value("DREAM_REVIEW_MAX_BATCH_EVENTS", "20"),
+            "DREAM_REVIEW_MAX_BATCH_EVENTS",
+        ),
+        review_max_wait_hours=_positive_float(
+            value("DREAM_REVIEW_MAX_WAIT_HOURS", "24"),
+            "DREAM_REVIEW_MAX_WAIT_HOURS",
+        ),
+        timezone=timezone_name,
+        curator_daily_hour=_daily_hour(value("DREAM_CURATOR_DAILY_HOUR", "3")),
         llm_structured_mode=structured_mode,
+        llm_timeout_seconds=_positive_float(
+            value("DREAM_LLM_TIMEOUT_SECONDS", "90"),
+            "DREAM_LLM_TIMEOUT_SECONDS",
+        ),
+        llm_trust_env=_boolean(
+            value("DREAM_LLM_TRUST_ENV", "true"),
+            "DREAM_LLM_TRUST_ENV",
+        ),
+        dream_deadline_seconds=_positive_float(
+            value("DREAM_DEADLINE_SECONDS", "300"),
+            "DREAM_DEADLINE_SECONDS",
+        ),
         curator_backend=curator_backend,
+        curator_consolidate=_boolean(
+            value("DREAM_CURATOR_CONSOLIDATE", "false"),
+            "DREAM_CURATOR_CONSOLIDATE",
+        ),
+        curator_consolidate_interval_hours=_positive_float(
+            value("DREAM_CURATOR_CONSOLIDATE_INTERVAL_HOURS", "168"),
+            "DREAM_CURATOR_CONSOLIDATE_INTERVAL_HOURS",
+        ),
+        curator_consolidate_min_idle_hours=_positive_float(
+            value("DREAM_CURATOR_CONSOLIDATE_MIN_IDLE_HOURS", "2"),
+            "DREAM_CURATOR_CONSOLIDATE_MIN_IDLE_HOURS",
+        ),
         curator_model=value("DREAM_CURATOR_MODEL"),
         curator_base_url=value("DREAM_CURATOR_BASE_URL") or None,
         curator_api_key=value("DREAM_CURATOR_LLM_API_KEY"),
@@ -191,6 +260,7 @@ def build_review_backend(
     settings: DreamSettings,
     *,
     client_factory: Callable[..., object] | None = None,
+    http_client_factory: Callable[..., object] | None = None,
 ) -> ReviewBackend:
     if settings.review_backend == "deterministic":
         return DeterministicReviewBackend()
@@ -205,9 +275,19 @@ def build_review_backend(
     client_kwargs: dict[str, object] = {
         "api_key": settings.review_api_key,
         "max_retries": 0,
+        "timeout": settings.llm_timeout_seconds,
     }
     if settings.review_base_url:
         client_kwargs["base_url"] = settings.review_base_url
+    if not settings.llm_trust_env:
+        if http_client_factory is None:
+            from openai import DefaultHttpxClient
+
+            http_client_factory = DefaultHttpxClient
+        client_kwargs["http_client"] = http_client_factory(
+            timeout=settings.llm_timeout_seconds,
+            trust_env=False,
+        )
     client = client_factory(**client_kwargs)
     return OpenAIReviewBackend(
         client=client,
@@ -221,10 +301,15 @@ def build_curator_backend(
     settings: DreamSettings,
     *,
     client_factory: Callable[..., object] | None = None,
+    http_client_factory: Callable[..., object] | None = None,
 ) -> SemanticCuratorBackend | None:
+    if not settings.curator_consolidate:
+        return None
     backend = settings.curator_backend
     if backend == "deterministic":
-        return None
+        raise ValueError(
+            "DREAM_CURATOR_CONSOLIDATE requires an openai or inherited curator backend"
+        )
     if backend == "inherit" and settings.review_backend == "deterministic":
         return None
     model = settings.curator_model or settings.review_model
@@ -242,9 +327,22 @@ def build_curator_backend(
 
         client_factory = OpenAI
     base_url = settings.curator_base_url or settings.review_base_url
-    client_kwargs: dict[str, object] = {"api_key": api_key, "max_retries": 0}
+    client_kwargs: dict[str, object] = {
+        "api_key": api_key,
+        "max_retries": 0,
+        "timeout": settings.llm_timeout_seconds,
+    }
     if base_url:
         client_kwargs["base_url"] = base_url
+    if not settings.llm_trust_env:
+        if http_client_factory is None:
+            from openai import DefaultHttpxClient
+
+            http_client_factory = DefaultHttpxClient
+        client_kwargs["http_client"] = http_client_factory(
+            timeout=settings.llm_timeout_seconds,
+            trust_env=False,
+        )
     client = client_factory(**client_kwargs)
     return OpenAICuratorBackend(
         client=client,
@@ -259,24 +357,5 @@ def build_writeback_backend(
     *,
     client_factory: Callable[..., object] | None = None,
 ) -> WritebackBackend:
-    if settings.review_backend == "deterministic":
-        return DeterministicWritebackBackend()
-    if not settings.review_model or not settings.review_api_key:
-        raise ValueError("writeback requires DREAM_REVIEW_MODEL and DREAM_LLM_API_KEY")
-    if client_factory is None:
-        from openai import OpenAI
-
-        client_factory = OpenAI
-    client_kwargs: dict[str, object] = {
-        "api_key": settings.review_api_key,
-        "max_retries": 0,
-    }
-    if settings.review_base_url:
-        client_kwargs["base_url"] = settings.review_base_url
-    client = client_factory(**client_kwargs)
-    return OpenAIWritebackBackend(
-        client=client,
-        model=settings.review_model,
-        structured_mode=settings.llm_structured_mode,
-        max_completion_tokens=settings.curator_max_completion_tokens,
-    )
+    del client_factory
+    return DeterministicWritebackBackend()

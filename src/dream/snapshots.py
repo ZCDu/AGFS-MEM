@@ -14,6 +14,7 @@ from dream.scope import ScopeIds, ScopePaths
 class SnapshotFile:
     content: str
     sha256: str
+    existed: bool = True
 
 
 @dataclass(frozen=True)
@@ -49,22 +50,34 @@ class SnapshotStore:
         if self.paths.decision_cards_dir.exists():
             fixed.extend(
                 path.relative_to(self.paths.agent_root)
-                for path in sorted(self.paths.decision_cards_dir.glob("*.md"))
+                for path in sorted(self.paths.decision_cards_dir.rglob("*.md"))
                 if path.is_file()
             )
-        return fixed
+        curator_state = self.paths.agent_root / "curator-state"
+        if curator_state.exists():
+            fixed.extend(
+                path.relative_to(self.paths.agent_root)
+                for path in sorted(curator_state.rglob("*"))
+                if path.is_file()
+            )
+        return list(dict.fromkeys(fixed))
 
     def create(self, ids: ScopeIds) -> ContextSnapshot:
         files: dict[str, SnapshotFile] = {}
         for relative in self._relative_files(ids):
             key = relative.as_posix()
+            existed = self.artifacts.resolve(relative).is_file()
             content = self.artifacts.read_text(relative)
             files[key] = SnapshotFile(
                 content=content,
                 sha256=hashlib.sha256(content.encode("utf-8")).hexdigest(),
+                existed=existed,
             )
         canonical_hashes = json.dumps(
-            {key: value.sha256 for key, value in sorted(files.items())},
+            {
+                key: {"sha256": value.sha256, "existed": value.existed}
+                for key, value in sorted(files.items())
+            },
             ensure_ascii=False,
             separators=(",", ":"),
             sort_keys=True,
@@ -85,7 +98,11 @@ class SnapshotStore:
             },
             "created_at": snapshot.created_at,
             "files": {
-                key: {"sha256": value.sha256, "content": value.content}
+                key: {
+                    "sha256": value.sha256,
+                    "content": value.content,
+                    "existed": value.existed,
+                }
                 for key, value in sorted(files.items())
             },
         }
@@ -111,15 +128,27 @@ class SnapshotStore:
         if scope != expected or payload.get("snapshot_id") != snapshot_id:
             raise ValueError("context snapshot identity mismatch")
         files = payload["files"]
-        captured_cards = {
-            key
-            for key in files
-            if key.startswith("decision-cards/") and key.endswith(".md")
-        }
-        if self.paths.decision_cards_dir.exists():
-            for card in self.paths.decision_cards_dir.glob("*.md"):
-                relative = card.relative_to(self.paths.agent_root).as_posix()
-                if relative not in captured_cards:
-                    card.unlink()
+        for managed_root in ("decision-cards", "curator-state", "skills"):
+            root = self.paths.agent_root / managed_root
+            if not root.exists():
+                continue
+            captured = {
+                key
+                for key, value in files.items()
+                if key.startswith(f"{managed_root}/")
+                and bool(value.get("existed", True))
+            }
+            for current in root.rglob("*"):
+                if not current.is_file():
+                    continue
+                relative = current.relative_to(self.paths.agent_root).as_posix()
+                if relative not in captured:
+                    current.unlink()
         for key, value in files.items():
-            self.artifacts.write_text(Path(key), str(value["content"]))
+            relative = Path(key)
+            if bool(value.get("existed", True)):
+                self.artifacts.write_text(relative, str(value["content"]))
+            else:
+                target = self.artifacts.resolve(relative)
+                if target.exists():
+                    target.unlink()

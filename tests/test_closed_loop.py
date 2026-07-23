@@ -1,4 +1,6 @@
 from pathlib import Path
+import json
+import time
 
 import pytest
 
@@ -8,13 +10,33 @@ from dream.closed_loop import (
     TaskStartBlocked,
 )
 from dream.events import TaskCompletedEvent
+from dream.governance.memory_policy import (
+    AutoWritebackDecision,
+    GovernanceMode,
+    RiskLevel,
+)
 from dream.publication import PublicationStatus, PublicationTransitionError
+from dream.review.models import (
+    ArtifactKind,
+    ReviewAction,
+    ReviewEventDisposition,
+    ReviewResult,
+)
 from dream.scope import ScopeIds
 from dream.service import DreamService
 from dream.writeback import DeterministicWritebackBackend
 
 
 IDS = ScopeIds("dream-lab", "enterprise-colleague", "python-beginner")
+
+
+class RequireReviewPolicy:
+    def decide_all(self, artifacts) -> AutoWritebackDecision:
+        return AutoWritebackDecision(
+            mode=GovernanceMode.REQUIRE_REVIEW,
+            risk_level=RiskLevel.HIGH,
+            reason="manual publication compatibility test",
+        )
 
 
 def event(event_id: str, ids: ScopeIds = IDS) -> TaskCompletedEvent:
@@ -39,6 +61,7 @@ def coordinator(tmp_path: Path, *, backend=None):
     closed_loop = ClosedLoopCoordinator(
         service,
         writeback_backend=backend or DeterministicWritebackBackend(),
+        governance_policy=RequireReviewPolicy(),
     )
     return closed_loop, service
 
@@ -83,6 +106,13 @@ def test_failed_writeback_restores_previous_snapshot(tmp_path: Path) -> None:
     assert latest.status is PublicationStatus.FAILED
     assert closed_loop.status(IDS)["active"] is None
     assert closed_loop.publications(IDS).pending_event_ids() == ("evt-failed",)
+    report_path = (
+        tmp_path
+        / "tenants/dream-lab/agents/enterprise-colleague/dream-reports"
+        / "publication-000001-failed.json"
+    )
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    assert report["transaction_rolled_back"] is True
 
 
 def test_failed_candidate_can_be_retried_from_its_source_event(tmp_path: Path) -> None:
@@ -106,6 +136,138 @@ def test_failed_candidate_can_be_retried_from_its_source_event(tmp_path: Path) -
 
     assert candidate.status is PublicationStatus.READY_FOR_REVIEW
     assert candidate.processed_through_event_id == "evt-retry"
+
+
+def test_validated_semantic_result_is_reused_after_local_writeback_failure(
+    tmp_path: Path,
+) -> None:
+    class CountingSemanticBackend:
+        validated_semantic_cache = True
+        model = "agnes-test"
+        structured_mode = "tools"
+        prompt_version = "combined-review-v2"
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def review_batch(self, request):
+            self.calls += 1
+            event_id = request.events[0].event_id
+            return ReviewResult(
+                actions=(
+                    ReviewAction(
+                        kind=ArtifactKind.USER_PROFILE,
+                        tool_name="memory_manage",
+                        payload={
+                            "action": "add",
+                            "target": "user",
+                            "content": "Prefers concise answers.",
+                        },
+                        source_event_id=event_id,
+                    ),
+                    ReviewAction(
+                        kind=ArtifactKind.DECISION_CARD,
+                        tool_name="decision_card_manage",
+                        payload={
+                            "id": "verify-before-risky-action",
+                            "title": "Verify before risky action",
+                            "scenario": "A risky action is requested.",
+                            "signals": ["irreversible change"],
+                            "principle": "Verify before applying it.",
+                            "outcome": "Avoid unsafe changes.",
+                            "boundaries": "Skip only for reversible operations.",
+                            "confidence": 0.9,
+                        },
+                        source_event_id=event_id,
+                    ),
+                ),
+                summary="validated semantic result",
+                event_dispositions=(
+                    ReviewEventDisposition(
+                        event_id=event_id,
+                        disposition="used",
+                        reason=None,
+                    ),
+                ),
+            )
+
+    class FailOnceWriteback(DeterministicWritebackBackend):
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def render_user_persona(self, user_profile: str, limit: int) -> str:
+            self.calls += 1
+            if self.calls == 1:
+                raise RuntimeError("local writeback failed")
+            return super().render_user_persona(user_profile, limit)
+
+    semantic = CountingSemanticBackend()
+    service = DreamService(tmp_path, backend=semantic)
+    closed_loop = ClosedLoopCoordinator(
+        service,
+        writeback_backend=FailOnceWriteback(),
+        governance_policy=RequireReviewPolicy(),
+    )
+    service.ingest_conversation(event("evt-cache"))
+
+    with pytest.raises(ClosedLoopError):
+        closed_loop.dream(IDS)
+    candidate = closed_loop.dream(IDS)
+
+    assert candidate.status is PublicationStatus.READY_FOR_REVIEW
+    assert semantic.calls == 1
+    cache_files = list((tmp_path / "review-cache").glob("*.json"))
+    assert len(cache_files) == 1
+    cache_payload = json.loads(cache_files[0].read_text(encoding="utf-8"))
+    assert cache_payload["result"]["event_dispositions"] == [
+        {"event_id": "evt-cache", "disposition": "used", "reason": None}
+    ]
+    report_files = list(
+        (tmp_path / "tenants/dream-lab/agents/enterprise-colleague/dream-reports").glob(
+            "review-*.json"
+        )
+    )
+    reports = [json.loads(path.read_text(encoding="utf-8")) for path in report_files]
+    successful = [report for report in reports if report["status"] == "success"]
+    assert successful[-1]["event_dispositions"] == [
+        {"event_id": "evt-cache", "disposition": "used", "reason": None}
+    ]
+
+
+def test_overall_deadline_cancels_semantic_wait_and_restores_pending_event(
+    tmp_path: Path,
+) -> None:
+    class BlockingBackend:
+        model = "agnes-blocking"
+        structured_mode = "tools"
+        prompt_version = "combined-review-v2"
+
+        def review_batch(self, request):
+            time.sleep(1)
+            return ReviewResult(actions=(), summary="too late")
+
+    service = DreamService(tmp_path, backend=BlockingBackend())
+    closed_loop = ClosedLoopCoordinator(
+        service,
+        writeback_backend=DeterministicWritebackBackend(),
+        deadline_seconds=0.02,
+    )
+    service.ingest_conversation(event("evt-timeout"))
+    started = time.monotonic()
+
+    with pytest.raises(ClosedLoopError):
+        closed_loop.dream(IDS)
+
+    assert time.monotonic() - started < 0.5
+    latest = closed_loop.status(IDS)["latest"]
+    assert latest is not None
+    assert latest.status is PublicationStatus.FAILED
+    assert latest.failure_reason == "DreamDeadlineExceeded"
+    assert closed_loop.publications(IDS).pending_event_ids() == ("evt-timeout",)
+    assert not (
+        tmp_path
+        / "tenants/dream-lab/agents/enterprise-colleague/users/python-beginner/USER.md"
+    ).exists()
 
 
 def test_identical_writeback_hashes_do_not_require_repeated_paste(
@@ -158,6 +320,15 @@ def test_reject_restores_input_state_and_requeues_source_event(
     assert rejected.status is PublicationStatus.FAILED
     assert closed_loop.publications(IDS).pending_event_ids() == ("evt-rejected",)
     assert service.scheduler.pending_event_ids() == ("evt-rejected",)
+    report_path = (
+        tmp_path
+        / "tenants/dream-lab/agents/enterprise-colleague/dream-reports"
+        / "publication-000001-failed.json"
+    )
+    assert (
+        json.loads(report_path.read_text(encoding="utf-8"))["transaction_rolled_back"]
+        is True
+    )
 
 
 def test_rejecting_active_version_does_not_restore_its_before_snapshot(

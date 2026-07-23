@@ -7,6 +7,7 @@ import pytest
 from dream.artifacts import AtomicArtifactStore
 from dream.scope import ScopeIds, resolve_scope
 from dream.writeback import (
+    DeterministicWritebackBackend,
     OpenAIWritebackBackend,
     WritebackService,
     WritebackValidationError,
@@ -135,3 +136,96 @@ def test_openai_writeback_uses_two_separate_structured_requests() -> None:
     assert persona == "User likes concise answers."
     assert "private user profile" not in completions.user_contents[0]
     assert "decision rules" not in completions.user_contents[1]
+
+
+def test_deterministic_persona_projection_covers_every_active_domain(
+    tmp_path: Path,
+) -> None:
+    paths = resolve_scope(tmp_path, IDS)
+    store = AtomicArtifactStore(paths.agent_root)
+    store.write_text(
+        Path("DECISION_RULES.md"),
+        "# AI Decision Rules\n\n- Verify before acting.\n"
+        "  - Evidence cards: card-1\n",
+    )
+    domains = (
+        ("communication", "User prefers a concise conclusion before details."),
+        (
+            "bank_operation",
+            "User requires independent verification for supplier payments.",
+        ),
+        ("security", "User refuses credential and verification-code sharing."),
+        (
+            "workflow",
+            "User requires owners, deadlines, evidence, and dependencies.",
+        ),
+        (
+            "crypto_investment",
+            "User is a cryptocurrency beginner who prefers spot and low leverage.",
+        ),
+    )
+    entries = [
+        (
+            f"<!-- dream-persona-id: persona-{index} -->\n"
+            f"<!-- dream-persona-domain: {domain} -->\n"
+            "<!-- dream-persona-confidence: 0.900 -->\n"
+            f"{statement}\n"
+            f"<!-- dream-source: evt-{index} -->"
+        )
+        for index, (domain, statement) in enumerate(domains, start=1)
+    ]
+    store.write_text(
+        Path("users/project-manager/USER.md"),
+        "\n§\n".join(entries) + "\n",
+    )
+    service = WritebackService(
+        paths,
+        backend=DeterministicWritebackBackend(),
+        user_persona_limit=420,
+    )
+
+    service.generate()
+
+    persona = store.read_text(Path("users/project-manager/USER_PERSONA.md"))
+    for domain, _ in domains:
+        assert f"[{domain}]" in persona
+    assert "cryptocurrency beginner" in persona
+    assert "spot and low leverage" in persona
+    assert len(persona.strip()) <= 420
+
+
+def test_projection_prioritizes_new_structured_persona_over_legacy_same_domain(
+    tmp_path: Path,
+) -> None:
+    paths = resolve_scope(tmp_path, IDS)
+    store = AtomicArtifactStore(paths.agent_root)
+    store.write_text(
+        Path("DECISION_RULES.md"),
+        "# AI Decision Rules\n\n- Verify before acting.\n"
+        "  - Evidence cards: card-1\n",
+    )
+    legacy = "Legacy crypto risk detail. " * 80
+    structured = (
+        "<!-- dream-persona-id: persona-crypto-new -->\n"
+        "<!-- dream-persona-domain: crypto_investment -->\n"
+        "<!-- dream-persona-confidence: 0.950 -->\n"
+        "User is a cryptocurrency beginner who prefers spot and low leverage."
+    )
+    store.write_text(
+        Path("users/project-manager/USER.md"),
+        f"{legacy}\n<!-- dream-source: evt-old -->\n"
+        "§\n"
+        f"{structured}\n<!-- dream-source: evt-new -->\n",
+    )
+    service = WritebackService(
+        paths,
+        backend=DeterministicWritebackBackend(),
+        user_persona_limit=180,
+    )
+
+    service.generate()
+
+    persona = store.read_text(Path("users/project-manager/USER_PERSONA.md"))
+    assert "[crypto_investment]" in persona
+    assert "cryptocurrency beginner" in persona
+    assert "spot and low leverage" in persona

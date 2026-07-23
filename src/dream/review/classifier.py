@@ -12,4 +12,3 @@ TOOL_FOR_KIND: dict[ArtifactKind, str | None] = {
     ArtifactKind.WIKI_INGEST: None,
     ArtifactKind.NOTHING: None,
 }
-

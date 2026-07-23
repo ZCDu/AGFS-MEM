@@ -6,7 +6,7 @@ from dream.scope import ScopeIds
 from dream.service import DreamService
 
 
-def test_service_discovers_active_scope_and_runs_curators_only_when_due(
+def test_service_does_not_repeat_immediate_curators_in_daily_fallback(
     tmp_path: Path,
 ) -> None:
     service = DreamService(tmp_path)
@@ -30,12 +30,12 @@ def test_service_discovers_active_scope_and_runs_curators_only_when_due(
             source_refs=(),
         )
     )
-    service.run_pending()
+    runs = service.run_pending()
     now = datetime.now(timezone.utc)
 
     first = service.run_due_curators(now)
     second = service.run_due_curators(now)
 
-    assert set(first) == {"acme/assistant/alice"}
-    assert set(first["acme/assistant/alice"]) == {"ai", "user"}
+    assert set(runs[0]["curator_runs"]) == {"ai", "user"}
+    assert first == {}
     assert second == {}

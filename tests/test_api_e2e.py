@@ -115,10 +115,8 @@ async def test_conversation_dream_updates_only_next_context_and_current_user(
 
         run = await client.post("/v1/dream/run-pending")
         assert run.status_code == 200
-        assert set(run.json()["runs"][0]["artifact_kinds"]) == {
-            "decision_card",
-            "user_profile",
-        }
+        assert run.json()["runs"][0]["status"] == "active"
+        assert run.json()["runs"][0]["source_event_ids"] == ["evt-1"]
 
         second = (await client.post("/v1/tasks/start", json=scope)).json()
         bob = (
@@ -192,22 +190,8 @@ async def test_validation_api_blocks_next_task_until_dream_is_active(
             "/v1/validation/publications/status",
             params=scope,
         )
-        approved = await client.post(
+        redundant_approve = await client.post(
             f"/v1/validation/publications/{version}/approve", json=scope
-        )
-        incomplete = await client.post(
-            f"/v1/validation/publications/{version}/activate", json=scope
-        )
-        confirmed = await client.post(
-            f"/v1/validation/publications/{version}/confirm-writeback",
-            json={
-                **scope,
-                "character_definition_written": True,
-                "user_persona_written": True,
-            },
-        )
-        active = await client.post(
-            f"/v1/validation/publications/{version}/activate", json=scope
         )
         started = await client.post("/v1/tasks/start", json=scope)
 
@@ -218,13 +202,10 @@ async def test_validation_api_blocks_next_task_until_dream_is_active(
         "active_processed_through_event_id": "",
         "next_action": "complete and activate the pending dream publication",
     }
-    assert candidate.json()["status"] == "ready_for_review"
-    assert status_before.json()["active"] is None
+    assert candidate.json()["status"] == "active"
+    assert status_before.json()["active"]["version"] == version
     assert status_before.json()["latest"]["version"] == version
-    assert approved.json()["status"] == "ready_for_writeback"
-    assert incomplete.status_code == 409
-    assert confirmed.json()["character_definition_written"] is True
-    assert active.json()["status"] == "active"
+    assert redundant_approve.status_code == 409
     assert started.status_code == 200
 
 
@@ -268,40 +249,19 @@ async def test_two_api_cycles_preserve_last_active_version_when_next_dream_fails
         )
         assert response.status_code == 200
 
-    async def activate_latest(client: httpx.AsyncClient) -> dict[str, object]:
+    async def dream_latest(client: httpx.AsyncClient) -> dict[str, object]:
         candidate = await client.post("/v1/validation/dream", json=scope)
         assert candidate.status_code == 200, candidate.text
-        version = candidate.json()["version"]
-        assert (
-            await client.post(
-                f"/v1/validation/publications/{version}/approve",
-                json=scope,
-            )
-        ).status_code == 200
-        assert (
-            await client.post(
-                f"/v1/validation/publications/{version}/confirm-writeback",
-                json={
-                    **scope,
-                    "character_definition_written": True,
-                    "user_persona_written": True,
-                },
-            )
-        ).status_code == 200
-        activated = await client.post(
-            f"/v1/validation/publications/{version}/activate",
-            json=scope,
-        )
-        assert activated.status_code == 200
-        return activated.json()
+        assert candidate.json()["status"] == "active"
+        return candidate.json()
 
     async with httpx.AsyncClient(
         transport=transport, base_url="http://dream.test"
     ) as client:
         await import_event(client, 1)
-        await activate_latest(client)
+        await dream_latest(client)
         await import_event(client, 2)
-        second = await activate_latest(client)
+        second = await dream_latest(client)
         stable_context = app.state.dream_service.start_context(
             app.state.dream_service.ledger.read_all()[-1].scope
         )

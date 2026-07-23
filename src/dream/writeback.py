@@ -10,6 +10,8 @@ from dream.curators.writeback_prompts import (
     CHARACTER_WRITEBACK_PROMPT,
     USER_PERSONA_WRITEBACK_PROMPT,
 )
+from dream.governance.persona_models import parse_persona_atom
+from dream.memory_items import parse_memory_items
 from dream.rollback import RollbackService
 from dream.scope import ScopePaths
 from dream.structured_llm import StructuredCompletionClient
@@ -118,6 +120,66 @@ class DeterministicWritebackBackend:
         return user_profile.strip()[:limit]
 
 
+class PersonaProjection:
+    """Build a bounded view that represents every active persona domain."""
+
+    minimum_confidence = 0.7
+
+    def render(self, repository: str, limit: int) -> str | None:
+        if "<!-- dream-persona-domain:" not in repository:
+            return None
+        grouped: dict[str, list[str]] = {}
+        for item in parse_memory_items(repository):
+            atom = parse_persona_atom(item.content)
+            if atom.confidence < self.minimum_confidence or not atom.statement:
+                continue
+            statements = grouped.setdefault(atom.domain, [])
+            normalized = " ".join(atom.statement.split())
+            if normalized not in statements:
+                if "<!-- dream-persona-domain:" in item.content:
+                    statements.insert(0, normalized)
+                else:
+                    statements.append(normalized)
+        if not grouped:
+            return None
+
+        header = "# User Persona\n\n"
+        lines = [
+            f"- [{domain}] {'; '.join(statements)}"
+            for domain, statements in grouped.items()
+        ]
+        rendered = header + "\n".join(lines)
+        if len(rendered) <= limit:
+            return rendered
+
+        separators = len(lines) - 1
+        fixed = len(header) + separators + sum(
+            len(f"- [{domain}] ") for domain in grouped
+        )
+        available = limit - fixed
+        if available < len(lines):
+            raise WritebackValidationError(
+                "User Persona limit cannot represent every active domain"
+            )
+        base, remainder = divmod(available, len(lines))
+        bounded: list[str] = []
+        for index, (domain, statements) in enumerate(grouped.items()):
+            allowance = base + int(index < remainder)
+            statement = "; ".join(statements)
+            bounded.append(
+                f"- [{domain}] {self._excerpt(statement, allowance)}"
+            )
+        return header + "\n".join(bounded)
+
+    @staticmethod
+    def _excerpt(value: str, limit: int) -> str:
+        if len(value) <= limit:
+            return value
+        if limit <= 1:
+            return value[:limit]
+        return value[: limit - 1].rstrip() + "…"
+
+
 class WritebackService:
     def __init__(
         self,
@@ -133,6 +195,7 @@ class WritebackService:
         self.user_persona_limit = user_persona_limit
         self.artifacts = AtomicArtifactStore(paths.agent_root)
         self.rollback = RollbackService(paths)
+        self.persona_projection = PersonaProjection()
 
     def _validate(self, value: str, limit: int, label: str) -> str:
         rendered = value.strip()
@@ -169,11 +232,17 @@ class WritebackService:
             "",
             profile,
         ).strip()
+        backend_persona = self._validate(
+            self.backend.render_user_persona(public_profile, self.user_persona_limit),
+            self.user_persona_limit,
+            "User Persona",
+        )
+        projected = self.persona_projection.render(
+            public_profile,
+            self.user_persona_limit,
+        )
         persona = self._validate(
-            self.backend.render_user_persona(
-                public_profile,
-                self.user_persona_limit,
-            ),
+            projected if projected is not None else backend_persona,
             self.user_persona_limit,
             "User Persona",
         )

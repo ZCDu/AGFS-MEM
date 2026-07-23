@@ -26,13 +26,11 @@ class UserCurator:
         paths: ScopePaths,
         interval_hours: int = 168,
         semantic_backend: SemanticCuratorBackend | None = None,
-        user_char_limit: int = 1375,
     ) -> None:
         self.paths = paths
         self.interval = timedelta(hours=interval_hours)
         self.artifacts = AtomicArtifactStore(paths.agent_root)
         self.semantic_backend = semantic_backend
-        self.user_char_limit = user_char_limit
 
     def _state_relative(self) -> Path:
         return Path("curator-state") / f"user-{self.paths.user_root.name}.json"
@@ -68,8 +66,6 @@ class UserCurator:
             }
             if rendered_sources != existing_sources:
                 raise ValueError("User Curator must preserve exactly the existing evidence IDs")
-            if len(rendered) > self.user_char_limit:
-                raise ValueError("User Curator profile exceeds the configured size limit")
             rendered_entries = [
                 item for item in rendered.split(_ENTRY_DELIMITER) if item.strip()
             ]

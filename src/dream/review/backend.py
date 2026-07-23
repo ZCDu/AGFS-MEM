@@ -5,6 +5,7 @@ from typing import Protocol
 from dream.review.models import (
     ArtifactKind,
     ReviewAction,
+    ReviewBatchRequest,
     ReviewRequest,
     ReviewResult,
 )
@@ -12,6 +13,10 @@ from dream.review.models import (
 
 class ReviewBackend(Protocol):
     def review(self, request: ReviewRequest) -> ReviewResult: ...
+
+
+class BatchReviewBackend(Protocol):
+    def review_batch(self, request: ReviewBatchRequest) -> ReviewResult: ...
 
 
 class DeterministicReviewBackend:
@@ -26,9 +31,8 @@ class DeterministicReviewBackend:
             "喜欢简洁回答",
             "偏好简洁回答",
         )
-        if (
-            "memory_manage" in request.allowed_tools
-            and any(signal in transcript for signal in preference_signals)
+        if "memory_manage" in request.allowed_tools and any(
+            signal in transcript for signal in preference_signals
         ):
             actions.append(
                 ReviewAction(
@@ -38,6 +42,7 @@ class DeterministicReviewBackend:
                         "action": "add",
                         "target": "user",
                         "content": "Prefers concise answers.",
+                        "confidence": 0.8,
                     },
                     source_event_id=request.event_id,
                 )
@@ -47,9 +52,8 @@ class DeterministicReviewBackend:
             "高风险操作前先验证",
             "不可逆操作前先验证",
         )
-        if (
-            "decision_card_manage" in request.allowed_tools
-            and any(signal in transcript for signal in decision_signals)
+        if "decision_card_manage" in request.allowed_tools and any(
+            signal in transcript for signal in decision_signals
         ):
             actions.append(
                 ReviewAction(
@@ -70,6 +74,26 @@ class DeterministicReviewBackend:
             )
         if not actions:
             return ReviewResult(actions=(), summary="Nothing to save.")
+        return ReviewResult(
+            actions=tuple(actions),
+            summary=f"Captured {len(actions)} priority memory artifact(s).",
+        )
+
+    def review_batch(self, request: ReviewBatchRequest) -> ReviewResult:
+        actions: list[ReviewAction] = []
+        for event in request.events:
+            result = self.review(
+                ReviewRequest(
+                    event_id=event.event_id,
+                    transcript_text=event.transcript_text,
+                    final_response=event.final_response,
+                    allowed_tools=event.allowed_tools,
+                    current_user_profile=request.current_user_profile,
+                    current_decision_rules=request.current_decision_rules,
+                    current_decision_cards=request.current_decision_cards,
+                )
+            )
+            actions.extend(result.actions)
         return ReviewResult(
             actions=tuple(actions),
             summary=f"Captured {len(actions)} priority memory artifact(s).",

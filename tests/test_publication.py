@@ -106,6 +106,26 @@ def test_illegal_transition_is_rejected(tmp_path: Path) -> None:
         publications.approve(version.version)
 
 
+def test_governed_candidate_can_move_directly_to_ready_for_activation(
+    tmp_path: Path,
+) -> None:
+    publications = store(tmp_path)
+    version = publications.begin(("evt-auto",), "evt-auto", "before")
+    version = publications.mark_dreaming(version.version)
+
+    ready = publications.mark_ready_for_activation(
+        version.version,
+        "after",
+        "character-sha",
+        "user-sha",
+    )
+
+    assert ready.status is PublicationStatus.READY_FOR_ACTIVATION
+    assert ready.character_definition_written is True
+    assert ready.user_persona_written is True
+    assert publications.activate(ready.version).status is PublicationStatus.ACTIVE
+
+
 def test_ingested_conversation_is_noted_as_pending(tmp_path: Path) -> None:
     ids = ScopeIds("dream-lab", "enterprise-colleague", "project-manager")
     service = DreamService(tmp_path)

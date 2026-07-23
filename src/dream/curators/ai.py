@@ -83,8 +83,6 @@ class AICurator:
             rules_text = plan.decision_rules_markdown.strip()
             if not rules_text:
                 raise ValueError("AI Curator returned empty decision rules")
-            if len(rules_text) > 50_000:
-                raise ValueError("AI Curator decision rules exceed the size limit")
             for card, card_id, _, content in card_records:
                 if card_id in archive_ids:
                     self.artifacts.write_text(
