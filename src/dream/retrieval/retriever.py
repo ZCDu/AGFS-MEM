@@ -25,5 +25,9 @@ class MemoryRetriever:
 
     def retrieve(self, query: RetrievalQuery) -> RetrievalResult:
         scoped = self.filters.apply(self.source.list_records(), query)
-        ranked = self.ranker.rank(scoped, query.text)
+        ranked = self.ranker.rank(
+            scoped,
+            query.text,
+            query_domain=query.domain,
+        )
         return RetrievalResult(query=query, matches=ranked[: query.limit])
