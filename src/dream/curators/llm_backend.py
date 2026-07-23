@@ -8,7 +8,7 @@ from dream.hermes_compat.curator_prompts import (
     AI_CURATOR_PROMPT,
     USER_CURATOR_PROMPT,
 )
-from dream.structured_llm import (
+from dream.extraction.structured import (
     StructuredCompletionClient,
     StructuredCompletionError,
 )

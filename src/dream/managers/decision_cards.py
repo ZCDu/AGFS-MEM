@@ -6,7 +6,7 @@ from pathlib import Path
 import re
 
 from dream.artifacts import ArtifactVersion, AtomicArtifactStore
-from dream.review.models import ArtifactKind, ReviewAction
+from dream.extraction.models import ArtifactKind, ReviewAction
 from dream.rollback import RollbackService
 from dream.core.scope import ScopePaths
 

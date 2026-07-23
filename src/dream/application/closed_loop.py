@@ -24,7 +24,7 @@ from dream.publication import (
     PublicationVersion,
 )
 from dream.reports import DreamReportStore
-from dream.review.models import ArtifactKind, ReviewAction
+from dream.extraction.models import ArtifactKind, ReviewAction
 from dream.core.scope import ScopeIds, resolve_scope
 from dream.snapshots import SnapshotStore
 from dream.writeback import WritebackBackend, WritebackService

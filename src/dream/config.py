@@ -7,8 +7,8 @@ from typing import Callable
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from dream.curators.llm_backend import OpenAICuratorBackend, SemanticCuratorBackend
-from dream.review.backend import DeterministicReviewBackend, ReviewBackend
-from dream.review.llm_backend import OpenAIReviewBackend
+from dream.extraction.backend import DeterministicReviewBackend, ReviewBackend
+from dream.extraction.llm_backend import OpenAIReviewBackend
 from dream.writeback import (
     DeterministicWritebackBackend,
     WritebackBackend,

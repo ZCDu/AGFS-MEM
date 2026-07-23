@@ -1,6 +1,6 @@
 from dream.core.events import TaskCompletedEvent
-from dream.review.backend import DeterministicReviewBackend
-from dream.review.models import ArtifactKind, ReviewRequest
+from dream.extraction.backend import DeterministicReviewBackend
+from dream.extraction.models import ArtifactKind, ReviewRequest
 from dream.review.orchestrator import BackgroundReviewOrchestrator
 from dream.core.scope import ScopeIds
 

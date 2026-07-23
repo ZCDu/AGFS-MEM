@@ -2,7 +2,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from dream.core.events import TaskCompletedEvent
-from dream.review.models import ReviewResult
+from dream.extraction.models import ReviewResult
 from dream.application.scheduler import ReviewSchedulePolicy
 from dream.core.scope import ScopeIds
 from dream.application.service import DreamService

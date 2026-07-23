@@ -5,7 +5,7 @@ from dream.curators.ai import AICurator
 from dream.curators.llm_backend import AICurationPlan, UserCurationPlan
 from dream.curators.user import UserCurator
 from dream.managers.decision_cards import DecisionCardManager
-from dream.review.models import ArtifactKind, ReviewAction
+from dream.extraction.models import ArtifactKind, ReviewAction
 from dream.core.scope import ScopeIds, resolve_scope
 
 

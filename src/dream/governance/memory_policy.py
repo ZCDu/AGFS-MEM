@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 import re
 
-from dream.review.models import ArtifactKind
+from dream.extraction.models import ArtifactKind
 
 
 class GovernanceMode(StrEnum):

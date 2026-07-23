@@ -2,8 +2,8 @@ import json
 from pathlib import Path
 
 from dream.core.events import TaskCompletedEvent
-from dream.review.cache import ReviewStageCache
-from dream.review.models import ReviewEventDisposition, ReviewResult
+from dream.extraction.cache import ReviewStageCache
+from dream.extraction.models import ReviewEventDisposition, ReviewResult
 from dream.core.scope import ScopeIds
 from dream.snapshots import ContextSnapshot
 

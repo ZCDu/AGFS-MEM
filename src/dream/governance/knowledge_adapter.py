@@ -9,7 +9,7 @@ from dream.governance.knowledge import (
     KnowledgeType,
 )
 from dream.governance.persona_models import PersonaCanonicalizer
-from dream.structured_llm import StructuredToolCall
+from dream.extraction.structured import StructuredToolCall
 
 
 class InvalidKnowledgeProposal(ValueError):

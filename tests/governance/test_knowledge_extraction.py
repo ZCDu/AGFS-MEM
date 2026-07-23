@@ -8,7 +8,7 @@ from dream.governance.knowledge_adapter import (
     KnowledgeAdapter,
 )
 from dream.governance.knowledge_router import KnowledgeRouter
-from dream.review.models import ArtifactKind
+from dream.extraction.models import ArtifactKind
 
 
 EVENT_IDS = ("evt-formal-006", "evt-formal-007", "evt-formal-010")

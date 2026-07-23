@@ -11,7 +11,7 @@ from dream.memory_items import (
     entry_content,
     resolve_replace_target,
 )
-from dream.review.models import ArtifactKind, ReviewAction
+from dream.extraction.models import ArtifactKind, ReviewAction
 from dream.rollback import RollbackService
 from dream.core.scope import ScopePaths
 

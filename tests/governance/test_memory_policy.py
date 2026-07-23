@@ -4,7 +4,7 @@ from dream.governance.memory_policy import (
     MemoryGovernancePolicy,
     RiskLevel,
 )
-from dream.review.models import ArtifactKind, ReviewAction
+from dream.extraction.models import ArtifactKind, ReviewAction
 
 
 def test_stable_user_preference_is_auto_activated() -> None:

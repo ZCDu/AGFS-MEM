@@ -3,7 +3,7 @@ import json
 
 import pytest
 
-from dream.structured_llm import StructuredToolCall
+from dream.extraction.structured import StructuredToolCall
 
 
 def _adapter_api():

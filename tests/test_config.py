@@ -11,8 +11,8 @@ from dream.config import (
 )
 from dream.api import create_app
 from dream.curators.llm_backend import OpenAICuratorBackend
-from dream.review.backend import DeterministicReviewBackend
-from dream.review.llm_backend import OpenAIReviewBackend
+from dream.extraction.backend import DeterministicReviewBackend
+from dream.extraction.llm_backend import OpenAIReviewBackend
 from dream.writeback import DeterministicWritebackBackend
 
 

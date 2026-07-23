@@ -29,9 +29,9 @@ from dream.managers.memory import MemoryManager
 from dream.managers.skills import SkillManager
 from dream.publication import PublicationStatus, PublicationStore
 from dream.reports import DreamReportStore
-from dream.review.backend import DeterministicReviewBackend, ReviewBackend
-from dream.review.cache import ReviewStageCache
-from dream.review.models import ArtifactKind
+from dream.extraction.backend import DeterministicReviewBackend, ReviewBackend
+from dream.extraction.cache import ReviewStageCache
+from dream.extraction.models import ArtifactKind
 from dream.review.orchestrator import BackgroundReviewOrchestrator
 from dream.rollback import RollbackService
 from dream.core.scope import ScopeIds, resolve_scope

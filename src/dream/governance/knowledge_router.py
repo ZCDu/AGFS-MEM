@@ -9,7 +9,7 @@ from dream.governance.knowledge import (
     KnowledgeType,
 )
 from dream.governance.persona_merge import PersonaMergeStrategy
-from dream.review.models import ArtifactKind, ReviewAction
+from dream.extraction.models import ArtifactKind, ReviewAction
 
 
 class KnowledgeRouter:

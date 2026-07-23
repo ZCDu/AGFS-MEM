@@ -14,7 +14,7 @@ from dream.governance.persona_models import parse_persona_atom
 from dream.memory_items import parse_memory_items
 from dream.rollback import RollbackService
 from dream.core.scope import ScopePaths
-from dream.structured_llm import StructuredCompletionClient
+from dream.extraction.structured import StructuredCompletionClient
 
 
 class WritebackBackend(Protocol):

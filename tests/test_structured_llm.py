@@ -3,7 +3,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from dream.structured_llm import (
+from dream.extraction.structured import (
     StructuredCompletionClient,
     StructuredCompletionError,
 )

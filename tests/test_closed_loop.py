@@ -16,7 +16,7 @@ from dream.governance.memory_policy import (
     RiskLevel,
 )
 from dream.publication import PublicationStatus, PublicationTransitionError
-from dream.review.models import (
+from dream.extraction.models import (
     ArtifactKind,
     ReviewAction,
     ReviewEventDisposition,

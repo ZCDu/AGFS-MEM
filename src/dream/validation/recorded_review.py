@@ -5,7 +5,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
-from dream.review.models import (
+from dream.extraction.models import (
     ArtifactKind,
     ReviewAction,
     ReviewRequest,

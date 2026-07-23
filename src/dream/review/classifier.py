@@ -1,14 +1,5 @@
-"""Artifact-to-manager routing shared by all review backends."""
+"""Compatibility imports for :mod:`dream.extraction.classifier`."""
 
-from dream.review.models import ArtifactKind
+from dream.extraction.classifier import TOOL_FOR_KIND
 
-
-TOOL_FOR_KIND: dict[ArtifactKind, str | None] = {
-    ArtifactKind.DECISION_CARD: "decision_card_manage",
-    ArtifactKind.USER_PROFILE: "memory_manage",
-    ArtifactKind.USER_TODO: "todo_manage",
-    ArtifactKind.AGENT_MEMORY: "memory_manage",
-    ArtifactKind.SKILL: "skill_manage",
-    ArtifactKind.WIKI_INGEST: None,
-    ArtifactKind.NOTHING: None,
-}
+__all__ = ["TOOL_FOR_KIND"]

@@ -2,9 +2,9 @@ import json
 import hashlib
 from types import SimpleNamespace
 
-from dream.review.llm_backend import OpenAIReviewBackend
-from dream.review.adapter import CanonicalReview
-from dream.review.models import (
+from dream.extraction.llm_backend import OpenAIReviewBackend
+from dream.extraction.provider_adapter import CanonicalReview
+from dream.extraction.models import (
     ArtifactKind,
     ReviewBatchEvent,
     ReviewBatchRequest,

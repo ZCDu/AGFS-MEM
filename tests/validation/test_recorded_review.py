@@ -2,7 +2,7 @@ import json
 
 import pytest
 
-from dream.review.models import ArtifactKind, ReviewRequest
+from dream.extraction.models import ArtifactKind, ReviewRequest
 from dream.validation.recorded_review import (
     RecordedReviewBackend,
     RecordedReviewError,
