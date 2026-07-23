@@ -15,9 +15,9 @@ from dream.curators.semantic import SemanticCuratorRunner
 from dream.curators.user import UserCurator
 from dream.context.selector import ContextBudget, ContextSelector
 from dream.deadline import DreamDeadline
-from dream.events import TaskCompletedEvent
+from dream.core.events import TaskCompletedEvent
 from dream.governance.memory_policy import GovernanceArtifact
-from dream.ledger import EventLedger
+from dream.core.ledger import EventLedger
 from dream.managers.decision_cards import DecisionCardManager
 from dream.managers.memory import MemoryManager
 from dream.managers.skills import SkillManager
@@ -30,7 +30,7 @@ from dream.review.orchestrator import BackgroundReviewOrchestrator
 from dream.review.progress import ReviewProgressStore
 from dream.rollback import RollbackService
 from dream.scheduler import DreamScheduler, PendingReviewBatch, ReviewSchedulePolicy
-from dream.scope import ScopeIds, resolve_scope
+from dream.core.scope import ScopeIds, resolve_scope
 from dream.snapshots import SnapshotStore
 from dream.sources.manual import manual_record_to_event, parse_manual_ndjson
 from dream.validation.seeds import parse_seed_jsonl, seed_record_to_event

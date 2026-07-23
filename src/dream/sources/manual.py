@@ -12,8 +12,8 @@ from pydantic import (
     model_validator,
 )
 
-from dream.events import TaskCompletedEvent
-from dream.scope import ScopeIds
+from dream.core.events import TaskCompletedEvent
+from dream.core.scope import ScopeIds
 
 
 class ManualMessage(BaseModel):

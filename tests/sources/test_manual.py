@@ -2,7 +2,7 @@ import json
 
 import pytest
 
-from dream.scope import ScopeIds
+from dream.core.scope import ScopeIds
 from dream.sources.manual import (
     ManualSourceError,
     manual_record_to_event,

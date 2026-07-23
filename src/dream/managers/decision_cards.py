@@ -8,7 +8,7 @@ import re
 from dream.artifacts import ArtifactVersion, AtomicArtifactStore
 from dream.review.models import ArtifactKind, ReviewAction
 from dream.rollback import RollbackService
-from dream.scope import ScopePaths
+from dream.core.scope import ScopePaths
 
 
 _CARD_ID = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")

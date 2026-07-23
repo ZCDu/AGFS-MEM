@@ -6,7 +6,7 @@ from pathlib import Path
 import re
 
 from dream.artifacts import AtomicArtifactStore
-from dream.scope import ScopePaths
+from dream.core.scope import ScopePaths
 
 
 _RUN_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")

@@ -2,7 +2,7 @@ from pathlib import Path
 
 from dream.managers.skills import SkillManager
 from dream.review.models import ArtifactKind, ReviewAction
-from dream.scope import ScopeIds, resolve_scope
+from dream.core.scope import ScopeIds, resolve_scope
 
 
 def test_skill_manager_writes_reusable_skill_file(tmp_path: Path) -> None:

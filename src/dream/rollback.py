@@ -6,7 +6,7 @@ import re
 from uuid import uuid4
 
 from dream.artifacts import AtomicArtifactStore
-from dream.scope import ScopePaths
+from dream.core.scope import ScopePaths
 
 
 _SNAPSHOT_ID = re.compile(r"^[a-f0-9]{32}$")

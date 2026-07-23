@@ -13,7 +13,7 @@ from dream.memory_items import (
 )
 from dream.review.models import ArtifactKind, ReviewAction
 from dream.rollback import RollbackService
-from dream.scope import ScopePaths
+from dream.core.scope import ScopePaths
 
 
 _SOURCE_COMMENT = re.compile(r"\n<!-- dream-sources?:\s*([^>]+) -->\s*$")

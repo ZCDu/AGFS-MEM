@@ -7,7 +7,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from dream.artifacts import AtomicArtifactStore
-from dream.scope import ScopePaths
+from dream.core.scope import ScopePaths
 
 
 class CuratorScheduleStore:

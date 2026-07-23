@@ -10,7 +10,7 @@ from dream.source_sync import (
     record_to_event,
 )
 from dream.sources.internship import InternshipRecord, SourceFetchError
-from dream.scope import ScopeIds
+from dream.core.scope import ScopeIds
 from tests.source_helpers import source_record, source_settings
 
 

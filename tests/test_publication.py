@@ -2,13 +2,13 @@ from pathlib import Path
 
 import pytest
 
-from dream.events import TaskCompletedEvent
+from dream.core.events import TaskCompletedEvent
 from dream.publication import (
     PublicationStatus,
     PublicationStore,
     PublicationTransitionError,
 )
-from dream.scope import ScopeIds, resolve_scope
+from dream.core.scope import ScopeIds, resolve_scope
 from dream.service import DreamService
 
 

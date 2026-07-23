@@ -1,8 +1,8 @@
-from dream.events import TaskCompletedEvent
+from dream.core.events import TaskCompletedEvent
 from dream.review.backend import DeterministicReviewBackend
 from dream.review.models import ArtifactKind, ReviewRequest
 from dream.review.orchestrator import BackgroundReviewOrchestrator
-from dream.scope import ScopeIds
+from dream.core.scope import ScopeIds
 
 
 def test_review_routes_preference_without_exposing_unrelated_tools() -> None:

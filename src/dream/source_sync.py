@@ -11,8 +11,8 @@ import tempfile
 from typing import Protocol
 
 from dream.config import InternshipSourceSettings
-from dream.events import TaskCompletedEvent
-from dream.scope import ScopeIds
+from dream.core.events import TaskCompletedEvent
+from dream.core.scope import ScopeIds
 from dream.service import DreamService
 from dream.sources.internship import InternshipRecord, SourceFetchError
 

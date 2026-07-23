@@ -7,7 +7,7 @@ import json
 from pathlib import Path
 
 from dream.artifacts import AtomicArtifactStore
-from dream.scope import ScopeIds, ScopePaths
+from dream.core.scope import ScopeIds, ScopePaths
 
 
 @dataclass(frozen=True)

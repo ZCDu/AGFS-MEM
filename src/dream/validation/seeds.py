@@ -6,8 +6,8 @@ from typing import Sequence
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
-from dream.events import TaskCompletedEvent
-from dream.scope import ScopeIds
+from dream.core.events import TaskCompletedEvent
+from dream.core.scope import ScopeIds
 
 
 class AISeedRecord(BaseModel):

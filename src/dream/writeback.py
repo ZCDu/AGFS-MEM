@@ -13,7 +13,7 @@ from dream.curators.writeback_prompts import (
 from dream.governance.persona_models import parse_persona_atom
 from dream.memory_items import parse_memory_items
 from dream.rollback import RollbackService
-from dream.scope import ScopePaths
+from dream.core.scope import ScopePaths
 from dream.structured_llm import StructuredCompletionClient
 
 

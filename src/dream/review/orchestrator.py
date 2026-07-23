@@ -1,6 +1,6 @@
 """Best-effort, user-scoped batch Background Review orchestration."""
 
-from dream.events import TaskCompletedEvent
+from dream.core.events import TaskCompletedEvent
 from dream.review.backend import ReviewBackend
 from dream.review.models import (
     ReviewBatchEvent,

@@ -13,7 +13,7 @@ from dream.curators.ai import AICurator
 from dream.curators.llm_backend import SemanticCuratorBackend
 from dream.curators.user import UserCurator
 from dream.reports import DreamReportStore
-from dream.scope import ScopeIds, ScopePaths, resolve_scope
+from dream.core.scope import ScopeIds, ScopePaths, resolve_scope
 
 
 class SemanticCuratorRunner:

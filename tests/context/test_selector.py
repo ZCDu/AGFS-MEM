@@ -2,7 +2,7 @@ from pathlib import Path
 
 from dream.artifacts import AtomicArtifactStore
 from dream.context.selector import ContextBudget, ContextSelector, estimated_tokens
-from dream.scope import ScopeIds, resolve_scope
+from dream.core.scope import ScopeIds, resolve_scope
 from dream.service import DreamService
 
 

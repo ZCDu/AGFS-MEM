@@ -20,9 +20,9 @@ from dream.config import (
     build_writeback_backend,
     load_settings,
 )
-from dream.events import TaskCompletedEvent
+from dream.core.events import TaskCompletedEvent
 from dream.publication import PublicationTransitionError, PublicationVersion
-from dream.scope import ScopeIds
+from dream.core.scope import ScopeIds
 from dream.scheduler import ReviewSchedulePolicy
 from dream.service import DreamService
 from dream.source_sync import InternshipSourceSync

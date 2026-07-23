@@ -3,7 +3,7 @@ from pathlib import Path
 import pytest
 
 from dream.artifacts import AtomicArtifactStore
-from dream.scope import ScopeIds, resolve_scope
+from dream.core.scope import ScopeIds, resolve_scope
 from dream.snapshots import SnapshotStore
 
 

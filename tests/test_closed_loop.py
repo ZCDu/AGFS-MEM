@@ -9,7 +9,7 @@ from dream.closed_loop import (
     ClosedLoopError,
     TaskStartBlocked,
 )
-from dream.events import TaskCompletedEvent
+from dream.core.events import TaskCompletedEvent
 from dream.governance.memory_policy import (
     AutoWritebackDecision,
     GovernanceMode,
@@ -22,7 +22,7 @@ from dream.review.models import (
     ReviewEventDisposition,
     ReviewResult,
 )
-from dream.scope import ScopeIds
+from dream.core.scope import ScopeIds
 from dream.service import DreamService
 from dream.writeback import DeterministicWritebackBackend
 

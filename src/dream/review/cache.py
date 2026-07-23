@@ -6,14 +6,14 @@ import json
 from pathlib import Path
 
 from dream.artifacts import AtomicArtifactStore
-from dream.events import TaskCompletedEvent
+from dream.core.events import TaskCompletedEvent
 from dream.review.models import (
     ArtifactKind,
     ReviewAction,
     ReviewEventDisposition,
     ReviewResult,
 )
-from dream.scope import ScopeIds
+from dream.core.scope import ScopeIds
 from dream.snapshots import ContextSnapshot
 
 

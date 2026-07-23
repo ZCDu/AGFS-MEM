@@ -11,7 +11,7 @@ from dream.curators.llm_backend import SemanticCuratorBackend
 from dream.curators.protocol import CuratorRunReport
 from dream.reports import DreamReportStore
 from dream.rollback import RollbackService
-from dream.scope import ScopePaths
+from dream.core.scope import ScopePaths
 
 
 _PRINCIPLE = re.compile(r"## 决策原则\s*\n\s*(.+?)(?=\n\s*## )", re.DOTALL)

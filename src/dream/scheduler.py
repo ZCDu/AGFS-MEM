@@ -5,8 +5,8 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
-from dream.events import TaskCompletedEvent
-from dream.scope import ScopeIds
+from dream.core.events import TaskCompletedEvent
+from dream.core.scope import ScopeIds
 
 
 TokenEstimator = Callable[[TaskCompletedEvent], int]

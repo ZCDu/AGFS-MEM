@@ -6,7 +6,7 @@ import pytest
 from dream.curators.ai import AICurator
 from dream.publication import PublicationStore
 from dream.review.models import ArtifactKind, ReviewAction, ReviewResult
-from dream.scope import resolve_scope
+from dream.core.scope import resolve_scope
 from dream.service import DreamService
 from dream.validation.seeds import (
     SeedSourceError,

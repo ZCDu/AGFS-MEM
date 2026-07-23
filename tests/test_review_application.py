@@ -10,7 +10,7 @@ from dream.managers.memory import MemoryManager
 from dream.reports import DreamReportStore
 from dream.review.models import ArtifactKind, ReviewAction
 from dream.rollback import RollbackService
-from dream.scope import ScopeIds, resolve_scope
+from dream.core.scope import ScopeIds, resolve_scope
 
 
 def _memory_id(content: str) -> str:

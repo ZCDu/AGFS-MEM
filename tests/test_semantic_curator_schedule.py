@@ -3,10 +3,10 @@ from pathlib import Path
 
 from dream.artifacts import AtomicArtifactStore
 from dream.curators.llm_backend import AICurationPlan, UserCurationPlan
-from dream.events import TaskCompletedEvent
+from dream.core.events import TaskCompletedEvent
 from dream.managers.decision_cards import DecisionCardManager
 from dream.review.models import ArtifactKind, ReviewAction
-from dream.scope import ScopeIds, resolve_scope
+from dream.core.scope import ScopeIds, resolve_scope
 from dream.service import DreamService
 
 

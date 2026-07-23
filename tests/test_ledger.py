@@ -2,9 +2,9 @@ from pathlib import Path
 
 import pytest
 
-from dream.events import TaskCompletedEvent
-from dream.ledger import EventLedger
-from dream.scope import ScopeIds
+from dream.core.events import TaskCompletedEvent
+from dream.core.ledger import EventLedger
+from dream.core.scope import ScopeIds
 
 
 def _event(event_id: str = "evt-1") -> TaskCompletedEvent:

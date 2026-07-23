@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from dream.scope import ScopeIds, resolve_scope
+from dream.core.scope import ScopeIds, resolve_scope
 
 
 def test_resolve_scope_keeps_user_under_agent(tmp_path: Path) -> None:

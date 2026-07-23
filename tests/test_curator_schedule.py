@@ -3,11 +3,11 @@ from pathlib import Path
 
 from dream.curators.ai import AICurator
 from dream.curators.user import UserCurator
-from dream.events import TaskCompletedEvent
+from dream.core.events import TaskCompletedEvent
 from dream.managers.decision_cards import DecisionCardManager
 from dream.managers.memory import MemoryManager
 from dream.review.models import ArtifactKind, ReviewAction
-from dream.scope import ScopeIds, resolve_scope
+from dream.core.scope import ScopeIds, resolve_scope
 from dream.service import DreamService
 
 
