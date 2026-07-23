@@ -7,7 +7,7 @@ from dream.extraction.structured import StructuredToolCall
 
 
 def _adapter_api():
-    module = importlib.import_module("dream.review.adapter")
+    module = importlib.import_module("dream.extraction.provider_adapter")
     context = module.ReviewAdapterContext(
         event_ids=("evt-1", "evt-2"),
         existing_memory=(

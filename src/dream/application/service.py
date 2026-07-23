@@ -13,7 +13,7 @@ from dream.curators.backend import SemanticCuratorBackend
 from dream.curators.schedule import CuratorScheduleStore
 from dream.curators.semantic import SemanticCuratorRunner
 from dream.curators.user import UserCurator
-from dream.context.selector import ContextBudget, ContextSelector
+from dream.retrieval.selector import ContextBudget, ContextSelector
 from dream.application.deadline import DreamDeadline
 from dream.application.progress import ReviewProgressStore
 from dream.application.scheduler import (
@@ -32,7 +32,7 @@ from dream.memory.storage.reports import DreamReportStore
 from dream.extraction.backend import DeterministicReviewBackend, ReviewBackend
 from dream.extraction.cache import ReviewStageCache
 from dream.extraction.models import ArtifactKind
-from dream.review.orchestrator import BackgroundReviewOrchestrator
+from dream.application.review_orchestrator import BackgroundReviewOrchestrator
 from dream.memory.storage.rollback import RollbackService
 from dream.core.scope import ScopeIds, resolve_scope
 from dream.memory.storage.snapshots import SnapshotStore

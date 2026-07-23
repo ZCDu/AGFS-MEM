@@ -135,4 +135,4 @@ def test_context_builder_respects_budget_and_reports_included_records() -> None:
 def test_retrieval_framework_is_not_wired_into_active_service(tmp_path: Path) -> None:
     service = DreamService(tmp_path)
 
-    assert type(service.context_selector).__module__ == "dream.context.selector"
+    assert type(service.context_selector).__module__ == "dream.retrieval.selector"

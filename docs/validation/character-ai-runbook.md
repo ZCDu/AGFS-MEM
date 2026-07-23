@@ -70,10 +70,10 @@ PYTHONPATH=src python -m dream.validation.seeds validate \
 from pathlib import Path
 from dream.config import build_curator_backend, build_review_backend, build_writeback_backend, load_settings
 from dream.curators.ai import AICurator
-from dream.scope import resolve_scope
-from dream.service import DreamService
+from dream.application.service import DreamService
+from dream.core.scope import resolve_scope
 from dream.validation.seeds import seed_scope
-from dream.writeback import WritebackService
+from dream.memory.writeback import WritebackService
 
 settings = load_settings(Path(".env"))
 home = Path(settings.home).expanduser()
