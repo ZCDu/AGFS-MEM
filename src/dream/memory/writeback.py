@@ -6,7 +6,7 @@ import re
 from typing import Any, Protocol
 
 from dream.memory.artifacts import ArtifactVersion, AtomicArtifactStore
-from dream.curators.writeback_prompts import (
+from dream.memory.writeback_prompts import (
     CHARACTER_WRITEBACK_PROMPT,
     USER_PERSONA_WRITEBACK_PROMPT,
 )

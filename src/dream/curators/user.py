@@ -7,7 +7,7 @@ import re
 from uuid import uuid4
 
 from dream.memory.artifacts import AtomicArtifactStore
-from dream.curators.llm_backend import SemanticCuratorBackend
+from dream.curators.backend import SemanticCuratorBackend
 from dream.curators.protocol import CuratorRunReport
 from dream.memory.storage.reports import DreamReportStore
 from dream.memory.storage.rollback import RollbackService

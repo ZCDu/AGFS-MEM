@@ -10,7 +10,7 @@ from dream.config import (
     load_settings,
 )
 from dream.api import create_app
-from dream.curators.llm_backend import OpenAICuratorBackend
+from dream.curators.backend import OpenAICuratorBackend
 from dream.extraction.backend import DeterministicReviewBackend
 from dream.extraction.llm_backend import OpenAIReviewBackend
 from dream.memory.writeback import DeterministicWritebackBackend

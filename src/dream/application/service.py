@@ -9,7 +9,7 @@ from zoneinfo import ZoneInfo
 
 from dream.memory.artifacts import AtomicArtifactStore
 from dream.curators.ai import AICurator
-from dream.curators.llm_backend import SemanticCuratorBackend
+from dream.curators.backend import SemanticCuratorBackend
 from dream.curators.schedule import CuratorScheduleStore
 from dream.curators.semantic import SemanticCuratorRunner
 from dream.curators.user import UserCurator

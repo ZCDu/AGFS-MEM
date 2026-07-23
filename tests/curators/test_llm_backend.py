@@ -1,7 +1,7 @@
 import json
 from types import SimpleNamespace
 
-from dream.curators.llm_backend import OpenAICuratorBackend
+from dream.curators.backend import OpenAICuratorBackend
 
 
 class RoutingCompletions:

@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Callable
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from dream.curators.llm_backend import OpenAICuratorBackend, SemanticCuratorBackend
+from dream.curators.backend import OpenAICuratorBackend, SemanticCuratorBackend
 from dream.extraction.backend import DeterministicReviewBackend, ReviewBackend
 from dream.extraction.llm_backend import OpenAIReviewBackend
 from dream.memory.writeback import (

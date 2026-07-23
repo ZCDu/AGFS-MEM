@@ -2,7 +2,7 @@ from pathlib import Path
 
 from dream.memory.artifacts import AtomicArtifactStore
 from dream.curators.ai import AICurator
-from dream.curators.llm_backend import AICurationPlan, UserCurationPlan
+from dream.curators.backend import AICurationPlan, UserCurationPlan
 from dream.curators.user import UserCurator
 from dream.memory.managers.decision_cards import DecisionCardManager
 from dream.extraction.models import ArtifactKind, ReviewAction
