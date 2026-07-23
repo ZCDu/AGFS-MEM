@@ -25,9 +25,9 @@ from dream.memory.publication import PublicationTransitionError, PublicationVers
 from dream.core.scope import ScopeIds
 from dream.application.scheduler import ReviewSchedulePolicy
 from dream.application.service import DreamService
-from dream.source_sync import InternshipSourceSync
-from dream.sources.internship import InternshipSourceClient
-from dream.sources.manual import ManualSourceError
+from dream.integrations.internship.client import InternshipSourceClient
+from dream.integrations.internship.sync import InternshipSourceSync
+from dream.integrations.manual import ManualSourceError
 
 
 class ScopeRequest(BaseModel):

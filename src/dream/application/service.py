@@ -36,7 +36,7 @@ from dream.review.orchestrator import BackgroundReviewOrchestrator
 from dream.memory.storage.rollback import RollbackService
 from dream.core.scope import ScopeIds, resolve_scope
 from dream.memory.storage.snapshots import SnapshotStore
-from dream.sources.manual import manual_record_to_event, parse_manual_ndjson
+from dream.integrations.manual import manual_record_to_event, parse_manual_ndjson
 from dream.validation.seeds import parse_seed_jsonl, seed_record_to_event
 
 

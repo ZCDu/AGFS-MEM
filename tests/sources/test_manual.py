@@ -3,7 +3,7 @@ import json
 import pytest
 
 from dream.core.scope import ScopeIds
-from dream.sources.manual import (
+from dream.integrations.manual import (
     ManualSourceError,
     manual_record_to_event,
     parse_manual_ndjson,

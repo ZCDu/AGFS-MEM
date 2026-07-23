@@ -4,7 +4,7 @@ from pathlib import Path
 from dream.config import InternshipSourceSettings
 from dream.core.events import TaskCompletedEvent
 from dream.core.scope import ScopeIds
-from dream.sources.internship import InternshipRecord
+from dream.integrations.internship.client import InternshipRecord
 
 
 VALID_RECORD: dict[str, object] = {

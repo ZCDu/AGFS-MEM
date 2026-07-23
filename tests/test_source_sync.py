@@ -2,14 +2,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from dream.application.service import DreamService
-from dream.source_sync import (
+from dream.integrations.internship.sync import (
     InternshipSourceSync,
     SourceSyncState,
     SourceSyncStateStore,
     normalize_source_user_id,
     record_to_event,
 )
-from dream.sources.internship import InternshipRecord, SourceFetchError
+from dream.integrations.internship.client import InternshipRecord, SourceFetchError
 from dream.core.scope import ScopeIds
 from tests.source_helpers import source_record, source_settings
 

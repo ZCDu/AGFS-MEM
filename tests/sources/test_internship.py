@@ -1,7 +1,7 @@
 import httpx
 import pytest
 
-from dream.sources.internship import (
+from dream.integrations.internship.client import (
     InternshipSourceClient,
     SourceFetchError,
     parse_ndjson,

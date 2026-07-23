@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from dream.sources.manual import parse_manual_ndjson
+from dream.integrations.manual import parse_manual_ndjson
 from dream.validation.evaluation import (
     EvaluationReportError,
     UserEvaluationInput,
