@@ -142,8 +142,20 @@ def test_seed_file_validation_and_cli_require_exact_count(tmp_path: Path) -> Non
         validate_seed_file(path, expected_count=3)
 
 
-def test_committed_seed_fixture_contains_two_valid_synthetic_records() -> None:
-    path = Path(__file__).parents[2] / "fixtures" / "ai_seed" / "sample.jsonl"
+def test_generated_seed_fixture_contains_two_valid_synthetic_records(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "sample.jsonl"
+    path.write_text(
+        seed_line()
+        + "\n"
+        + seed_line(
+            source_dataset="synthetic-safety",
+            source_record_id="boundary-001",
+        )
+        + "\n",
+        encoding="utf-8",
+    )
 
     records = parse_seed_jsonl(path.read_text(encoding="utf-8"))
 

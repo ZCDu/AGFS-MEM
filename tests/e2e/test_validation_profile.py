@@ -183,8 +183,8 @@ def test_changed_profile_fails_locked_hash(tmp_path: Path) -> None:
         verify_approved_profile(root)
 
 
-def test_committed_profile_fixture_is_valid() -> None:
-    root = Path(__file__).parents[2] / "fixtures" / "agent_profile"
+def test_generated_profile_fixture_is_valid(tmp_path: Path) -> None:
+    root = write_approved_fixture(tmp_path / "agent_profile")
     approval = verify_approved_profile(root)
 
     assert approval.status == "approved"

@@ -212,8 +212,47 @@ def test_tampered_computed_rates_are_rejected(tmp_path: Path) -> None:
         verify_report(path)
 
 
-def test_small_conversation_fixtures_are_valid_but_below_task_threshold() -> None:
-    root = Path(__file__).parents[2] / "fixtures" / "conversations"
+def test_generated_conversations_are_valid_but_below_task_threshold(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "conversations"
+    root.mkdir()
+    identities = (
+        ("project_manager", "project-manager"),
+        ("python_beginner", "python-beginner"),
+        ("technical_lead", "technical-lead"),
+    )
+    for name, user_id in identities:
+        records = []
+        for index in (1, 2):
+            response = f"Safe synthetic response {index} for {user_id}."
+            records.append(
+                json.dumps(
+                    {
+                        "event_id": f"{name}-{index}",
+                        "tenant_id": "dream-lab",
+                        "agent_id": "enterprise-colleague",
+                        "user_id": user_id,
+                        "session_id": f"{name}-session-{index}",
+                        "task_id": f"{name}-task-{index}",
+                        "completed_at": f"2026-07-17T1{index}:00:00+08:00",
+                        "messages": [
+                            {
+                                "role": "user",
+                                "content": f"Synthetic request {index} for {user_id}.",
+                            },
+                            {"role": "assistant", "content": response},
+                        ],
+                        "final_response": response,
+                    },
+                    ensure_ascii=False,
+                )
+            )
+        (root / f"{name}.jsonl").write_text(
+            "\n".join(records) + "\n",
+            encoding="utf-8",
+        )
+
     users = []
     for name in ("project_manager", "python_beginner", "technical_lead"):
         records = parse_manual_ndjson(

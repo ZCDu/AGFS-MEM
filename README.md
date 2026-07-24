@@ -286,11 +286,6 @@ DREAM/
 │   ├── ai-evolution-and-user-persona.md        # 说明 AI 决策进化、用户画像形成和下一任务生效
 │   └── dream-mechanism.md                      # 说明定期做梦、调度、Curator、事务和安全失败
 ├── tests/                                      # 单元、集成和端到端测试
-├── fixtures/                                   # 脱敏的会话、用户画像和 AI 种子测试数据
-│   ├── agent_profile/                          # 固定测试 Agent 的画像与批准信息
-│   ├── ai_seed/                                # AI 决策经验种子样例
-│   ├── conversations/                          # 多批次完整会话 JSONL
-│   └── personas/                               # 验证用的期望用户画像
 ├── .env.example                                # 可复制的环境变量配置模板，不包含真实密钥
 ├── pyproject.toml                              # Python 版本、依赖、测试和 Ruff 配置
 ├── README.md                                   # 项目介绍、运行方法、接口和接入指南
@@ -674,7 +669,6 @@ ruff check src tests
 - `src/dream/`
 - `tests/`
 - `docs/`
-- 脱敏并已跟踪的 `fixtures/`
 - `README.md`
 - `pyproject.toml`
 - `.env.example`
