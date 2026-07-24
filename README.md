@@ -1,19 +1,15 @@
 # DREAM
 
-DREAM 是一个面向 Agent 的长期记忆形成、治理与检索框架。它在任务间歇回顾已经完成的会话，将其中具有长期价值的信息转化为可追溯的用户画像和 AI 决策经验，并在下一次任务中按需提供相关记忆。
+## 梦境机制（DREAM）
 
-DREAM 解决三个核心问题：
+DREAM 在会话之外定时回顾和蒸馏已经归档的对话，将耗时的总结、归纳和知识提取从实时交互中移出，避免影响当前会话的响应速度。它还会根据来源证据校验情景记忆，通过结构化检查、快照和回滚降低模型自归纳产生语义偏差的风险。
 
-| 能力 | 解决的问题 | 主要产物 |
-|---|---|---|
-| User Persona | Agent 如何持续理解同一用户的偏好、习惯与约束 | `USER.md`、`USER_PERSONA.md` |
-| AI Decision Evolution | Agent 如何从历史任务中沉淀可复用的判断经验 | Decision Cards、`DECISION_RULES.md` |
-| Memory Retrieval | 当前任务应该读取哪些记忆，而不是加载全部历史 | Top-K Memories、受预算控制的 Agent Context |
+当前 DREAM 已经完成两项核心进化功能：
 
-DREAM 不直接替代业务 Agent。它负责回答两个问题：
+- **用户画像**：从长期对话中持续提取用户的稳定偏好、习惯、领域特征和约束，并在新证据出现时进行新增、更新或合并。
+- **AI 决策进化**：从历史任务中提炼可复用的判断原则、适用场景和边界条件，形成带来源证据的 Decision Cards 与 `DECISION_RULES.md`。
 
-1. 历史经历中什么值得长期记住？
-2. 当前任务需要取回哪些相关记忆？
+这些记忆可以在下一次任务中通过 Memory Retrieval 按需取回，使 Agent 在不加载全部历史的情况下持续理解用户并复用已经验证的决策经验。
 
 ## 整体架构
 
@@ -183,28 +179,21 @@ Background Review 按用户作用域自适应触发，任一条件满足即可�
 DREAM/
 ├── src/
 │   └── dream/
-│       ├── __init__.py                         # 声明 DREAM Python 包及当前版本
 │       ├── api.py                              # 创建 FastAPI 应用，提供会话、做梦、发布和任务上下文接口
 │       ├── config.py                           # 从环境变量加载配置，并构造 Review、Curator 和 Writeback 后端
-│       │
 │       ├── application/                        # 编排一次做梦从待处理事件到新版本生效的应用流程
-│       │   ├── __init__.py                     # 声明应用编排层 Python 包
 │       │   ├── closed_loop.py                  # 串联治理、写回、发布、激活和失败回滚的完整闭环事务
 │       │   ├── deadline.py                     # 提供 300 秒总截止时间、模型等待隔离和超时异常
 │       │   ├── progress.py                     # 持久记录已完成 Background Review 的事件并支持失败失效
 │       │   ├── review_orchestrator.py          # 过滤可评审事件，组装批次请求并调用知识提取后端
 │       │   ├── scheduler.py                    # 按空闲、事件数、Token 和等待时间管理自适应待处理队列
 │       │   └── service.py                      # DREAM 核心应用服务，负责导入、Review、Curator 和任务上下文
-│       │
 │       ├── core/                               # 不依赖业务流程的事件、标识符、账本和作用域基础模型
-│       │   ├── __init__.py                     # 声明核心领域基础包
 │       │   ├── events.py                       # 定义不可变的已完成任务事件 TaskCompletedEvent
 │       │   ├── identifiers.py                  # 为 tenant、agent、user、event 和 task ID 提供语义类型别名
 │       │   ├── ledger.py                       # 以追加写 JSONL 的方式保存事件并阻止重复 event_id
 │       │   └── scope.py                        # 校验作用域 ID 并安全解析用户、Agent 和产物目录
-│       │
 │       ├── extraction/                         # 调用外部大模型并把不稳定输出转换为统一 Review 结果
-│       │   ├── __init__.py                     # 声明外部模型调用和知识提取边界
 │       │   ├── backend.py                      # 定义 Review 后端协议及无需模型的确定性测试后端
 │       │   ├── cache.py                        # 按事件、快照、工具、后端和 Prompt 保存已验证语义结果
 │       │   ├── classifier.py                   # 把知识产物类型映射到 Persona、Decision 或 Skill 管理工具
@@ -213,9 +202,7 @@ DREAM/
 │       │   ├── prompts.py                      # 定义用户画像、决策规则和 Skill 三类知识提取提示词
 │       │   ├── provider_adapter.py             # 解包 tool/arguments/parameters，规范化并校验 Provider 输出
 │       │   └── structured.py                   # 封装工具调用或 JSON 模式的结构化模型请求和错误分类
-│       │
 │       ├── governance/                         # 将候选知识规范化、路由并按风险决定如何生效
-│       │   ├── __init__.py                     # 统一导出治理模型、适配器、路由器和策略
 │       │   ├── candidates.py                   # 持久保存观察期候选并合并后续批次的来源证据
 │       │   ├── canonicalizer.py                # 将通用候选字段转换成 Provider 无关的 Knowledge Proposal
 │       │   ├── knowledge.py                    # 定义用户偏好、决策规则和工作流 Skill 候选模型
@@ -223,27 +210,21 @@ DREAM/
 │       │   ├── persona_models.py               # 定义 Persona 领域、生命周期、原子格式及规范化规则
 │       │   ├── policy.py                       # 根据类型、置信度、证据和风险决定自动激活、观察或审核
 │       │   └── router.py                       # 把规范知识路由为 Persona 或 Decision Card 的内部动作
-│       │
 │       ├── memory/                             # 管理长期产物、原子写入、发布状态和本地事务证据
-│       │   ├── __init__.py                     # 声明长期记忆、管理器、发布和存储层
 │       │   ├── artifacts.py                    # 在作用域根目录内原子写文件并保留写前版本
 │       │   ├── items.py                        # 解析 USER.md 原子条目、生成 memory_id 并校验替换目标
 │       │   ├── publication.py                  # 管理每个用户的候选版本、审核、激活和失败状态机
 │       │   ├── writeback.py                    # 从完整仓库生成 Agent 决策投影和用户画像投影
 │       │   ├── writeback_prompts.py            # 定义大模型生成两类紧凑投影时使用的提示词
 │       │   ├── managers/
-│       │   │   ├── __init__.py                 # 声明长期记忆动作管理器包
 │       │   │   ├── decision_cards.py           # 校验并原子创建或更新带证据的 Decision Card
 │       │   │   ├── persona.py                  # 对 USER.md 执行 add、replace、remove 和来源合并
 │       │   │   └── skill_candidates.py         # 保存结构完整但尚未接入 Runtime 的 Skill 候选
 │       │   └── storage/
-│       │       ├── __init__.py                 # 声明快照、回滚和审计报告存储包
 │       │       ├── reports.py                  # 写入 Dream Report 与脱敏 Review Trace JSON
 │       │       ├── rollback.py                 # 记录局部变更并按 rollback_id 恢复单次写入
 │       │       └── snapshots.py                # 冻结或恢复完整作用域产物，保证下一任务读取一致版本
-│       │
 │       ├── retrieval/                          # 从长期记忆中为当前任务选择少量相关上下文
-│       │   ├── __init__.py                     # 导出 Memory Retrieval 的公开 Python API
 │       │   ├── config.py                       # 配置 Top-K、Token 预算、类型权重和确定性领域识别
 │       │   ├── context_builder.py              # 对排序结果去重、处理冲突并生成受预算约束的 Markdown
 │       │   ├── filters.py                      # 按 tenant、agent、user、类型和领域过滤候选记忆
@@ -254,9 +235,7 @@ DREAM/
 │       │   ├── retriever.py                    # 组合 MemorySource、过滤器和排序器并返回 Top-K 结果
 │       │   ├── selector.py                     # 为 /v1/tasks/start 按任务和 Token 预算选择现有记忆
 │       │   └── skill.py                        # 提供外部 Agent 可直接调用的 MemoryRetrievalSkill
-│       │
 │       ├── curators/                           # 周期整理用户画像和 AI 决策规则
-│       │   ├── __init__.py                     # 声明 AI 与 User 的周期维护包
 │       │   ├── ai.py                           # 从有效 Decision Cards 确定性生成 DECISION_RULES.md
 │       │   ├── backend.py                      # 定义并实现 OpenAI-compatible 语义 Curator 后端
 │       │   ├── prompts.py                      # 定义 AI 和 User 语义整理提示词
@@ -265,17 +244,12 @@ DREAM/
 │       │   ├── schedule.py                     # 保存内容指纹、每日 3 点兜底和语义周期状态
 │       │   ├── semantic.py                     # 在隔离副本中生成语义整理候选而不覆盖 Active Memory
 │       │   └── user.py                         # 根据 USER.md 证据确定性整理用户画像投影
-│       │
 │       ├── integrations/                       # 接收手工会话或同步外部短期记忆数据源
-│       │   ├── __init__.py                     # 声明外部会话来源和同步集成包
 │       │   ├── manual.py                       # 严格校验手工 JSONL 并转换为完成任务事件
 │       │   └── internship/
-│       │       ├── __init__.py                 # 声明 Internship 会话源集成
 │       │       ├── client.py                   # 从 NDJSON HTTP API 分页读取已完成会话
 │       │       └── sync.py                     # 保存游标、映射用户并幂等同步外部会话到账本
-│       │
 │       └── validation/                         # 隔离的闭环测试输入、状态门禁和可复算评估工具
-│           ├── __init__.py                     # 声明正式闭环验证工具包
 │           ├── agnes.py                        # 使用内存中的隐藏画像生成安全的模拟用户消息
 │           ├── campaign.py                     # 保存 Codex 验证阶段、任务回执和下一阶段门禁
 │           ├── evaluation.py                   # 根据可核验指标生成并校验闭环进化评估报告
