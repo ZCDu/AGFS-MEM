@@ -11,57 +11,86 @@ DREAM 在会话之外定时回顾和蒸馏已经归档的对话，将耗时的�
 
 这些记忆可以在下一次任务中通过 Memory Retrieval 按需取回，使 Agent 在不加载全部历史的情况下持续理解用户并复用已经验证的决策经验。
 
-## 整体架构
+## 架构
 
 ```text
 已完成的 Conversation / Agent Task
-                  │
-                  ▼
-       Event Ledger 与等待队列
-                  │
-                  ▼
-        Knowledge Extraction
-    Agnes / OpenAI-compatible Provider
-                  │
-                  ▼
-     Provider Adapter 与结构化校验
-                  │
-                  ▼
-        Knowledge Governance
-      分类 / 规范化 / 风险判断 / 路由
-           ┌──────┼─────────┐
-           ▼      ▼         ▼
-      User Persona  Decision Cards  Skill Candidates
-           │      │         │
-           └──────┼─────────┘
-                  ▼
-       Snapshot / Version / Writeback
-                  │
-                  ▼
-           Durable Memory
-                  │
-                  ▼
-        Memory Retrieval Skill
-     过滤 / 排序 / 去重 / 上下文预算
-                  │
-                  ▼
-             External Agent
-```
-
-从外部模型到 DREAM 核心采用适配层隔离：
-
-```text
-不稳定的 Provider 输出
-          ↓
-Provider Adapter
-JSON解析 / wrapper解包 / 字段归一化
-          ↓
-DREAM Canonical Knowledge
-          ↓
-严格业务校验与本地事务
+    │
+    ▼
+DreamService（编排层）
+    ├── Event Ledger                    — 会话归档、用户隔离与去重
+    ├── Knowledge Extraction            — Agnes 调用、结构化适配与知识提取
+    ├── Knowledge Governance            — 候选规范化、风险判断与知识路由
+    │   ├── User Persona                — 用户画像
+    │   ├── Decision Cards              — AI 决策经验
+    │   └── Skill Candidates            — 待实现的工作流候选
+    ├── Curators                        — 画像与决策规则的周期整理
+    └── Snapshot / Publication / Rollback — 版本、发布与安全恢复
+    │
+    ▼
+Memory Retrieval                       — 为下一任务检索相关记忆
+    │
+    ▼
+External Agent
 ```
 
 模型负责发现知识，DREAM 负责知识类型、存储位置、风险治理、版本和回滚。
+
+## 依赖
+
+- **Python 3.11–3.13**：项目运行环境。
+- **FastAPI + Uvicorn**：提供会话导入、Dream、发布和任务上下文接口。
+- **Pydantic**：校验配置、事件、知识候选和内部动作。
+- **OpenAI Python SDK**：调用 Agnes 或其他 OpenAI-compatible 模型。
+- **HTTPX**：访问外部会话源和模型 HTTP 服务。
+- **Pytest + Ruff**：仅用于本地测试和代码检查。
+
+DREAM 当前使用本地文件保存账本、画像、决策卡、快照和报告，不依赖 Redis、Elasticsearch 或向量数据库。
+
+## 项目结构
+
+```text
+DREAM/
+├── src/dream/
+│   ├── api.py                              # FastAPI 应用及对外接口
+│   ├── config.py                           # 环境变量和后端配置
+│   ├── application/                        # Dream 应用编排与闭环执行
+│   │   ├── service.py                      # DREAM 核心服务入口
+│   │   ├── closed_loop.py                  # 写回、发布、激活和失败回滚事务
+│   │   ├── scheduler.py                    # 自适应 Background Review 调度
+│   │   └── deadline.py                     # 300 秒截止时间与安全取消
+│   ├── core/                               # 事件、账本、作用域和标识符基础模型
+│   ├── extraction/                         # 外部模型调用与知识提取
+│   │   ├── llm_backend.py                  # Agnes/OpenAI 调用及一次非法输出修复
+│   │   ├── provider_adapter.py             # 外部输出解包、归一化和校验
+│   │   └── prompts.py                      # 用户画像、决策和 Skill 提取提示词
+│   ├── governance/                         # 知识规范化、风险治理和路由
+│   │   ├── canonicalizer.py                # 候选知识标准化
+│   │   ├── policy.py                       # 自动激活、观察和人工审核策略
+│   │   ├── router.py                       # 路由到 Persona 或 Decision Card
+│   │   └── persona_merge.py                # 画像新增、更新、合并和去重
+│   ├── memory/                             # 长期记忆、写回、发布与本地事务
+│   │   ├── writeback.py                    # 生成用户画像和 AI 决策投影
+│   │   ├── publication.py                  # 候选版本、审核和激活状态机
+│   │   ├── managers/                       # Persona、Decision Card、Skill 候选管理
+│   │   └── storage/                        # Snapshot、Rollback 和 Dream Report
+│   ├── curators/                           # 用户画像与 AI 决策规则的周期整理
+│   │   ├── user.py                         # 确定性生成用户画像投影
+│   │   ├── ai.py                           # 确定性生成 AI 决策规则
+│   │   ├── semantic.py                     # 可选的大模型语义整理
+│   │   └── schedule.py                     # 每批执行、凌晨 3 点兜底和周期状态
+│   ├── retrieval/                          # 当前任务的相关记忆检索
+│   │   ├── skill.py                        # 外部 Agent 调用入口
+│   │   └── retriever.py                    # 过滤、排序并返回 Top-K 记忆
+│   ├── integrations/                       # 手工 JSONL 和外部会话源接入
+│   └── validation/                         # 正式闭环验证和可复算评估工具
+├── docs/                                   # Dream 机制与画像/决策进化说明
+├── tests/                                  # 单元、集成和端到端测试
+├── .env.example                            # 环境变量模板，不包含真实密钥
+├── pyproject.toml                          # 依赖、测试和 Ruff 配置
+├── README.md                               # 项目说明与接入指南
+└── .gitignore                              # 排除密钥、运行数据和临时文件
+```
 
 ## 三项核心能力
 
@@ -172,99 +201,6 @@ Background Review 按用户作用域自适应触发，任一条件满足即可�
 
 - 距离上次尝试至少 168 小时；
 - 对应作用域至少空闲 2 小时。
-
-## 项目结构
-
-```text
-DREAM/
-├── src/
-│   └── dream/
-│       ├── api.py                              # 创建 FastAPI 应用，提供会话、做梦、发布和任务上下文接口
-│       ├── config.py                           # 从环境变量加载配置，并构造 Review、Curator 和 Writeback 后端
-│       ├── application/                        # 编排一次做梦从待处理事件到新版本生效的应用流程
-│       │   ├── closed_loop.py                  # 串联治理、写回、发布、激活和失败回滚的完整闭环事务
-│       │   ├── deadline.py                     # 提供 300 秒总截止时间、模型等待隔离和超时异常
-│       │   ├── progress.py                     # 持久记录已完成 Background Review 的事件并支持失败失效
-│       │   ├── review_orchestrator.py          # 过滤可评审事件，组装批次请求并调用知识提取后端
-│       │   ├── scheduler.py                    # 按空闲、事件数、Token 和等待时间管理自适应待处理队列
-│       │   └── service.py                      # DREAM 核心应用服务，负责导入、Review、Curator 和任务上下文
-│       ├── core/                               # 不依赖业务流程的事件、标识符、账本和作用域基础模型
-│       │   ├── events.py                       # 定义不可变的已完成任务事件 TaskCompletedEvent
-│       │   ├── identifiers.py                  # 为 tenant、agent、user、event 和 task ID 提供语义类型别名
-│       │   ├── ledger.py                       # 以追加写 JSONL 的方式保存事件并阻止重复 event_id
-│       │   └── scope.py                        # 校验作用域 ID 并安全解析用户、Agent 和产物目录
-│       ├── extraction/                         # 调用外部大模型并把不稳定输出转换为统一 Review 结果
-│       │   ├── backend.py                      # 定义 Review 后端协议及无需模型的确定性测试后端
-│       │   ├── cache.py                        # 按事件、快照、工具、后端和 Prompt 保存已验证语义结果
-│       │   ├── classifier.py                   # 把知识产物类型映射到 Persona、Decision 或 Skill 管理工具
-│       │   ├── llm_backend.py                  # 实现 Agnes/OpenAI 批量提取、一次非法输出修复和 Review Trace
-│       │   ├── models.py                       # 定义 Review 请求、动作、事件处置和结果数据模型
-│       │   ├── prompts.py                      # 定义用户画像、决策规则和 Skill 三类知识提取提示词
-│       │   ├── provider_adapter.py             # 解包 tool/arguments/parameters，规范化并校验 Provider 输出
-│       │   └── structured.py                   # 封装工具调用或 JSON 模式的结构化模型请求和错误分类
-│       ├── governance/                         # 将候选知识规范化、路由并按风险决定如何生效
-│       │   ├── candidates.py                   # 持久保存观察期候选并合并后续批次的来源证据
-│       │   ├── canonicalizer.py                # 将通用候选字段转换成 Provider 无关的 Knowledge Proposal
-│       │   ├── knowledge.py                    # 定义用户偏好、决策规则和工作流 Skill 候选模型
-│       │   ├── persona_merge.py                # 为原子画像计算新增、更新、合并或重复操作
-│       │   ├── persona_models.py               # 定义 Persona 领域、生命周期、原子格式及规范化规则
-│       │   ├── policy.py                       # 根据类型、置信度、证据和风险决定自动激活、观察或审核
-│       │   └── router.py                       # 把规范知识路由为 Persona 或 Decision Card 的内部动作
-│       ├── memory/                             # 管理长期产物、原子写入、发布状态和本地事务证据
-│       │   ├── artifacts.py                    # 在作用域根目录内原子写文件并保留写前版本
-│       │   ├── items.py                        # 解析 USER.md 原子条目、生成 memory_id 并校验替换目标
-│       │   ├── publication.py                  # 管理每个用户的候选版本、审核、激活和失败状态机
-│       │   ├── writeback.py                    # 从完整仓库生成 Agent 决策投影和用户画像投影
-│       │   ├── writeback_prompts.py            # 定义大模型生成两类紧凑投影时使用的提示词
-│       │   ├── managers/
-│       │   │   ├── decision_cards.py           # 校验并原子创建或更新带证据的 Decision Card
-│       │   │   ├── persona.py                  # 对 USER.md 执行 add、replace、remove 和来源合并
-│       │   │   └── skill_candidates.py         # 保存结构完整但尚未接入 Runtime 的 Skill 候选
-│       │   └── storage/
-│       │       ├── reports.py                  # 写入 Dream Report 与脱敏 Review Trace JSON
-│       │       ├── rollback.py                 # 记录局部变更并按 rollback_id 恢复单次写入
-│       │       └── snapshots.py                # 冻结或恢复完整作用域产物，保证下一任务读取一致版本
-│       ├── retrieval/                          # 从长期记忆中为当前任务选择少量相关上下文
-│       │   ├── config.py                       # 配置 Top-K、Token 预算、类型权重和确定性领域识别
-│       │   ├── context_builder.py              # 对排序结果去重、处理冲突并生成受预算约束的 Markdown
-│       │   ├── filters.py                      # 按 tenant、agent、user、类型和领域过滤候选记忆
-│       │   ├── loader.py                       # 只读解析画像、规则和决策卡文件为统一 MemoryRecord
-│       │   ├── models.py                       # 定义检索请求、记录、排序结果、上下文和响应模型
-│       │   ├── ranker.py                       # 使用关键词、类型、置信度和更新时间进行本地确定性排序
-│       │   ├── retrieval.skill                 # 描述外部 Agent 调用 Memory Retrieval 的输入输出契约
-│       │   ├── retriever.py                    # 组合 MemorySource、过滤器和排序器并返回 Top-K 结果
-│       │   ├── selector.py                     # 为 /v1/tasks/start 按任务和 Token 预算选择现有记忆
-│       │   └── skill.py                        # 提供外部 Agent 可直接调用的 MemoryRetrievalSkill
-│       ├── curators/                           # 周期整理用户画像和 AI 决策规则
-│       │   ├── ai.py                           # 从有效 Decision Cards 确定性生成 DECISION_RULES.md
-│       │   ├── backend.py                      # 定义并实现 OpenAI-compatible 语义 Curator 后端
-│       │   ├── prompts.py                      # 定义 AI 和 User 语义整理提示词
-│       │   ├── protocol.py                     # 定义 Curator 接口和统一运行报告
-│       │   ├── registry.py                     # 仅执行当前时刻达到自身周期条件的 Curator
-│       │   ├── schedule.py                     # 保存内容指纹、每日 3 点兜底和语义周期状态
-│       │   ├── semantic.py                     # 在隔离副本中生成语义整理候选而不覆盖 Active Memory
-│       │   └── user.py                         # 根据 USER.md 证据确定性整理用户画像投影
-│       ├── integrations/                       # 接收手工会话或同步外部短期记忆数据源
-│       │   ├── manual.py                       # 严格校验手工 JSONL 并转换为完成任务事件
-│       │   └── internship/
-│       │       ├── client.py                   # 从 NDJSON HTTP API 分页读取已完成会话
-│       │       └── sync.py                     # 保存游标、映射用户并幂等同步外部会话到账本
-│       └── validation/                         # 隔离的闭环测试输入、状态门禁和可复算评估工具
-│           ├── agnes.py                        # 使用内存中的隐藏画像生成安全的模拟用户消息
-│           ├── campaign.py                     # 保存 Codex 验证阶段、任务回执和下一阶段门禁
-│           ├── evaluation.py                   # 根据可核验指标生成并校验闭环进化评估报告
-│           ├── profile.py                      # 校验、哈希锁定并验证固定测试 Agent 初始画像
-│           ├── recorded_review.py              # 重放经过审计的模型 Review 输出用于可复现测试
-│           └── seeds.py                        # 严格校验 AI-only 种子并转换成独立事件
-├── docs/
-│   ├── ai-evolution-and-user-persona.md        # 说明 AI 决策进化、用户画像形成和下一任务生效
-│   └── dream-mechanism.md                      # 说明定期做梦、调度、Curator、事务和安全失败
-├── tests/                                      # 单元、集成和端到端测试
-├── .env.example                                # 可复制的环境变量配置模板，不包含真实密钥
-├── pyproject.toml                              # Python 版本、依赖、测试和 Ruff 配置
-├── README.md                                   # 项目介绍、运行方法、接口和接入指南
-└── .gitignore                                  # 排除密钥、虚拟环境、IDE 配置和本地运行数据
-```
 
 ## 运行产物
 
