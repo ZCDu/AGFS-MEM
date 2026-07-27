@@ -10,7 +10,7 @@ def safe_component(value: str, label: str) -> str:
     if (
         not value
         or value in {".", ".."}
-        or any(character in value for character in ("/", "\\", "\0"))
+        or any(character in value for character in ("/", "\\", "\0", "*", "?", "[", "]"))
     ):
         raise ValueError(f"invalid {label}")
     return value
