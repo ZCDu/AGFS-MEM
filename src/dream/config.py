@@ -28,6 +28,13 @@ class InternshipSourceSettings:
 
 
 @dataclass(frozen=True)
+class RedisSessionSettings:
+    url: str = "redis://127.0.0.1:6379/0"
+    ttl_seconds: int = 43_200
+    history_turns: int = 10
+
+
+@dataclass(frozen=True)
 class DreamSettings:
     home: str = "~/.dream"
     review_backend: str = "deterministic"
@@ -56,6 +63,7 @@ class DreamSettings:
     character_definition_limit: int = 3200
     user_persona_limit: int = 1200
     validation_require_active_writeback: bool = False
+    redis_session: RedisSessionSettings = field(default_factory=RedisSessionSettings)
     internship_source: InternshipSourceSettings = field(
         default_factory=InternshipSourceSettings
     )
@@ -151,6 +159,18 @@ def load_settings(path: Path | None = None) -> DreamSettings:
         ZoneInfo(timezone_name)
     except ZoneInfoNotFoundError as exc:
         raise ValueError("DREAM_TIMEZONE must name an installed IANA timezone") from exc
+
+    redis_session = RedisSessionSettings(
+        url=value("DREAM_REDIS_URL", "redis://127.0.0.1:6379/0"),
+        ttl_seconds=_positive_int(
+            value("DREAM_REDIS_SESSION_TTL_SECONDS", "43200"),
+            "DREAM_REDIS_SESSION_TTL_SECONDS",
+        ),
+        history_turns=_positive_int(
+            value("DREAM_REDIS_HISTORY_TURNS", "10"),
+            "DREAM_REDIS_HISTORY_TURNS",
+        ),
+    )
 
     source = InternshipSourceSettings(
         enabled=_boolean(
@@ -252,6 +272,7 @@ def load_settings(path: Path | None = None) -> DreamSettings:
             value("DREAM_VALIDATION_REQUIRE_ACTIVE_WRITEBACK", "false"),
             "DREAM_VALIDATION_REQUIRE_ACTIVE_WRITEBACK",
         ),
+        redis_session=redis_session,
         internship_source=source,
     )
 

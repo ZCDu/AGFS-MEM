@@ -40,6 +40,51 @@ def test_internship_source_defaults_to_disabled(tmp_path: Path) -> None:
     assert settings.llm_trust_env is True
 
 
+def test_redis_session_defaults_match_plan(tmp_path: Path) -> None:
+    redis = load_settings(tmp_path / ".env").redis_session
+
+    assert redis.url == "redis://127.0.0.1:6379/0"
+    assert redis.ttl_seconds == 43_200
+    assert redis.history_turns == 10
+
+
+def test_redis_session_settings_load_from_env(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("DREAM_REDIS_URL", raising=False)
+    monkeypatch.delenv("DREAM_REDIS_SESSION_TTL_SECONDS", raising=False)
+    monkeypatch.delenv("DREAM_REDIS_HISTORY_TURNS", raising=False)
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "DREAM_REDIS_URL=redis://redis.internal:6379/2\n"
+        "DREAM_REDIS_SESSION_TTL_SECONDS=43200\n"
+        "DREAM_REDIS_HISTORY_TURNS=12\n",
+        encoding="utf-8",
+    )
+
+    redis = load_settings(env_file).redis_session
+
+    assert redis.url == "redis://redis.internal:6379/2"
+    assert redis.ttl_seconds == 43_200
+    assert redis.history_turns == 12
+
+
+@pytest.mark.parametrize(
+    "name",
+    ("DREAM_REDIS_SESSION_TTL_SECONDS", "DREAM_REDIS_HISTORY_TURNS"),
+)
+def test_redis_session_rejects_non_positive_values(
+    tmp_path: Path,
+    name: str,
+) -> None:
+    env_file = tmp_path / ".env"
+    env_file.write_text(f"{name}=0\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match=f"{name} must be positive"):
+        load_settings(env_file)
+
+
 def test_validation_barrier_can_be_enabled(tmp_path: Path) -> None:
     env_file = tmp_path / ".env"
     env_file.write_text(
