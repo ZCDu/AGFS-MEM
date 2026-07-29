@@ -16,6 +16,20 @@ from dream.extraction.llm_backend import OpenAIReviewBackend
 from dream.memory.writeback import DeterministicWritebackBackend
 
 
+HEADROOM_ENV_KEYS = (
+    "DREAM_ENV",
+    "HEADROOM_SERVICE_URL",
+    "HEADROOM_SERVICE_API_KEY",
+    "HEADROOM_SERVICE_TIMEOUT_SECONDS",
+    "HEADROOM_COMPRESSION_MODEL",
+)
+
+
+def _clear_headroom_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    for name in HEADROOM_ENV_KEYS:
+        monkeypatch.delenv(name, raising=False)
+
+
 def test_missing_env_file_uses_safe_deterministic_backend(tmp_path: Path) -> None:
     settings = load_settings(tmp_path / ".env")
     assert isinstance(build_review_backend(settings), DeterministicReviewBackend)
@@ -82,6 +96,87 @@ def test_redis_session_rejects_non_positive_values(
     env_file.write_text(f"{name}=0\n", encoding="utf-8")
 
     with pytest.raises(ValueError, match=f"{name} must be positive"):
+        load_settings(env_file)
+
+
+def test_headroom_service_defaults_to_development(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _clear_headroom_env(monkeypatch)
+
+    settings = load_settings(tmp_path / ".env")
+
+    assert settings.environment == "development"
+    assert settings.headroom_service.url == ""
+    assert settings.headroom_service.api_key == ""
+    assert settings.headroom_service.timeout_seconds == 30.0
+    assert settings.headroom_service.compression_model == ""
+
+
+def test_production_requires_headroom_service_url(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _clear_headroom_env(monkeypatch)
+    env_file = tmp_path / ".env"
+    env_file.write_text("DREAM_ENV=production\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="HEADROOM_SERVICE_URL is required"):
+        load_settings(env_file)
+
+
+def test_headroom_service_settings_load_from_env_file(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _clear_headroom_env(monkeypatch)
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "DREAM_ENV=production\n"
+        "HEADROOM_SERVICE_URL=http://headroom:8787/\n"
+        "HEADROOM_SERVICE_API_KEY=secret\n"
+        "HEADROOM_SERVICE_TIMEOUT_SECONDS=12.5\n"
+        "HEADROOM_COMPRESSION_MODEL=gpt-4o\n",
+        encoding="utf-8",
+    )
+
+    settings = load_settings(env_file)
+
+    assert settings.environment == "production"
+    assert settings.headroom_service.url == "http://headroom:8787"
+    assert settings.headroom_service.api_key == "secret"
+    assert settings.headroom_service.timeout_seconds == 12.5
+    assert settings.headroom_service.compression_model == "gpt-4o"
+
+
+def test_headroom_service_rejects_invalid_environment(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _clear_headroom_env(monkeypatch)
+    env_file = tmp_path / ".env"
+    env_file.write_text("DREAM_ENV=staging\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="DREAM_ENV must be development or production"):
+        load_settings(env_file)
+
+
+def test_headroom_service_rejects_non_positive_timeout(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _clear_headroom_env(monkeypatch)
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "HEADROOM_SERVICE_TIMEOUT_SECONDS=0\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="HEADROOM_SERVICE_TIMEOUT_SECONDS must be positive",
+    ):
         load_settings(env_file)
 
 

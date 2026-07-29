@@ -35,7 +35,16 @@ class RedisSessionSettings:
 
 
 @dataclass(frozen=True)
+class HeadroomServiceSettings:
+    url: str = ""
+    api_key: str = ""
+    timeout_seconds: float = 30.0
+    compression_model: str = ""
+
+
+@dataclass(frozen=True)
 class DreamSettings:
+    environment: str = "development"
     home: str = "~/.dream"
     review_backend: str = "deterministic"
     review_model: str = ""
@@ -64,6 +73,9 @@ class DreamSettings:
     user_persona_limit: int = 1200
     validation_require_active_writeback: bool = False
     redis_session: RedisSessionSettings = field(default_factory=RedisSessionSettings)
+    headroom_service: HeadroomServiceSettings = field(
+        default_factory=HeadroomServiceSettings
+    )
     internship_source: InternshipSourceSettings = field(
         default_factory=InternshipSourceSettings
     )
@@ -142,6 +154,22 @@ def load_settings(path: Path | None = None) -> DreamSettings:
     def value(name: str, default: str = "") -> str:
         return os.environ.get(name, file_values.get(name, default)).strip()
 
+    environment = value("DREAM_ENV", "development").casefold()
+    if environment not in {"development", "production"}:
+        raise ValueError("DREAM_ENV must be development or production")
+
+    headroom_service = HeadroomServiceSettings(
+        url=value("HEADROOM_SERVICE_URL", "").rstrip("/"),
+        api_key=value("HEADROOM_SERVICE_API_KEY", ""),
+        timeout_seconds=_positive_float(
+            value("HEADROOM_SERVICE_TIMEOUT_SECONDS", "30"),
+            "HEADROOM_SERVICE_TIMEOUT_SECONDS",
+        ),
+        compression_model=value("HEADROOM_COMPRESSION_MODEL", ""),
+    )
+    if environment == "production" and not headroom_service.url:
+        raise ValueError("HEADROOM_SERVICE_URL is required in production")
+
     review_backend = value("DREAM_REVIEW_BACKEND", "deterministic").lower()
     if review_backend not in {"deterministic", "openai"}:
         raise ValueError("DREAM_REVIEW_BACKEND must be deterministic or openai")
@@ -200,6 +228,7 @@ def load_settings(path: Path | None = None) -> DreamSettings:
         )
 
     return DreamSettings(
+        environment=environment,
         home=value("DREAM_HOME", "~/.dream"),
         review_backend=review_backend,
         review_model=value("DREAM_REVIEW_MODEL"),
@@ -273,6 +302,7 @@ def load_settings(path: Path | None = None) -> DreamSettings:
             "DREAM_VALIDATION_REQUIRE_ACTIVE_WRITEBACK",
         ),
         redis_session=redis_session,
+        headroom_service=headroom_service,
         internship_source=source,
     )
 
