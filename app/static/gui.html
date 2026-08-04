@@ -10,11 +10,11 @@
   to work on a machine that cannot reliably reach a CDN, and because a tool
   for inspecting storage should not itself depend on the network.
 -->
-<html lang="en">
+<html lang="zh-CN">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Memory graph</title>
+<title>记忆图谱</title>
 <style>
   :root {
     --bg: #e9edf2;
@@ -183,17 +183,17 @@
 <body>
 
 <header>
-  <h1>Memory graph</h1>
+  <h1>记忆图谱</h1>
   <div class="row" style="width:auto">
-    <label for="user" style="margin:0">User</label>
+    <label for="user" style="margin:0">用户</label>
     <input id="user" value="demo" style="width:130px; font-family:var(--mono)">
-    <label for="token" style="margin:0">Token</label>
-    <input id="token" type="password" placeholder="token, or sign in"
+    <label for="token" style="margin:0">令牌</label>
+    <input id="token" type="password" placeholder="令牌，或登录获取"
            style="width:130px; font-family:var(--mono)" autocomplete="off">
-    <button class="sm" id="load">Load</button>
-    <button class="sm ghost" id="signin">Sign in</button>
-    <button class="sm ghost" id="signout">Sign out</button>
-    <label for="depth" style="margin:0">Depth</label>
+    <button class="sm" id="load">加载</button>
+    <button class="sm ghost" id="signin">登录</button>
+    <button class="sm ghost" id="signout">退出</button>
+    <label for="depth" style="margin:0">深度</label>
     <select id="depth" style="width:56px">
       <option>1</option><option selected>2</option><option>3</option><option>4</option>
     </select>
@@ -205,32 +205,32 @@
 
 <aside class="left">
   <section>
-    <h2>Add entity</h2>
-    <label for="ntype">Type</label>
+    <h2>添加实体</h2>
+    <label for="ntype">类型</label>
     <select id="ntype">
       <option>person</option><option>organization</option><option>project</option>
       <option>event</option><option>concept</option><option>artifact</option>
       <option>preference</option><option>decision</option>
     </select>
-    <label for="ntitle">Title</label>
-    <input id="ntitle" placeholder="Alice Chen">
-    <label for="nsummary">Summary</label>
-    <textarea id="nsummary" placeholder="What should be remembered about this?"></textarea>
+    <label for="ntitle">标题</label>
+    <input id="ntitle" placeholder="陈爱丽">
+    <label for="nsummary">摘要</label>
+    <textarea id="nsummary" placeholder="关于这个实体需要记住什么？"></textarea>
     <div style="height:8px"></div>
-    <button id="create">Add entity</button>
+    <button id="create">添加实体</button>
   </section>
 
   <section style="flex:1; display:flex; flex-direction:column; min-height:0">
-    <h2>Entities <span id="count" class="muted"></span></h2>
-    <input id="filter" placeholder="Filter by name or type">
+    <h2>实体 <span id="count" class="muted"></span></h2>
+    <input id="filter" placeholder="按名称或类型筛选">
     <div class="elist" id="elist" style="margin:9px -14px 0; overflow-y:auto"></div>
   </section>
 
   <section>
-    <h2>Assess text</h2>
-    <textarea id="atext" placeholder="Paste conversation text to score against this graph"></textarea>
+    <h2>评估文本</h2>
+    <textarea id="atext" placeholder="粘贴对话文本，评估其与图谱的相关性"></textarea>
     <div style="height:8px"></div>
-    <button class="ghost" id="assess">Assess</button>
+    <button class="ghost" id="assess">评估</button>
     <div id="aout" style="margin-top:9px"></div>
   </section>
 </aside>
@@ -239,21 +239,20 @@
   <svg id="svg"><g id="viewport"></g></svg>
   <div class="empty" id="empty" hidden>
     <div>
-      <p style="margin:0 0 6px"><strong>Nothing stored for this user yet.</strong></p>
-      <p style="margin:0">Add an entity on the left, or switch users above.</p>
-      <p style="margin:8px 0 0; font-size:12px">Double-click a node to expand its
-      neighbourhood. A dashed ring means there is more to load.</p>
+      <p style="margin:0 0 6px"><strong>该用户尚未存储任何内容。</strong></p>
+      <p style="margin:0">在左侧添加实体，或在上方切换用户。</p>
+      <p style="margin:8px 0 0; font-size:12px">双击节点可展开其邻域。虚线环表示还有更多内容可加载。</p>
     </div>
   </div>
   <button id="more" hidden class="sm ghost"
           style="position:absolute; right:12px; top:12px; width:auto">
-    More graph beyond this — increase depth
+    图谱之外还有更多 — 增加深度
   </button>
   <div class="legend" id="legend"></div>
 </main>
 
 <aside class="right" id="detail">
-  <section><h2>Selected entity</h2><p class="muted">Click a node to edit it.</p></section>
+  <section><h2>已选实体</h2><p class="muted">点击节点以编辑。</p></section>
 </aside>
 
 <div id="toast" role="status" aria-live="polite"></div>
@@ -303,8 +302,8 @@ async function api(method, path, body) {
     let detail = data && data.detail ? (typeof data.detail === "string"
       ? data.detail : JSON.stringify(data.detail)) : `HTTP ${res.status}`;
     // 401/403 are configuration mistakes, not bugs; say which.
-    if (res.status === 401) detail += " — paste a token in the Token field.";
-    if (res.status === 403) detail += " — that token belongs to a different user.";
+    if (res.status === 401) detail += " — 请在令牌字段中粘贴令牌。";
+    if (res.status === 403) detail += " — 该令牌属于其他用户。";
     throw new Error(detail);
   }
   return data;
@@ -327,14 +326,14 @@ async function load(keepSelection) {
     graph = g;
     loaded = new Set(g.nodes.map(n => n.wiki_id));
     entities = g.nodes;   // the sidebar list is filled separately, from /wiki
-  } catch (e) { toast("Could not load: " + e.message, true); return; }
+  } catch (e) { toast("加载失败: " + e.message, true); return; }
   await loadCatalogue();
 
   const s = await api("GET", "/wiki/_stats").catch(() => null);
   const shown = graph.nodes.length;
   $("stats").textContent = s
-    ? `showing ${shown} of ${s.entities} entities · ${s.edges} edges total`
-    : `showing ${shown}`;
+    ? `显示 ${shown} / ${s.entities} 个实体 · 共 ${s.edges} 条边`
+    : `显示 ${shown}`;
   $("empty").hidden = shown > 0;
   // `truncated` means the walk hit max_nodes with frontier left over, so the
   // user is looking at part of a larger graph. Without surfacing it there is
@@ -378,8 +377,8 @@ async function expand(wikiId) {
     for (const n of g.nodes) loaded.add(n.wiki_id);
     const added = g.nodes.filter(n => !graph.nodes.some(x => x.wiki_id === n.wiki_id)).length;
     await load(true);
-    toast(added ? `Added ${added} connected ${added === 1 ? "entity" : "entities"}`
-                : "Nothing further connected");
+    toast(added ? `新增 ${added} 个关联${added === 1 ? "实体" : "实体"}`
+                : "没有更多关联实体");
   } catch (e) { toast(e.message, true); }
 }
 
@@ -393,7 +392,7 @@ async function loadCatalogue() {
     catalogue = rows;
     $("count").textContent = rows.length ? `(${rows.length})` : "";
     renderList();
-  } catch { /* the graph is still usable without the sidebar */ }
+  } catch { /* 即使侧边栏出问题，图谱仍然可用 */ }
 }
 
 /* ---------------- force layout ----------------
@@ -537,7 +536,7 @@ async function flushPositions() {
     await api("POST", "/wiki/layout", {positions});
   } catch (e) {
     // Layout is cosmetic; a failure must not interrupt editing.
-    console.warn("could not save positions:", e.message);
+    console.warn("无法保存位置:", e.message);
   }
 }
 
@@ -548,14 +547,14 @@ function renderList() {
     <div class="eitem" role="option" data-id="${e.wiki_id}" aria-selected="${e.wiki_id === selected}">
       <span class="dot" style="background:${colour(e.type)}"></span>
       <span class="tt"><div>${esc(e.title)}${loaded.has(e.wiki_id) ? "" :
-        ' <span class="muted" style="font-size:10px">not shown</span>'}</div>
+        ' <span class="muted" style="font-size:10px">未显示</span>'}</div>
         <div class="id">${esc(e.wiki_id)}</div></span>
-    </div>`).join("") || `<p class="muted" style="padding:0 14px">No matches.</p>`;
+    </div>`).join("") || `<p class="muted" style="padding:0 14px">无匹配结果。</p>`;
 }
 
 function select(id) { selected = id; renderList(); showDetail(id); draw(); }
 function clearDetail() {
-  $("detail").innerHTML = `<section><h2>Selected entity</h2><p class="muted">Click a node to edit it.</p></section>`;
+  $("detail").innerHTML = `<section><h2>已选实体</h2><p class="muted">点击节点以编辑。</p></section>`;
 }
 
 /* ---------------- detail / editing ---------------- */
@@ -566,7 +565,7 @@ async function showDetail(id) {
   try {
     e = await api("GET", `/wiki/${type}/${rest.join("/")}?touch=false`);
   } catch (err) {
-    $("detail").innerHTML = `<section><h2>Selected entity</h2>
+    $("detail").innerHTML = `<section><h2>已选实体</h2>
       <p class="muted">${esc(err.message)}</p></section>`;
     return;
   }
@@ -574,7 +573,7 @@ async function showDetail(id) {
   const others = entities.filter(x => x.wiki_id !== id);
   $("detail").innerHTML = `
     <section>
-      <h2>Selected entity</h2>
+      <h2>已选实体</h2>
       <span class="pill" style="background:${colour(e.type)}">${esc(e.type)}</span>
       <div style="font:600 17px var(--sans); margin:7px 0 2px">${esc(e.title)}</div>
       <div class="id" style="font:11px var(--mono); color:var(--ink-soft)">${esc(e.wiki_id)}</div>
@@ -582,67 +581,67 @@ async function showDetail(id) {
         const n = nodes.find(x => x.id === e.wiki_id);
         return n && n.hidden > 0
           ? `<div style="height:8px"></div>
-             <button class="ghost" id="d_expand">Show ${n.hidden} connected
-               ${n.hidden === 1 ? "entity" : "entities"}</button>
-             <p class="muted" style="margin:5px 0 0; font-size:11px">Or double-click the node.</p>`
+             <button class="ghost" id="d_expand">显示 ${n.hidden} 个关联
+               ${n.hidden === 1 ? "实体" : "实体"}</button>
+             <p class="muted" style="margin:5px 0 0; font-size:11px">或双击节点。</p>`
           : "";
       })()}
 
-      <label for="d_alias">Also known as</label>
-      <input id="d_alias" value="${esc((e.aliases || []).join(", "))}" placeholder="comma separated">
-      <label for="d_sig">Significance (0-1)</label>
+      <label for="d_alias">别名</label>
+      <input id="d_alias" value="${esc((e.aliases || []).join(", "))}" placeholder="逗号分隔">
+      <label for="d_sig">重要性 (0-1)</label>
       <input id="d_sig" type="number" min="0" max="1" step="0.05" value="${e.metadata.significance}">
-      <label for="d_add">Add to summary</label>
-      <textarea id="d_add" placeholder="Appended, not replaced"></textarea>
+      <label for="d_add">追加摘要</label>
+      <textarea id="d_add" placeholder="追加内容，不覆盖原有摘要"></textarea>
       <div style="height:8px"></div>
-      <button id="d_save">Save changes</button>
+      <button id="d_save">保存修改</button>
       <div style="height:8px"></div>
-      <details><summary class="muted" style="cursor:pointer">Current summary</summary>
+      <details><summary class="muted" style="cursor:pointer">当前摘要</summary>
         <p class="muted" style="white-space:pre-wrap">${esc(e.summary) || "&mdash;"}</p></details>
     </section>
 
     <section>
-      <h2>Facts (${e.facts.length})</h2>
+      <h2>事实 (${e.facts.length})</h2>
       ${e.facts.map(f => `
         <div class="item">
-          <div class="id">${esc(f.fact_id)} &middot; confidence ${f.confidence}</div>
+          <div class="id">${esc(f.fact_id)} · 置信度 ${f.confidence}</div>
           <textarea data-fact="${esc(f.fact_id)}" style="margin-top:5px">${esc(f.text)}</textarea>
           <div class="row" style="margin-top:5px">
-            <button class="sm ghost" data-savefact="${esc(f.fact_id)}">Save</button>
-            <button class="sm danger" data-delfact="${esc(f.fact_id)}">Remove</button>
+            <button class="sm ghost" data-savefact="${esc(f.fact_id)}">保存</button>
+            <button class="sm danger" data-delfact="${esc(f.fact_id)}">删除</button>
           </div>
-        </div>`).join("") || `<p class="muted">No facts recorded.</p>`}
-      <label for="f_new">New fact</label>
-      <textarea id="f_new" placeholder="One claim about this entity"></textarea>
+        </div>`).join("") || `<p class="muted">暂无记录的事实。</p>`}
+      <label for="f_new">新增事实</label>
+      <textarea id="f_new" placeholder="关于该实体的一条陈述"></textarea>
       <div style="height:6px"></div>
-      <button class="ghost" id="f_add">Add fact</button>
+      <button class="ghost" id="f_add">添加事实</button>
     </section>
 
     <section>
-      <h2>Relations (${e.relations.length})</h2>
+      <h2>关系 (${e.relations.length})</h2>
       ${e.relations.map(r => `
         <div class="item">
           <div class="id">${esc(r.relation_id)} &middot; ${esc(r.category)}</div>
           <div style="margin:3px 0"><strong>${esc(r.label || "—")}</strong> &rarr;
             <span style="font-family:var(--mono); font-size:12px">${esc(r.target)}</span></div>
-          <button class="sm danger" data-delrel="${esc(r.relation_id)}">Remove</button>
-        </div>`).join("") || `<p class="muted">No relations.</p>`}
-      <label for="r_target">Link to</label>
+          <button class="sm danger" data-delrel="${esc(r.relation_id)}">删除</button>
+        </div>`).join("") || `<p class="muted">暂无关系。</p>`}
+      <label for="r_target">关联到</label>
       <select id="r_target">${others.map(o =>
         `<option value="${esc(o.wiki_id)}">${esc(o.title)} — ${esc(o.wiki_id)}</option>`).join("")}</select>
       <div class="row" style="margin-top:6px">
         <select id="r_cat">${CATS.map(c => `<option>${c}</option>`).join("")}</select>
-        <input id="r_label" placeholder="verb, e.g. leads">
+        <input id="r_label" placeholder="动词，如：领导">
       </div>
       <div style="height:6px"></div>
-      <button class="ghost" id="r_add" ${others.length ? "" : "disabled"}>Add relation</button>
+      <button class="ghost" id="r_add" ${others.length ? "" : "disabled"}>添加关系</button>
     </section>
 
     <section>
-      <h2>Danger zone</h2>
-      <p class="muted">Removing an entity also strips relations pointing at it.</p>
+      <h2>危险操作</h2>
+      <p class="muted">删除实体会同时移除指向它的所有关系。</p>
       <div style="height:6px"></div>
-      <button class="danger" id="d_del">Delete this entity</button>
+      <button class="danger" id="d_del">删除此实体</button>
     </section>`;
 
   const path = `/wiki/${type}/${rest.join("/")}`;
@@ -658,13 +657,13 @@ async function showDetail(id) {
       significance: parseFloat($("d_sig").value),
       summary_append: $("d_add").value.trim() || null,
     });
-    toast("Saved " + e.wiki_id); await load(true);
+    toast("已保存 " + e.wiki_id); await load(true);
   });
   $("f_add").onclick = guard(async () => {
     const text = $("f_new").value.trim();
-    if (!text) return toast("Write the fact first", true);
+    if (!text) return toast("请先填写事实内容", true);
     await api("POST", path + "/facts", {text, confidence: 1.0});
-    toast("Fact added"); await load(true);
+    toast("事实已添加"); await load(true);
   });
   $("r_add").onclick = guard(async () => {
     await api("POST", path + "/relations", {
@@ -672,26 +671,26 @@ async function showDetail(id) {
       category: $("r_cat").value,
       label: $("r_label").value.trim(),
     });
-    toast("Relation added"); await load(true);
+    toast("关系已添加"); await load(true);
   });
   $("d_del").onclick = guard(async () => {
-    if (!confirm(`Delete ${e.wiki_id}? This cannot be undone.`)) return;
+    if (!confirm(`确定删除 ${e.wiki_id}？此操作不可撤销。`)) return;
     await api("DELETE", path + "?hard_delete=true&cascade=true");
-    toast("Deleted " + e.wiki_id); selected = null; await load(false);
+    toast("已删除 " + e.wiki_id); selected = null; await load(false);
   });
   $("detail").querySelectorAll("[data-savefact]").forEach(b => b.onclick = guard(async () => {
     const id2 = b.dataset.savefact;
     const ta = $("detail").querySelector(`[data-fact="${id2}"]`);
     await api("PATCH", `${path}/facts/${id2}`, {text: ta.value});
-    toast("Fact updated"); await load(true);
+    toast("事实已更新"); await load(true);
   }));
   $("detail").querySelectorAll("[data-delfact]").forEach(b => b.onclick = guard(async () => {
     await api("DELETE", `${path}/facts/${b.dataset.delfact}`);
-    toast("Fact removed"); await load(true);
+    toast("事实已删除"); await load(true);
   }));
   $("detail").querySelectorAll("[data-delrel]").forEach(b => b.onclick = guard(async () => {
     await api("DELETE", `${path}/relations/${b.dataset.delrel}`);
-    toast("Relation removed"); await load(true);
+    toast("关系已删除"); await load(true);
   }));
 }
 
@@ -721,7 +720,7 @@ $("more").onclick = () => {
   // the same depth — the user asked to see further, not just more of the same.
   const sel = $("depth");
   const next = Math.min(parseInt(sel.value, 10) + 1, 4);
-  if (next === parseInt(sel.value, 10)) { toast("Already at maximum depth"); return; }
+  if (next === parseInt(sel.value, 10)) { toast("已达到最大深度"); return; }
   sel.value = String(next);
   loaded = new Set();
   selected = null;
@@ -753,14 +752,14 @@ $("svg").addEventListener("click", () => {
 
 $("create").onclick = async () => {
   const title = $("ntitle").value.trim();
-  if (!title) return toast("Give it a title", true);
+  if (!title) return toast("请填写标题", true);
   try {
     const made = await api("PUT", "/wiki", {
       type: $("ntype").value, title,
       summary_append: $("nsummary").value.trim() || null,
     });
     $("ntitle").value = ""; $("nsummary").value = "";
-    toast("Added " + made.wiki_id);
+    toast("已添加 " + made.wiki_id);
     selected = made.wiki_id;
     await load(true);
   } catch (e) { toast(e.message, true); }
@@ -768,7 +767,7 @@ $("create").onclick = async () => {
 
 $("assess").onclick = async () => {
   const text = $("atext").value.trim();
-  if (!text) return toast("Paste some text first", true);
+  if (!text) return toast("请先粘贴文本", true);
   try {
     const r = await api("POST", "/assess", {text});
     const tone = r.decision === "store" ? "var(--ok)" : r.decision === "review" ? "var(--t-event)" : "var(--ink-soft)";
@@ -795,7 +794,7 @@ $("assess").onclick = async () => {
 
 MemAuth.install({
   onSignedIn: (data) => {
-    toast(`Signed in as ${data.username}${data.is_admin ? " (admin)" : ""}`);
+    toast(`已登录 ${data.username}${data.is_admin ? "（管理员）" : ""}`);
     // A different identity is a different memory namespace, so nothing on
     // screen belongs to the new user.
     loaded = new Set();
