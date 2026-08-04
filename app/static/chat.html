@@ -49,6 +49,11 @@
   .msg.err .body{border-color:#e6c4bc; color:var(--danger)}
   .msg .cite{margin-top:7px; padding-top:6px; border-top:1px solid var(--line-soft);
              font:11px var(--mono); color:var(--ink-soft)}
+  .msg .files{margin-top:6px; display:flex; flex-wrap:wrap; gap:3px}
+  .msg .file-badge{display:inline-flex; align-items:center; gap:3px;
+                    background:var(--bg); border:1px solid var(--line);
+                    border-radius:3px; padding:2px 7px; font-size:11px}
+  .msg .file-badge .ficon{font-size:14px}
 
   .composer{border-top:1px solid var(--line); background:var(--panel); padding:11px 14px}
   .composer .row{display:flex; gap:8px; align-items:flex-end}
@@ -64,6 +69,25 @@
   button.sm{padding:4px 9px; font-size:12px}
   :focus-visible{outline:2px solid var(--accent); outline-offset:1px}
   .hint{font-size:11px; color:var(--ink-soft); margin-top:6px}
+
+  /* attach button */
+  #attach-btn{background:transparent; border:none; color:var(--ink-soft); font-size:20px;
+              cursor:pointer; padding:4px 6px; line-height:1; border-radius:3px}
+  #attach-btn:hover{background:var(--line-soft); color:var(--ink)}
+  #file-input{display:none}
+
+  /* file chips below input */
+  #file-chips{display:flex; flex-wrap:wrap; gap:4px; margin-top:6px; min-height:0}
+  .file-chip{display:inline-flex; align-items:center; gap:5px;
+             background:var(--line-soft); border-radius:3px; padding:3px 8px;
+             font-size:11px; max-width:200px}
+  .file-chip .name{overflow:hidden; text-overflow:ellipsis; white-space:nowrap; flex:1}
+  .file-chip .sz{color:var(--ink-soft); font-size:10px; flex-shrink:0}
+  .file-chip .rm{cursor:pointer; color:var(--ink-soft); font-weight:bold;
+                 font-size:14px; line-height:1; flex-shrink:0}
+  .file-chip .rm:hover{color:var(--danger)}
+  .file-chip.uploading{opacity:.6}
+  .file-chip.failed{border:1px solid var(--danger); color:var(--danger)}
 
   aside{grid-area:side; background:var(--panel); border-left:1px solid var(--line);
         overflow-y:auto; display:flex; flex-direction:column}
@@ -129,8 +153,11 @@ That proposes changes without writing anything.</div>
     </div>
   </div>
   <div class="composer">
+    <div id="file-chips"></div>
     <div class="row">
-      <textarea id="input" placeholder="Type a message, then Enter to send (Shift+Enter for a new line)"></textarea>
+      <button id="attach-btn" title="Attach files">📎</button>
+      <input type="file" id="file-input" multiple>
+      <textarea id="input" placeholder="Type a message, or drop files here…"></textarea>
       <button id="send">Send</button>
     </div>
     <div class="hint">
@@ -221,7 +248,10 @@ function render() {
   $("log").innerHTML = messages.map(m => `
     <div class="msg ${m.role === "user" ? "user" : ""}${m.error ? " err" : ""}">
       <span class="who">${m.role === "user" ? "You" : "Bot"}</span>
-      <div class="body">${esc(m.content)}${
+      <div class="body">${esc(m.content)}${m.files && m.files.length ? `
+        <div class="files">${m.files.map(f =>
+          `<span class="file-badge"><span class="ficon">📄</span>${esc(f.name)}</span>`
+        ).join("")}</div>` : ""}${
         m.cites && m.cites.length
           ? `<div class="cite">memory: ${m.cites.map(c => esc(c.wiki_id)).join(", ")}</div>`
           : ""}</div>
@@ -237,9 +267,17 @@ function transcript() {
 
 async function send() {
   const text = $("input").value.trim();
-  if (!text) return;
+  const hasFiles = pendingFiles.some(f => f.uploaded && f.file_id);
+  if (!text && !hasFiles) return;
   $("input").value = "";
-  messages.push({role: "user", content: text});
+
+  // Grab files that are done uploading, attach them to the message
+  const attachedFiles = pendingFiles.filter(f => f.uploaded && f.file_id);
+  const fileNames = attachedFiles.map(f => ({name: f.name}));
+  pendingFiles = pendingFiles.filter(f => !f.uploaded || !f.file_id);
+  renderChips();
+
+  messages.push({role: "user", content: text || " ", files: fileNames.length ? fileNames : undefined});
   render();
 
   $("send").disabled = true;
@@ -247,12 +285,17 @@ async function send() {
   render();
 
   try {
-    const res = await api("POST", "/chat", {
+    const body = {
       messages: messages.filter(m => m.content !== "…")
                         .map(m => ({role: m.role, content: m.content})),
       use_memory: $("usemem").checked,
       session_id: sessionId,
-    });
+    };
+    // Attach the files that were sent with this message.
+    if (attachedFiles.length) {
+      body.attachments = attachedFiles.map(f => `file:${f.session_id}:${f.file_id}`);
+    }
+    const res = await api("POST", "/chat", body);
     if (res.session_id) {
       sessionId = res.session_id;
       sessionDate = new Date().toISOString().slice(0, 10);
@@ -384,7 +427,91 @@ $("apply").onclick = async () => {
   }
 };
 
-/* ---------------- wiring ---------------- */
+/* ---------------- file upload ---------------- */
+
+let pendingFiles = [];  // {name, file_id, session_id, size, uploaded, error}
+
+const fi = $("file-input");
+const chips = $("file-chips");
+
+$("attach-btn").onclick = () => fi.click();
+fi.onchange = () => { if (fi.files.length) uploadFiles(fi.files); fi.value = ""; };
+
+// Drag & drop anywhere on the page
+let dragCounter = 0;
+document.addEventListener("dragenter", e => { e.preventDefault(); dragCounter++; });
+document.addEventListener("dragleave", () => { dragCounter--; });
+document.addEventListener("dragover", e => e.preventDefault());
+document.addEventListener("drop", e => {
+  e.preventDefault();
+  dragCounter = 0;
+  if (e.dataTransfer.files.length) uploadFiles(e.dataTransfer.files);
+});
+
+// Paste files from clipboard
+$("input").addEventListener("paste", e => {
+  const items = e.clipboardData?.items;
+  if (!items) return;
+  const files = [];
+  for (const item of items) {
+    if (item.kind === "file") files.push(item.getAsFile());
+  }
+  if (files.length) { e.preventDefault(); uploadFiles(files); }
+});
+
+function fmtSize(n) {
+  if (n < 1024) return n + "B";
+  if (n < 1024*1024) return (n/1024).toFixed(1) + "KB";
+  return (n/(1024*1024)).toFixed(1) + "MB";
+}
+
+function renderChips() {
+  chips.innerHTML = pendingFiles.map((f, i) => {
+    let cls = "file-chip";
+    if (f.error) cls += " failed";
+    else if (!f.uploaded) cls += " uploading";
+    return `<span class="${cls}" title="${esc(f.name)}">
+      <span class="name">${esc(f.name)}</span>
+      <span class="sz">${f.error ? esc(f.error) : f.uploaded ? "✓" : fmtSize(f.size)}</span>
+      <span class="rm" onclick="removeFile(${i})">&times;</span>
+    </span>`;
+  }).join("");
+}
+
+function removeFile(i) { pendingFiles.splice(i, 1); renderChips(); }
+
+async function uploadFiles(fileList) {
+  if (!sessionId) {
+    sessionId = "sess-" + Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 8);
+    $("sess").textContent = "session " + sessionId;
+  }
+  for (const file of fileList) {
+    const entry = {name: file.name, file_id: null, session_id: sessionId,
+                   size: file.size, uploaded: false, error: null};
+    pendingFiles.push(entry);
+    const idx = pendingFiles.length - 1;
+    renderChips();
+    try {
+      const fd = new FormData();
+      fd.append("file", file);
+      fd.append("session_id", sessionId);
+      const res = await fetch(base() + "/files", {
+        method: "POST", headers: authHeaders(), body: fd,
+      });
+      if (!res.ok) {
+        const t = await res.text(); let d = null;
+        try { d = JSON.parse(t); } catch {}
+        throw new Error(d?.detail || `HTTP ${res.status}`);
+      }
+      const meta = await res.json();
+      pendingFiles[idx].file_id = meta.file_id;
+      pendingFiles[idx].uploaded = true;
+    } catch (e) {
+      pendingFiles[idx].error = e.message;
+    }
+    renderChips();
+  }
+}
 
 $("send").onclick = send;
 $("input").addEventListener("keydown", e => {
@@ -393,6 +520,7 @@ $("input").addEventListener("keydown", e => {
 $("clear").onclick = e => {
   e.preventDefault();
   messages = []; reviewedOps = null; reviewedFrom = null;
+  pendingFiles = []; renderChips();
   // A new conversation is a new session; keeping the old id would append
   // unrelated turns to a stored transcript.
   sessionId = null; sessionDate = null;

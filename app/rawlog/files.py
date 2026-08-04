@@ -46,7 +46,7 @@ from app.storage.backend import StorageBackend
 logger = logging.getLogger("memory_backend.files")
 
 _FILE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
-_SESSION_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+_SESSION_ID = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9._-]{0,127}$")
 
 # Attachments are injected into prompts, so an unbounded file becomes an
 # unbounded bill and an over-length request.
@@ -108,20 +108,178 @@ def suffix_of(name: str) -> str:
     return name[idx:].lower() if idx > 0 else ""
 
 
-def extract_text(data: bytes, name: str) -> tuple[str | None, str]:
-    """Returns (text, note). text is None when the file cannot be read.
+def _extract_docx(data: bytes) -> tuple[str | None, str]:
+    """Extract plain text from a .docx file (ZIP of XML).
 
-    Decoding is attempted for known-text suffixes and for anything that looks
-    like text; binary formats are refused explicitly. Handing a model decoded
-    binary produces confident invention, which is worse than telling it the
-    file is unreadable.
+    Returns (text, note). text is None on failure.
+    """
+    import io
+    import zipfile
+    from xml.etree import ElementTree
+    try:
+        with zipfile.ZipFile(io.BytesIO(data)) as zf:
+            if "word/document.xml" not in zf.namelist():
+                return None, "not a valid .docx (missing word/document.xml)"
+            xml = zf.read("word/document.xml")
+    except (zipfile.BadZipFile, IOError) as e:
+        return None, str(e)
+
+    # Word stores text in <w:t> elements inside <w:r> (runs) inside <w:p> (paragraphs).
+    ns = {"w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main"}
+    try:
+        root = ElementTree.fromstring(xml)
+    except ElementTree.ParseError as e:
+        return None, str(e)
+
+    paragraphs = []
+    for p in root.iter("{http://schemas.openxmlformats.org/wordprocessingml/2006/main}p"):
+        texts = []
+        for t in p.iter("{http://schemas.openxmlformats.org/wordprocessingml/2006/main}t"):
+            if t.text:
+                texts.append(t.text)
+        line = "".join(texts).strip()
+        if line:
+            paragraphs.append(line)
+
+    if not paragraphs:
+        return None, "no text found in document.xml"
+
+    text = "\n\n".join(paragraphs)
+    note = ""
+    if len(text) > MAX_TEXT_CHARS:
+        text = text[:MAX_TEXT_CHARS]
+        note = f"Truncated to {MAX_TEXT_CHARS} characters."
+    return text, note
+
+
+def _extract_pdf(data: bytes) -> tuple[str | None, str]:
+    """Extract text from PDF by finding text between stream/endstream.
+
+    This is a best-effort extraction that works for many PDFs without
+    external dependencies. For production, consider pdfplumber or PyMuPDF.
+    """
+    import re as _re
+    # Try to find text in uncompressed streams.
+    text_parts = []
+    # Look for text between BT and ET markers (text blocks)
+    for match in _re.finditer(rb"BT\s*(.*?)\s*ET", data, _re.DOTALL):
+        block = match.group(1)
+        # Extract text from Tj, TJ, ' operators
+        for tj in _re.finditer(rb"\(([^)]*)\)\s*Tj", block):
+            text_parts.append(tj.group(1).decode("latin-1", errors="replace"))
+    if text_parts:
+        text = " ".join(text_parts)
+        note = ""
+        if len(text) > MAX_TEXT_CHARS:
+            text = text[:MAX_TEXT_CHARS]
+            note = f"Truncated to {MAX_TEXT_CHARS} characters."
+        return text, note
+    # Fallback: try to find any readable text in the raw bytes
+    try:
+        decoded = data.decode("latin-1", errors="replace")
+        # Remove non-printable garbage but keep newlines
+        cleaned = "".join(c if c.isprintable() or c in "\n\r\t" else " " for c in decoded)
+        # Collapse whitespace
+        cleaned = _re.sub(r"[ \t]+", " ", cleaned)
+        cleaned = _re.sub(r"\n{3,}", "\n\n", cleaned)
+        cleaned = cleaned.strip()
+        if len(cleaned) > 200:
+            if len(cleaned) > MAX_TEXT_CHARS:
+                cleaned = cleaned[:MAX_TEXT_CHARS]
+            return cleaned, "Best-effort PDF extraction; formatting may be degraded."
+    except Exception:
+        pass
+    return None, "Could not extract text from PDF."
+
+
+def _extract_xlsx(data: bytes) -> tuple[str | None, str]:
+    """Extract text from .xlsx (ZIP of XML)."""
+    import io
+    import zipfile
+    from xml.etree import ElementTree
+    try:
+        with zipfile.ZipFile(io.BytesIO(data)) as zf:
+            # Read shared strings table
+            sst = {}
+            if "xl/sharedStrings.xml" in zf.namelist():
+                sst_xml = zf.read("xl/sharedStrings.xml")
+                ns = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+                root = ElementTree.fromstring(sst_xml)
+                for i, si in enumerate(root.findall(f"{{{ns}}}si")):
+                    t = si.find(f"{{{ns}}}t")
+                    sst[i] = t.text if t is not None and t.text else ""
+            # Read first sheet
+            sheets = [n for n in zf.namelist() if n.startswith("xl/worksheets/sheet")]
+            if not sheets:
+                return None, "no worksheets found"
+            sheet_xml = zf.read(sheets[0])
+            root = ElementTree.fromstring(sheet_xml)
+            ns = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+            rows = []
+            for row in root.findall(f"{{{ns}}}sheetData/{{{ns}}}row"):
+                cells = []
+                for c in row.findall(f"{{{ns}}}c"):
+                    v = c.find(f"{{{ns}}}v")
+                    if v is not None and v.text:
+                        t = c.get("t", "")
+                        cells.append(sst.get(int(v.text), v.text) if t == "s" else v.text)
+                if cells:
+                    rows.append(" | ".join(cells))
+            if not rows:
+                return None, "no data rows found"
+            text = "\n".join(rows)
+            if len(text) > MAX_TEXT_CHARS:
+                text = text[:MAX_TEXT_CHARS]
+            return text, ""
+    except Exception as e:
+        return None, str(e)
+
+
+def extract_text(data: bytes, name: str) -> tuple[str | None, str]:
+    """Returns (text, note). Tries hard to extract readable text from any file.
+
+    - .docx: XML paragraph extraction
+    - .xlsx: cell value extraction from first sheet
+    - .pdf: best-effort text extraction
+    - images (.png/.jpg/etc.): stored but not decoded to text (use vision model)
+    - everything else: tried as UTF-8, then latin-1, then reported unreadable
     """
     suffix = suffix_of(name)
 
-    if suffix in BINARY_HINTS:
-        return None, (f"{BINARY_HINTS[suffix]} files are stored but their text "
-                      f"cannot be read yet; the model was not given contents.")
+    # --- Office formats ---
+    if suffix == ".docx":
+        text, note = _extract_docx(data)
+        if text is not None:
+            return text, note
+        return None, f"Word document could not be read: {note}"
 
+    if suffix == ".xlsx":
+        text, note = _extract_xlsx(data)
+        if text is not None:
+            return text, note
+        return None, f"Excel workbook could not be read: {note}"
+
+    # --- PDF ---
+    if suffix == ".pdf":
+        text, note = _extract_pdf(data)
+        if text is not None:
+            return text, note
+        return None, f"PDF could not be read: {note}"
+
+    # --- Images: stored but not text-extractable ---
+    if suffix in (".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg"):
+        return None, ("Image files are stored but not text-extracted. "
+                      "Upload them alongside a text description.")
+
+    # --- Audio/video: stored but not text-extractable ---
+    if suffix in (".mp3", ".mp4", ".wav", ".ogg", ".webm", ".mov", ".avi"):
+        return None, (f"{suffix} media files are stored but cannot be transcribed yet.")
+
+    # --- Archives: note they exist ---
+    if suffix == ".zip":
+        return None, "ZIP archives are stored but contents are not extracted."
+
+    # --- Everything else: try to decode as text ---
     if b"\x00" in data[:4096]:
         return None, "Looks binary (contains null bytes); contents not given to the model."
 
@@ -134,12 +292,9 @@ def extract_text(data: bytes, name: str) -> tuple[str | None, str]:
     else:
         return None, "Could not decode as text; contents not given to the model."
 
+    note = ""
     if suffix not in TEXT_SUFFIXES:
-        # Decoded, but the suffix is unknown. Accept it — refusing would block
-        # perfectly readable files with unusual extensions — and say so.
         note = f"Unrecognised extension {suffix or '(none)'}; treated as plain text."
-    else:
-        note = ""
 
     if len(text) > MAX_TEXT_CHARS:
         text = text[:MAX_TEXT_CHARS]
@@ -187,16 +342,18 @@ class FileStore:
         file_id = new_file_id(when)
         text, note = extract_text(data, name)
 
-        sid = validate_session_id(session_id) if session_id else "_unsorted"
+        if not session_id:
+            raise FileError("session_id is required")
+        validate_session_id(session_id)
 
         meta = FileMeta(
-            file_id=file_id, name=safe_name(name), session_id=sid,
+            file_id=file_id, name=safe_name(name), session_id=session_id,
             size=len(data), sha256=hashlib.sha256(data).hexdigest(),
             content_type=content_type or "", text_extractable=text is not None,
             note=note, uploaded_at=when.isoformat(),
         )
 
-        base = self._dir(user_id, sid, file_id)
+        base = self._dir(user_id, session_id, file_id)
         # Bytes first: metadata pointing at content that does not exist is
         # worse than content with no metadata.
         self.backend.put_bytes(f"{base}/content", data)
@@ -204,7 +361,7 @@ class FileStore:
             f"{base}/meta.json",
             json.dumps(meta.to_dict(), ensure_ascii=False, indent=2).encode("utf-8"))
         logger.info("stored raw file %s (%s, %d bytes) for %s in session %s",
-                    file_id, meta.name, meta.size, user_id, sid)
+                    file_id, meta.name, meta.size, user_id, session_id)
         return meta
 
     def get_meta(self, user_id: str, file_id: str, session_id: str) -> FileMeta | None:
@@ -260,7 +417,7 @@ class FileStore:
         for key in self.backend.list_keys(prefix):
             # key: {user_id}/raw/{session_id}/{file_id}/...
             parts = key.removeprefix(prefix).split("/")
-            if len(parts) >= 2 and parts[0] not in ("", "_unsorted"):
+            if len(parts) >= 2:
                 seen.add(parts[0])
         return sorted(seen)
 
@@ -274,9 +431,6 @@ class FileStore:
         for sid in session_ids[:search_sessions]:
             if self.backend.get_bytes(f"{self._dir(user_id, sid, file_id)}/meta.json"):
                 return sid
-        # also check _unsorted
-        if self.backend.get_bytes(f"{self._dir(user_id, '_unsorted', file_id)}/meta.json"):
-            return "_unsorted"
         return None
 
 

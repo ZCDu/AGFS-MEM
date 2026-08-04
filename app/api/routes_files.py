@@ -37,7 +37,7 @@ def _store() -> FileStore:
 async def upload(
     user_id: str,
     file: UploadFile = File(..., description="The file to store"),
-    session_id: str = Form("", description="Conversation session it belongs to"),
+    session_id: str = Form(..., description="Conversation session this file belongs to"),
 ):
     """Store a file and report whether its text can be given to the model."""
     data = await file.read()

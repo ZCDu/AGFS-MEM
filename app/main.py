@@ -36,6 +36,25 @@ else:
                  "using whatever is already in the environment")
 
 
+def _bootstrap_admin(backend) -> None:
+    """Create a default admin account on first startup if no users exist.
+
+    Credentials: admin / admin. Change the password immediately.
+    The account is only created when the user store is completely empty.
+    """
+    from app.users import UserStore
+    store = UserStore(backend)
+    users = store.list_users()
+    if users:
+        return
+    try:
+        store.create("admin", "admin123456", user_id="admin", is_admin=True)
+        logger.info("Created default admin account (admin / admin123456). "
+                     "Change the password immediately.")
+    except Exception as e:
+        logger.warning("Could not create default admin account: %s", e)
+
+
 @asynccontextmanager
 async def _lifespan(app: FastAPI):
     yield
@@ -51,6 +70,10 @@ async def _lifespan(app: FastAPI):
     # the path that actually works.
     from app.deps import get_storage_backend
     backend = get_storage_backend()
+
+    # Bootstrap default admin account if no users exist yet.
+    _bootstrap_admin(backend)
+
     close = getattr(backend, "close", None)
     if callable(close):
         close()
