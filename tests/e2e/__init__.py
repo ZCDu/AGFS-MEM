@@ -1,1 +1,0 @@
-"""Validation feature tests."""

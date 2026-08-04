@@ -1,2 +1,0 @@
-"""Background review tests."""
-
