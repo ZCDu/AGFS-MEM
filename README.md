@@ -52,6 +52,110 @@ flowchart TD
 `short-term-memory` 负责 Redis、journals、压缩触发和 summary；Headroom 负责内容识别、
 压缩器选择及其官方 CCR；公司 Agent 负责最终模型请求和回答。
 
+## 依赖与调用方式
+
+| 组件 | 版本/形式 | 作用 | 部署位置 |
+|---|---|---|---|
+| short-term-memory | Python package `0.1.0` | Redis/journals 编排、触发、summary | 公司 Agent 进程内 |
+| Redis Server | `7.2.15` | 当前 session messages 和 summary | 外部服务 |
+| redis-py | `6.4.0` | Redis 连接池、事务和数据命令 | 项目 Python 环境 |
+| Headroom | `headroom-ai[all]==0.33.0` | 自动压缩、Proxy、官方 CCR | 独立 `uv tool` 进程 |
+| SummaryModel | 公司注入 | 提取五类 session 摘要 | 公司模型服务/adapter |
+| 最终 LLM/Agent | 公司自研 | 使用短期上下文生成回答 | 公司 Agent 系统 |
+
+### Redis 是怎么调用的
+
+Redis Server 独立部署，`short-term-memory` 不复制或运行 Redis 源码。Python 侧通过
+`redis==6.4.0` 调用：
+
+```python
+from short_term_memory.storage.redis_runtime import RedisRuntime
+
+redis_runtime = RedisRuntime.connect("redis://127.0.0.1:6379/0")
+
+runtime = build_runtime(
+    # 其他公司侧依赖省略
+    redis_client=redis_runtime.client,
+    ...
+)
+```
+
+`RedisRuntime.connect()` 使用 `redis.ConnectionPool.from_url()` 创建连接池，构造
+`redis.Redis` 客户端并执行 `PING`。该客户端注入 `build_runtime()` 后，由
+`RedisSessionContext` 调用：
+
+| 场景 | Redis 调用 |
+|---|---|
+| 写用户/助手消息 | transaction pipeline：`RPUSH` + `EXPIRE` |
+| 读取最近 N 轮 | `LRANGE` |
+| 检查 session 是否存在 | `EXISTS` |
+| 读取 summary | `GET` |
+| 获取压缩快照 | `LRANGE` + `LLEN` |
+| 写 summary 并保留最近 N 轮 | transaction pipeline：`SET EX` + `LTRIM` + `EXPIRE` |
+| 删除 session | `DEL` messages key 和 summary key |
+
+正常回答只读取 Redis。只有 Redis session 过期时，组件才根据同一 `user_id + session_id`
+从 journals 恢复最近 N 轮。
+
+### Headroom 是怎么调用的
+
+Headroom 作为独立 HTTP/Proxy 服务运行，`short-term-memory` 不 `import headroom`，也不包含
+Kompress、ONNX、PyTorch 等模型依赖。调用分为两条路径：
+
+1. **回答后的后台压缩**：`SessionCompressionJob` 调用 `HeadroomHttpClient`，向
+   `POST {HEADROOM_SERVICE_URL}/v1/compress` 发送保持 message boundary 的历史消息和
+   HMAC 去标识化 scope headers。返回的 messages 原样进入 Redis summary envelope。
+2. **下一轮真实模型请求**：`prepare_turn()` 返回
+   `headroom_proxy_url={HEADROOM_SERVICE_URL}/v1` 和同一组 `headroom_headers`。公司 Agent
+   把实际 OpenAI-compatible 请求发往该 Proxy，Headroom 再转发到上游模型，并在官方
+   支持范围内处理压缩与 CCR。
+
+```text
+公司 Agent 进程
+  ├─ short-term-memory ── redis-py ───────────────> Redis Server
+  ├─ 后台 SessionCompressionJob ── /v1/compress ─> Headroom Service
+  └─ 实际 LLM 请求 ── /v1/chat/completions ──────> Headroom Proxy ──> 上游模型
+```
+
+Headroom 自己决定使用 ContentRouter、SmartCrusher、文本/代码/日志压缩器或 Kompress；
+本项目只决定何时触发，并通过 `CompressionClient` 保持压缩服务可替换。
+
+## 项目结构
+
+```text
+.
+├── src/short_term_memory/
+│   ├── __init__.py                       # 稳定公开 API
+│   ├── config.py                         # 环境变量和运行设置
+│   ├── models.py                         # PreparedTurn、summary、压缩结果模型
+│   ├── ports.py                          # 公司适配器与外部组件 Protocol
+│   ├── api/
+│   │   ├── conversation_handler.py       # 回答前/回答后会话编排
+│   │   └── runtime.py                    # build_runtime 与运行时 facade
+│   ├── storage/
+│   │   ├── redis_runtime.py              # redis-py 连接生命周期
+│   │   ├── redis_session_context.py      # Redis session、TTL、history、恢复
+│   │   ├── journal_store.py              # 按 session 追加/读取 JSONL
+│   │   └── vfs_adapter.py                # 用户隔离 journals 目录
+│   ├── compression/
+│   │   ├── headroom_client.py            # POST /v1/compress HTTP adapter
+│   │   ├── policy.py                     # PLAN 三类 OR 触发条件
+│   │   ├── scope.py                      # HMAC 去标识化 Headroom scope
+│   │   ├── summary.py                    # 五类短期摘要生成与校验
+│   │   └── telemetry.py                  # 无对话正文的指标状态
+│   └── jobs/
+│       └── session_compression_job.py    # 后台压缩、摘要、写 Redis、重试
+├── tests/
+│   ├── api/                              # Agent SDK 测试
+│   ├── storage/                          # Redis/journals 单元测试
+│   ├── compression/                      # Headroom adapter/policy/summary 测试
+│   ├── jobs/                             # 后台任务测试
+│   └── integration/                      # opt-in 真实服务测试
+├── compose.redis.yml
+├── .env.example
+└── pyproject.toml
+```
+
 ## 快速开始
 
 ### 1. 获取并安装项目
@@ -234,57 +338,6 @@ runtime.complete_turn(prepared, assistant_content=assistant_text)
 `openai` SDK 属于公司 Agent 的依赖，不是 `short-term-memory` 的运行依赖。若使用 Anthropic
 或其他供应商，应在公司 Agent adapter 中使用对应的 Headroom Proxy 路径，但
 `prepare_turn()` / `complete_turn()` 边界不变。
-
-## 依赖与部署关系
-
-| 组件 | 版本/形式 | 作用 | 部署位置 |
-|---|---|---|---|
-| short-term-memory | Python package `0.1.0` | Redis/journals 编排、触发、summary | 公司 Agent 进程内 |
-| Redis Server | `7.2.15` | 当前 session messages 和 summary | 外部服务 |
-| redis-py | `6.4.0` | Redis Python 客户端 | 项目 Python 环境 |
-| Headroom | `headroom-ai[all]==0.33.0` | 自动压缩、Proxy、官方 CCR | 独立 `uv tool` 进程 |
-| SummaryModel | 公司注入 | 提取五类 session 摘要 | 公司模型服务/adapter |
-| 最终 LLM/Agent | 公司自研 | 使用短期上下文生成回答 | 公司 Agent 系统 |
-
-`short-term-memory` 不复制 Redis Server 或 Headroom 源码，不包含 Kompress、ONNX、PyTorch
-等 Headroom 内部模型依赖。以后替换压缩服务时，可实现现有 `CompressionClient` 边界，
-无需改变 Redis 和 Agent SDK。
-
-## 项目结构
-
-```text
-.
-├── src/short_term_memory/
-│   ├── __init__.py                       # 稳定公开 API
-│   ├── config.py                         # 环境变量和运行设置
-│   ├── models.py                         # PreparedTurn、summary、压缩结果模型
-│   ├── ports.py                          # 公司适配器与外部组件 Protocol
-│   ├── api/
-│   │   ├── conversation_handler.py       # 回答前/回答后会话编排
-│   │   └── runtime.py                    # build_runtime 与运行时 facade
-│   ├── storage/
-│   │   ├── redis_runtime.py              # redis-py 连接生命周期
-│   │   ├── redis_session_context.py      # Redis session、TTL、history、恢复
-│   │   ├── journal_store.py              # 按 session 追加/读取 JSONL
-│   │   └── vfs_adapter.py                # 用户隔离 journals 目录
-│   ├── compression/
-│   │   ├── headroom_client.py            # POST /v1/compress HTTP adapter
-│   │   ├── policy.py                     # PLAN 三类 OR 触发条件
-│   │   ├── scope.py                      # HMAC 去标识化 Headroom scope
-│   │   ├── summary.py                    # 五类短期摘要生成与校验
-│   │   └── telemetry.py                  # 无对话正文的指标状态
-│   └── jobs/
-│       └── session_compression_job.py    # 后台压缩、摘要、写 Redis、重试
-├── tests/
-│   ├── api/                              # Agent SDK 测试
-│   ├── storage/                          # Redis/journals 单元测试
-│   ├── compression/                      # Headroom adapter/policy/summary 测试
-│   ├── jobs/                             # 后台任务测试
-│   └── integration/                      # opt-in 真实服务测试
-├── compose.redis.yml
-├── .env.example
-└── pyproject.toml
-```
 
 ## 核心接口
 
