@@ -3,9 +3,9 @@ requires = ["setuptools>=77.0,<83"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "dream-memory-service"
+name = "short-term-memory"
 version = "0.1.0"
-description = "Background memory refinement for evolving user profiles and AI decisions"
+description = "Redis and Headroom short-term memory SDK for agent applications"
 readme = "README.md"
 requires-python = ">=3.11,<3.14"
 dependencies = [
