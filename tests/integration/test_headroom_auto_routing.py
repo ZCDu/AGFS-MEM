@@ -9,8 +9,10 @@ import pytest
 
 
 pytestmark = pytest.mark.skipif(
-    os.environ.get("DREAM_RUN_HEADROOM_AUTO_ROUTING") != "1",
-    reason="set DREAM_RUN_HEADROOM_AUTO_ROUTING=1 for ContentRouter tests",
+    os.environ.get("SHORT_TERM_MEMORY_RUN_HEADROOM_AUTO_ROUTING") != "1",
+    reason=(
+        "set SHORT_TERM_MEMORY_RUN_HEADROOM_AUTO_ROUTING=1 for ContentRouter tests"
+    ),
 )
 
 

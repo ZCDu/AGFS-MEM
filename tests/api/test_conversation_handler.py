@@ -3,10 +3,10 @@ from pathlib import Path
 
 from dream.api.conversation_handler import (
     ConversationHandler,
-    HeadroomPolicy,
     RedisSessionContext,
 )
-from dream.api.optimization_scope import OptimizationScopeFactory
+from short_term_memory.compression.policy import HeadroomPolicy
+from short_term_memory.compression.scope import OptimizationScopeFactory
 from short_term_memory.storage.journal_store import JournalMessageEvent, JournalStore
 from short_term_memory.storage.vfs_adapter import VFSAdapter
 

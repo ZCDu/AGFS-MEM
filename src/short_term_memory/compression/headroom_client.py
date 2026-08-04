@@ -7,11 +7,11 @@ from typing import Any, Mapping
 
 import httpx
 
-from dream.integrations.headroom_telemetry import (
+from short_term_memory.compression.telemetry import (
     HeadroomTelemetry,
     InMemoryHeadroomTelemetry,
 )
-from dream.memory.session_compression import (
+from short_term_memory.models import (
     HeadroomCompressionResult,
     HeadroomCompressionStatus,
     HeadroomFailureReason,

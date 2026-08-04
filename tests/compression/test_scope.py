@@ -1,8 +1,8 @@
 import pytest
 
-import dream.api.optimization_scope as optimization_scope_module
-from dream.api.optimization_scope import OptimizationScopeFactory
-from dream.integrations.headroom_telemetry import InMemoryHeadroomTelemetry
+import short_term_memory.compression.scope as optimization_scope_module
+from short_term_memory.compression.scope import OptimizationScopeFactory
+from short_term_memory.compression.telemetry import InMemoryHeadroomTelemetry
 
 
 def test_scope_is_stable_private_and_session_isolated() -> None:

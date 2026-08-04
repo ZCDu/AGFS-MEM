@@ -4,8 +4,8 @@ from pathlib import Path
 
 from dream.api.short_term_runtime import build_short_term_runtime
 from dream.config import DreamSettings, HeadroomServiceSettings
-from dream.integrations.headroom_client import HeadroomHttpClient
-from dream.memory.session_compression import (
+from short_term_memory.compression.headroom_client import HeadroomHttpClient
+from short_term_memory.models import (
     HeadroomCompressionResult,
     HeadroomCompressionStatus,
 )

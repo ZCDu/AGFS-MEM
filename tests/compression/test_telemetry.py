@@ -1,4 +1,4 @@
-from dream.integrations.headroom_telemetry import InMemoryHeadroomTelemetry
+from short_term_memory.compression.telemetry import InMemoryHeadroomTelemetry
 
 
 def test_in_memory_telemetry_records_required_metrics() -> None:

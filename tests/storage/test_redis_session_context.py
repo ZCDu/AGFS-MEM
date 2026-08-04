@@ -4,8 +4,8 @@ from pathlib import Path
 
 import pytest
 
-from dream.api.conversation_handler import HeadroomPolicy
-from dream.integrations.headroom_telemetry import InMemoryHeadroomTelemetry
+from short_term_memory.compression.policy import HeadroomPolicy
+from short_term_memory.compression.telemetry import InMemoryHeadroomTelemetry
 from short_term_memory.storage.journal_store import JournalStore
 from short_term_memory.storage.redis_session_context import RedisSessionContext
 from short_term_memory.storage.vfs_adapter import VFSAdapter

@@ -4,7 +4,7 @@ from dataclasses import dataclass
 import hashlib
 import hmac
 
-from dream.integrations.headroom_telemetry import HeadroomTelemetry
+from short_term_memory.compression.telemetry import HeadroomTelemetry
 
 
 @dataclass(frozen=True)

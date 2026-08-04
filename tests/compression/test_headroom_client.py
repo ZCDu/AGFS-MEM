@@ -6,9 +6,9 @@ import tomllib
 import httpx
 import pytest
 
-from dream.integrations.headroom_client import HeadroomHttpClient
-from dream.integrations.headroom_telemetry import InMemoryHeadroomTelemetry
-from dream.memory.session_compression import (
+from short_term_memory.compression.headroom_client import HeadroomHttpClient
+from short_term_memory.compression.telemetry import InMemoryHeadroomTelemetry
+from short_term_memory.models import (
     HeadroomCompressionStatus,
     HeadroomFailureReason,
 )
@@ -21,7 +21,7 @@ MESSAGES = (
 )
 
 
-def test_dream_does_not_install_headroom_python_runtime() -> None:
+def test_package_does_not_install_headroom_python_runtime() -> None:
     project = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
     dependencies = project["project"]["dependencies"]
 
@@ -30,9 +30,9 @@ def test_dream_does_not_install_headroom_python_runtime() -> None:
     )
 
 
-def test_dream_source_does_not_import_headroom_package() -> None:
+def test_package_source_does_not_import_headroom_package() -> None:
     offenders = []
-    for path in (ROOT / "src" / "dream").rglob("*.py"):
+    for path in (ROOT / "src" / "short_term_memory").rglob("*.py"):
         text = path.read_text(encoding="utf-8")
         if "from headroom" in text or "import headroom" in text:
             offenders.append(path.relative_to(ROOT).as_posix())
@@ -40,9 +40,9 @@ def test_dream_source_does_not_import_headroom_package() -> None:
     assert offenders == []
 
 
-def test_dream_source_does_not_implement_ccr_retrieval() -> None:
+def test_package_source_does_not_implement_ccr_retrieval() -> None:
     offenders = []
-    for path in (ROOT / "src" / "dream").rglob("*.py"):
+    for path in (ROOT / "src" / "short_term_memory").rglob("*.py"):
         text = path.read_text(encoding="utf-8")
         if "headroom_retrieve" in text or "recall_references" in text:
             offenders.append(path.relative_to(ROOT).as_posix())

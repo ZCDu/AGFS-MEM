@@ -7,15 +7,15 @@ from typing import Callable
 
 from dream.api.conversation_handler import (
     ConversationHandler,
-    HeadroomPolicy,
     RedisClient,
     RedisSessionContext,
     TokenEstimator,
 )
-from dream.api.optimization_scope import OptimizationScopeFactory
 from dream.config import DreamSettings
-from dream.integrations.headroom_client import HeadroomHttpClient
-from dream.integrations.headroom_telemetry import (
+from short_term_memory.compression.headroom_client import HeadroomHttpClient
+from short_term_memory.compression.policy import HeadroomPolicy
+from short_term_memory.compression.scope import OptimizationScopeFactory
+from short_term_memory.compression.telemetry import (
     HeadroomTelemetry,
     InMemoryHeadroomTelemetry,
 )

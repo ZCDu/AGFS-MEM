@@ -5,8 +5,13 @@ from datetime import datetime, timedelta, timezone
 import json
 from typing import Any, Callable, Protocol
 
-from dream.api.optimization_scope import OptimizationScope, OptimizationScopeFactory
-from dream.integrations.headroom_telemetry import HeadroomTelemetry
+from short_term_memory.compression.policy import HeadroomPolicy
+from short_term_memory.compression.scope import (
+    OptimizationScope,
+    OptimizationScopeFactory,
+)
+from short_term_memory.compression.telemetry import HeadroomTelemetry
+from short_term_memory.models import SessionSummaryDocument
 from short_term_memory.storage.journal_store import (
     JournalFileEvent,
     JournalMessageEvent,
@@ -72,38 +77,6 @@ class RecoveryCompressionQueue(Protocol):
 class CompressionSnapshot:
     messages: tuple[dict[str, Any], ...]
     processed_message_count: int
-
-
-@dataclass(frozen=True)
-class HeadroomPolicy:
-    context_window_tokens: int
-    trigger_ratio: float
-    max_messages: int
-    max_session_seconds: int
-
-    def __post_init__(self) -> None:
-        if not 0.60 <= self.trigger_ratio <= 0.70:
-            raise ValueError("trigger_ratio must be between 0.60 and 0.70")
-        if self.context_window_tokens < 1:
-            raise ValueError("context_window_tokens must be positive")
-        if self.max_messages < 1:
-            raise ValueError("max_messages must be positive")
-        if self.max_session_seconds < 1:
-            raise ValueError("max_session_seconds must be positive")
-
-    def should_compress(
-        self,
-        *,
-        estimated_tokens: int,
-        message_count: int,
-        session_seconds: int,
-    ) -> bool:
-        return (
-            estimated_tokens
-            >= self.context_window_tokens * self.trigger_ratio
-            or message_count >= self.max_messages
-            or session_seconds >= self.max_session_seconds
-        )
 
 
 class RedisSessionContext:
@@ -354,8 +327,6 @@ class RedisSessionContext:
 
     @staticmethod
     def _structured_summary(value: str) -> Any | None:
-        from dream.memory.session_compression import SessionSummaryDocument
-
         try:
             return SessionSummaryDocument.model_validate_json(value)
         except (TypeError, ValueError):

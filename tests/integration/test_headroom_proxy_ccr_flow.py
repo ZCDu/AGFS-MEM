@@ -15,7 +15,7 @@ from typing import Iterator
 import httpx
 import pytest
 
-from tests.headroom.fake_openai_provider import (
+from tests.integration.fake_openai_provider import (
     FakeOpenAIHandler,
     HASH_PATTERN,
     calls,
@@ -25,8 +25,10 @@ from tests.headroom.fake_openai_provider import (
 
 
 pytestmark = pytest.mark.skipif(
-    os.environ.get("DREAM_RUN_HEADROOM_PROXY_CCR") != "1",
-    reason="set DREAM_RUN_HEADROOM_PROXY_CCR=1 for real Headroom Proxy CCR test",
+    os.environ.get("SHORT_TERM_MEMORY_RUN_HEADROOM_PROXY_CCR") != "1",
+    reason=(
+        "set SHORT_TERM_MEMORY_RUN_HEADROOM_PROXY_CCR=1 for real Headroom Proxy CCR test"
+    ),
 )
 
 _SCOPE_HEADERS = {
@@ -158,7 +160,9 @@ def _tool_output_messages() -> list[dict[str, object]]:
 
 
 def test_real_proxy_compresses_and_transparently_resolves_ccr() -> None:
-    binary = os.environ.get("DREAM_HEADROOM_BINARY") or shutil.which("headroom")
+    binary = os.environ.get("SHORT_TERM_MEMORY_HEADROOM_BINARY") or shutil.which(
+        "headroom"
+    )
     if binary is None or not Path(binary).is_file():
         pytest.skip("Headroom binary is not installed")
     fake_port = _free_port()
