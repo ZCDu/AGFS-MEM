@@ -247,6 +247,26 @@ def delete_entity(
         raise HTTPException(status_code=404, detail=f"Entity {wiki_id!r} not found")
 
 
+@router.post("/wiki/_merge", response_model=EntityOut)
+def merge_entities(
+    user_id: str,
+    source_wiki_id: str = Query(..., description="wiki_id of the entity to merge FROM"),
+    target_wiki_id: str = Query(..., description="wiki_id of the entity to merge INTO"),
+    store: EntityGraphStore = Depends(get_graph_store),
+):
+    """Merge source entity into target: migrate facts, relations and aliases,
+    then mark source as deprecated with merged_into pointing at target.
+
+    After merge, retrieval automatically follows merged_into, so references
+    to the old entity resolve to the merged target.
+    """
+    try:
+        result = store.merge_entities(user_id, source_wiki_id, target_wiki_id)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    return _entity_out(result)
+
+
 @router.post("/wiki/{type}/{title}/facts", response_model=EntityOut)
 def add_fact(
     user_id: str,

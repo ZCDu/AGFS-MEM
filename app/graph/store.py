@@ -177,6 +177,55 @@ def _title_key(title: str) -> str:
     return text.strip(".,;:!?'\"()[]{}<>-_/\\|`~@*")
 
 
+# Stopwords for keyword extraction — words carrying no topical information.
+_KEYWORD_STOPWORDS = frozenset("""
+a an the and or but if then than so because as at by for from in into of on
+to with without is are was were be been being am do does did doing have has
+had having i you he she it we they me him her us them my your his its our
+their this that these those there here what which who whom when where how
+will would shall should can could may might must just very really quite too
+also only even still yet about over under again more most some any each
+not no never always every all both few many much other such own same
+different new old good bad big small high low long short early late
+""".split())
+
+
+def _extract_keywords(title: str, aliases: list[str], compact: str,
+                      facts: list) -> list[str]:
+    """Extract up to 20 content-bearing keywords from entity fields.
+
+    Used to build a lightweight keyword index in the manifest for
+    multi-strategy retrieval. Runs on every upsert/add_fact — zero
+    extra I/O, zero external dependencies.
+    """
+    seen: set[str] = set()
+    # Always include every word from the title (split on whitespace).
+    for word in re.split(r"\s+", title.lower()):
+        word = word.strip(".,;:!?()[]{}'\"")
+        if len(word) >= 3 and word not in _KEYWORD_STOPWORDS:
+            seen.add(word)
+    # Aliases are deliberate names — include them whole and split.
+    for alias in aliases:
+        low = alias.lower().strip()
+        if len(low) >= 3 and low not in _KEYWORD_STOPWORDS:
+            seen.add(low)
+        for word in re.split(r"\s+", low):
+            word = word.strip(".,;:!?()[]{}'\"")
+            if len(word) >= 3 and word not in _KEYWORD_STOPWORDS:
+                seen.add(word)
+    # Compact summary — first sentence carries the most signal.
+    for word in re.findall(r"[a-z0-9]{3,}", compact.lower()):
+        if word not in _KEYWORD_STOPWORDS:
+            seen.add(word)
+    # Facts — each fact text is a concentrated statement.
+    for fact in facts[:10]:
+        for word in re.findall(r"[a-z0-9]{3,}", fact.text.lower()):
+            if word not in _KEYWORD_STOPWORDS:
+                seen.add(word)
+    # Return sorted, capped at 20.
+    return sorted(seen)[:20]
+
+
 def has_usable_slug(title: str) -> bool:
     """False when a title contains nothing a slug can be built from.
 
@@ -593,6 +642,8 @@ class EntityGraphStore:
             # never has to open entity files. The entity file remains the
             # source of truth; this is derived and rebuildable.
             edges=[{"t": r.target, "c": r.category} for r in entity.relations],
+            keywords=_extract_keywords(entity.title, entity.aliases,
+                                       entity.compact, entity.facts),
         ))
 
     def _log_op(self, user_id: str, op: str, wiki_id: str, reason: str = "",
@@ -1033,6 +1084,103 @@ class EntityGraphStore:
             self.manifest.remove_entry(user_id, wiki_id)
 
         return True
+
+    def merge_entities(self, user_id: str, source_wiki_id: str,
+                       target_wiki_id: str) -> Entity:
+        """Merge source entity into target: migrate facts and relations,
+        mark source as deprecated with merged_into pointing at target.
+
+        After merge, _link() automatically follows merged_into, so any
+        reference to the old entity resolves to the merged target.
+        Idempotent: merging the same pair twice is a no-op on the second
+        call (source is already deprecated).
+        """
+        if source_wiki_id == target_wiki_id:
+            raise ValueError("Cannot merge an entity into itself")
+
+        # Read both entities.
+        source = self.get_entity(user_id, source_wiki_id, touch=False)
+        target = self.get_entity(user_id, target_wiki_id, touch=False)
+        if source is None:
+            raise ValueError(f"Source entity {source_wiki_id!r} not found")
+        if target is None:
+            raise ValueError(f"Target entity {target_wiki_id!r} not found")
+        if source.status == "deprecated" and source.merged_into == target_wiki_id:
+            # Already merged — idempotent.
+            return target
+
+        now = _now_iso()
+
+        # Migrate facts: append source facts not already present in target.
+        existing_texts = {f.text.strip().lower() for f in target.facts}
+        migrated_facts = 0
+        for fact in source.facts:
+            if fact.text.strip().lower() not in existing_texts:
+                fact.fact_id = _next_seq_id("fact", [f.fact_id for f in target.facts + [fact]])
+                fact.created_at = now
+                fact.updated_at = now
+                target.facts.append(fact)
+                existing_texts.add(fact.text.strip().lower())
+                migrated_facts += 1
+
+        # Migrate relations: append source relations not already present.
+        existing_rels = {(r.target, r.label) for r in target.relations}
+        migrated_rels = 0
+        for rel in source.relations:
+            if rel.target == target_wiki_id:
+                continue  # self-referencing after merge
+            if (rel.target, rel.label) not in existing_rels:
+                rel.relation_id = _next_seq_id("rel", [r.relation_id for r in target.relations + [rel]])
+                rel.created_at = now
+                rel.updated_at = now
+                target.relations.append(rel)
+                existing_rels.add((rel.target, rel.label))
+                migrated_rels += 1
+
+        # Merge aliases.
+        for alias in source.aliases:
+            if alias not in target.aliases:
+                target.aliases.append(alias)
+
+        # Append source summary to target if it adds new content.
+        if source.summary and source.summary.strip() not in target.summary:
+            sep = "\n\n" if target.summary else ""
+            target.summary = f"{target.summary}{sep}[Merged from {source.title}]: {source.summary.strip()}"
+            if not target.compact:
+                target.compact = _default_compact(target.summary)
+
+        target.metadata.updated_at = now
+
+        # Write the updated target.
+        def target_mutator(_: Entity | None) -> Entity:
+            return target
+        result = self._mutate(user_id, target_wiki_id, target_mutator)
+        self._sync_manifest(user_id, result)
+        self._log_op(user_id, "merge", target_wiki_id,
+                     reason=f"merged {source_wiki_id} into {target_wiki_id} "
+                            f"({migrated_facts} facts, {migrated_rels} relations)")
+
+        # Mark source as deprecated.
+        def source_mutator(e: Entity | None) -> Entity:
+            if e is None:
+                raise ValueError(f"Source entity {source_wiki_id!r} disappeared mid-merge")
+            e.status = "deprecated"
+            e.merged_into = target_wiki_id
+            e.metadata.updated_at = now
+            return e
+        self._mutate(user_id, source_wiki_id, source_mutator)
+        # Update manifest: source is now deprecated, pointing at target.
+        self.manifest.upsert_entry(user_id, ManifestEntry(
+            wiki_id=source_wiki_id, type=source.type, title=source.title,
+            aliases=source.aliases, path=self._key(user_id, source_wiki_id),
+            compact=source.compact, status="deprecated",
+            updated_at=now, last_accessed=source.metadata.last_accessed,
+            keywords=[], merged_into=target_wiki_id,
+        ))
+        self._log_op(user_id, "merge", source_wiki_id,
+                     reason=f"deprecated: merged into {target_wiki_id}")
+
+        return result
 
     def cascade_orphaned_relations(self, user_id: str, deleted_wiki_id: str) -> dict:
         """

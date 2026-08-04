@@ -101,6 +101,14 @@ class ManifestEntry:
     # Without that split, every manifest written before this feature would
     # silently look like an isolated node.
     edges: list[dict] | None = None
+    # Keywords extracted from title + aliases + compact + facts for
+    # multi-strategy retrieval. Built automatically on upsert/add_fact;
+    # never requires manual curation. Max 20 per entity.
+    keywords: list[str] = field(default_factory=list)
+    # If this entity was merged into another, the target wiki_id.
+    # _link() follows this chain automatically so merged entities
+    # are never lost to retrieval.
+    merged_into: str | None = None
     # Persisted layout coordinates from the graph editor. Purely
     # presentational, and optional — but persisting them means the force
     # simulation runs once rather than on every page load, and a node stays
@@ -125,6 +133,8 @@ class ManifestEntry:
             updated_at=d.get("updated_at", ""),
             last_accessed=d.get("last_accessed", ""),
             edges=d.get("edges"),
+            keywords=list(d.get("keywords", [])),
+            merged_into=d.get("merged_into"),
             x=d.get("x"), y=d.get("y"),
         )
 

@@ -295,52 +295,148 @@ class ConversationAssessor:
 
     def _link(self, entries: list[ManifestEntry], text: str,
               propers: list[str]) -> list[LinkedEntity]:
+        """Multi-strategy entity linking — all strategies run in parallel,
+        results merged with multi-hit bonus. Follows merged_into chains.
+
+        Strategies (in descending confidence order):
+          1. Proper noun exact match on title          → 0.95
+          2. Full title appears as word-boundary match → 0.85
+          3. Alias match (word-boundary or in propers) → 0.70
+          4. Title word (≥4 chars) as independent word → 0.65
+          5. Keyword index overlap                     → 0.55
+          6. Summary Jaccard overlap                   → 0.35
+
+        Multi-hit bonus: +0.05 per additional strategy that hits the same
+        entity (capped at 1.0). So an entity matched by both title-word
+        (0.65) and keyword (0.55) scores 0.65 + 0.05 = 0.70.
+        """
         lowered = text.lower()
         norm_propers = {_normalize(p): p for p in propers}
-        found: dict[str, LinkedEntity] = {}
+        input_tokens = _content_tokens(text)
+        input_keywords = {t for t in input_tokens if len(t) >= 3}
+
+        # Per-entity: (best_confidence, matched_on, mentions, strategy_count)
+        hits: dict[str, tuple[float, str, int, int]] = {}
 
         for e in entries:
             if e.status not in ("stable", "active"):
                 continue
 
+            best_conf = 0.0
+            best_on = ""
+            best_mentions = 0
+            strategies = 0
             norm_title = _normalize(e.title)
-            confidence = 0.0
-            matched_on = ""
-            mentions = 0
 
-            # Case-insensitive fallbacks below: people type "who is alice?",
-            # not "Who is Alice?". Matching only capitalised mentions made
-            # retrieval fail on ordinary lowercase questions.
+            # Strategy 1: proper noun exact match on title
             if norm_title and norm_title in norm_propers:
-                confidence, matched_on = 0.95, "title"
+                conf = 0.95
                 mentions = lowered.count(e.title.lower())
-            elif e.title.lower() in lowered:
-                confidence, matched_on = 0.85, "title"
-                mentions = lowered.count(e.title.lower())
-            else:
-                for alias in e.aliases:
-                    na = _normalize(alias)
-                    if not na or len(na) < 3:
-                        continue
-                    if na in norm_propers or re.search(rf"\b{re.escape(alias.lower())}\b", lowered):
-                        confidence, matched_on = 0.7, "alias"
-                        mentions = len(re.findall(rf"\b{re.escape(alias.lower())}\b", lowered))
-                        break
+                strategies += 1
+                if conf > best_conf:
+                    best_conf, best_on, best_mentions = conf, "title", max(mentions, 1)
 
-            if confidence == 0.0 and e.compact:
-                # Weakest tier: topical overlap with what we already summarised.
-                overlap = _jaccard(_content_tokens(e.compact), _content_tokens(text))
+            # Strategy 2: full title as word-boundary substring
+            if e.title.lower() in lowered:
+                # Check word boundaries: "Lee" should not match "Sleep"
+                title_words = e.title.lower().split()
+                if len(title_words) == 1:
+                    if re.search(rf"\b{re.escape(e.title.lower())}\b", lowered):
+                        conf = 0.85
+                        mentions = len(re.findall(rf"\b{re.escape(e.title.lower())}\b", lowered))
+                        strategies += 1
+                        if conf > best_conf:
+                            best_conf, best_on, best_mentions = conf, "title", max(mentions, 1)
+                else:
+                    # Multi-word title: check as phrase
+                    conf = 0.85
+                    mentions = lowered.count(e.title.lower())
+                    strategies += 1
+                    if conf > best_conf:
+                        best_conf, best_on, best_mentions = conf, "title", max(mentions, 1)
+
+            # Strategy 3: alias match
+            for alias in e.aliases:
+                na = _normalize(alias)
+                if not na or len(na) < 3:
+                    continue
+                if na in norm_propers or re.search(rf"\b{re.escape(alias.lower())}\b", lowered):
+                    conf = 0.70
+                    mentions = len(re.findall(rf"\b{re.escape(alias.lower())}\b", lowered))
+                    strategies += 1
+                    if conf > best_conf:
+                        best_conf, best_on, best_mentions = conf, "alias", max(mentions, 1)
+                    break  # first matching alias is enough
+
+            # Strategy 4: title word (≥4 chars) as independent word
+            if best_conf < 0.70:  # only if stronger strategies didn't fire
+                for word in re.split(r"\s+", e.title.lower()):
+                    word = word.strip(".,;:!?()[]{}'\"")
+                    if len(word) >= 4 and re.search(rf"\b{re.escape(word)}\b", lowered):
+                        conf = 0.65
+                        mentions = len(re.findall(rf"\b{re.escape(word)}\b", lowered))
+                        strategies += 1
+                        if conf > best_conf:
+                            best_conf, best_on, best_mentions = conf, "title_word", max(mentions, 1)
+
+            # Strategy 5: keyword index overlap
+            if e.keywords and input_keywords:
+                overlap = input_keywords & set(e.keywords)
+                if overlap:
+                    # Base 0.40, scales with overlap count (max 0.55 at 3+ matches)
+                    conf = round(0.40 + 0.05 * min(len(overlap), 3), 3)
+                    strategies += 1
+                    if conf > best_conf:
+                        best_conf, best_on, best_mentions = conf, "keywords", len(overlap)
+
+            # Strategy 6: summary Jaccard overlap
+            if best_conf == 0.0 and e.compact:
+                overlap = _jaccard(_content_tokens(e.compact), input_tokens)
                 if overlap >= 0.18:
-                    confidence, matched_on, mentions = 0.35 + overlap / 2, "summary", 1
+                    conf = round(0.35 + overlap / 2, 3)
+                    strategies += 1
+                    if conf > best_conf:
+                        best_conf, best_on, best_mentions = conf, "summary", 1
 
-            if confidence > 0:
-                found[e.wiki_id] = LinkedEntity(
-                    wiki_id=e.wiki_id, title=e.title, type=e.type,
-                    confidence=round(min(confidence, 1.0), 3),
-                    matched_on=matched_on, mentions=max(mentions, 1),
+            if best_conf > 0:
+                # Multi-hit bonus: +0.05 per additional strategy
+                bonus = 0.05 * (strategies - 1) if strategies > 1 else 0.0
+                final_conf = round(min(1.0, best_conf + bonus), 3)
+                hits[e.wiki_id] = (final_conf, best_on, best_mentions, strategies)
+
+        # Resolve merged_into chains: if an entity was merged into another,
+        # redirect the hit to the target. Uses manifest data only — no I/O.
+        entries_by_id = {e.wiki_id: e for e in entries}
+        resolved: dict[str, LinkedEntity] = {}
+        for wiki_id, (conf, matched_on, mentions, strategies) in hits.items():
+            target_id = wiki_id
+            seen_chain = {wiki_id}
+            entry = entries_by_id.get(target_id)
+            # Follow merged_into chain (with cycle detection)
+            while entry and entry.merged_into and entry.merged_into not in seen_chain:
+                target_id = entry.merged_into
+                seen_chain.add(target_id)
+                entry = entries_by_id.get(target_id)
+
+            target_entry = entries_by_id.get(target_id)
+            if target_id in resolved:
+                existing = resolved[target_id]
+                if conf > existing.confidence:
+                    resolved[target_id] = LinkedEntity(
+                        wiki_id=target_id,
+                        title=target_entry.title if target_entry else target_id,
+                        type=target_entry.type if target_entry else "concept",
+                        confidence=conf, matched_on=matched_on, mentions=mentions,
+                    )
+            else:
+                resolved[target_id] = LinkedEntity(
+                    wiki_id=target_id,
+                    title=target_entry.title if target_entry else target_id,
+                    type=target_entry.type if target_entry else "concept",
+                    confidence=conf, matched_on=matched_on, mentions=mentions,
                 )
 
-        return sorted(found.values(), key=lambda x: (-x.confidence, x.wiki_id))
+        return sorted(resolved.values(), key=lambda x: (-x.confidence, x.wiki_id))
 
     def _novelty(self, text: str, related: list[LinkedEntity],
                  entries_by_id: dict[str, ManifestEntry]) -> tuple[float, dict]:

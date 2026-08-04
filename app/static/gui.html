@@ -638,10 +638,11 @@ async function showDetail(id) {
     </section>
 
     <section>
-      <h2>危险操作</h2>
-      <p class="muted">删除实体会同时移除指向它的所有关系。</p>
-      <div style="height:6px"></div>
-      <button class="danger" id="d_del">删除此实体</button>
+      <h2>操作</h2>
+      <div style="display:flex; gap:6px; flex-wrap:wrap">
+        <button class="danger" id="d_del" style="font-size:12px">🗑️ 删除</button>
+        <button class="ghost" id="d_merge" style="font-size:12px">🔀 合并到…</button>
+      </div>
     </section>`;
 
   const path = `/wiki/${type}/${rest.join("/")}`;
@@ -677,6 +678,13 @@ async function showDetail(id) {
     if (!confirm(`确定删除 ${e.wiki_id}？此操作不可撤销。`)) return;
     await api("DELETE", path + "?hard_delete=true&cascade=true");
     toast("已删除 " + e.wiki_id); selected = null; await load(false);
+  });
+  $("d_merge").onclick = guard(async () => {
+    const target = prompt(`将 ${e.wiki_id} 合并到哪个实体？（输入目标 wiki_id）\n例如: person/alexei-rokossovsky`);
+    if (!target || !target.trim()) return;
+    if (!confirm(`确认将 ${e.wiki_id} 合并到 ${target.trim()}？\n源实体的所有事实和关系将迁移到目标，源实体将被标记为已弃用。`)) return;
+    await api("POST", `/wiki/_merge?source_wiki_id=${encodeURIComponent(e.wiki_id)}&target_wiki_id=${encodeURIComponent(target.trim())}`);
+    toast("已合并: " + e.wiki_id + " → " + target.trim()); selected = null; await load(false);
   });
   $("detail").querySelectorAll("[data-savefact]").forEach(b => b.onclick = guard(async () => {
     const id2 = b.dataset.savefact;
