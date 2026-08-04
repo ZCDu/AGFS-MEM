@@ -1,621 +1,487 @@
-# DREAM
+# DREAM Short-Term Memory
 
-> `short-term-memory` 分支新增独立的 Redis Session Context 与可替换 Headroom
-> 压缩/CCR 调用边界。完整存储、压缩、读取、恢复和 Agent 接入说明见
-> [DREAM 短期记忆：Redis + Headroom](docs/short-term-memory.md)。本分支没有新增历史会话
-> 窗口、Memory Retrieval Skill、AI 决策卡或用户画像功能。
+`short-term-memory` 分支实现 DREAM 的短期记忆边界：用 Redis 保存当前
+`user_id + session_id` 的在线上下文，用 journals 保存完整对话事件，在达到
+PLAN 规定的阈值后异步调用官方 Headroom 服务压缩，并把可供下一轮使用的短期
+summary 写回 Redis。
 
-## 梦境机制（DREAM）
+DREAM 是供公司 Agent 调用的记忆组件，不负责实现聊天 HTTP 路由，也不直接调用最终
+回答模型。公司 Agent 在回答前向 DREAM 取得 history 和 Headroom Proxy 参数，完成模型
+调用后再把助手回答写回 DREAM。
 
-DREAM 在会话之外定时回顾和蒸馏已经归档的对话，将耗时的总结、归纳和知识提取从实时交互中移出，避免影响当前会话的响应速度。它还会根据来源证据校验情景记忆，通过结构化检查、快照和回滚降低模型自归纳产生语义偏差的风险。
+![短期记忆流程](docs/short-term-memory-flow.svg)
 
-当前 DREAM 已经完成两项核心进化功能：
-
-- **用户画像**：从长期对话中持续提取用户的稳定偏好、习惯、领域特征和约束，并在新证据出现时进行新增、更新或合并。
-- **AI 决策进化**：从历史任务中提炼可复用的判断原则、适用场景和边界条件，形成带来源证据的 Decision Cards 与 `DECISION_RULES.md`。
-
-这些记忆可以在下一次任务中通过 Memory Retrieval 按需取回，使 Agent 在不加载全部历史的情况下持续理解用户并复用已经验证的决策经验。
-
-## 架构
+## 这条分支解决什么问题
 
 ```text
-已完成的 Conversation / Agent Task
-    │
-    ▼
-DreamService（编排层）
-    ├── Event Ledger                    — 会话归档、用户隔离与去重
-    ├── Knowledge Extraction            — Agnes 调用、结构化适配与知识提取
-    ├── Knowledge Governance            — 候选规范化、风险判断与知识路由
-    │   ├── User Persona                — 用户画像
-    │   ├── Decision Cards              — AI 决策经验
-    │   └── Skill Candidates            — 待实现的工作流候选
-    ├── Curators                        — 画像与决策规则的周期整理
-    └── Snapshot / Publication / Rollback — 版本、发布与安全恢复
-    │
-    ▼
-Memory Retrieval                       — 为下一任务检索相关记忆
-    │
-    ▼
-External Agent
+当前会话原文           Redis Session Context
+完整对话事件           journals JSONL
+上下文 token 优化      official Headroom Proxy
+五类短期语义摘要       DREAM 注入的 SummaryModel
+最终回答               公司 Agent / LLM
 ```
 
-模型负责发现知识，DREAM 负责知识类型、存储位置、风险治理、版本和回滚。
+本分支只覆盖 PLAN.md 的短期记忆相关设计，主要对应：
 
-## 依赖
+- 2.3 在线链路轻，离线链路重。
+- 3.1 Redis Session Context 与 journals 写入。
+- 3.2 默认读取 Redis 当前 session。
+- 5.1 读记忆链路。
+- 5.2 写记忆链路。
+- 5.3 Redis 短期上下文。
+- 5.4 Headroom 压缩。
+- 11 Redis session 与 journals 生命周期。
 
-- **Python 3.11–3.13**：项目运行环境。
-- **FastAPI + Uvicorn**：提供会话导入、Dream、发布和任务上下文接口。
-- **Pydantic**：校验配置、事件、知识候选和内部动作。
-- **OpenAI Python SDK**：调用 Agnes 或其他 OpenAI-compatible 模型。
-- **HTTPX**：访问外部会话源和模型 HTTP 服务。
-- **Redis 7.2 / redis-py 6.4**：保存当前 session 的短期上下文和 summary。
-- **Headroom 0.33**：作为独立 HTTP Proxy 提供自动压缩与官方 CCR 能力。
-- **Pytest + Ruff**：仅用于本地测试和代码检查。
+本分支不实现历史会话列表/UI、Memory Retrieval Skill、中长期 Wiki Hydration、用户画像、
+AI 决策卡或 Daily Memory Job。这些能力不能用来判断本分支的短期记忆链路是否完成。
 
-DREAM 的既有长期模块继续使用本地文件；本分支新增的短期 session 上下文依赖 Redis，
-不引入 Elasticsearch 或向量数据库。
+## 当前实现结论
 
-## 项目结构
+| 能力 | 状态 | 当前证据与边界 |
+|---|---|---|
+| 按 `user_id + session_id` 隔离 Redis 上下文 | 已实现 | `RedisSessionContext` 使用独立 messages/summary key |
+| 最近 N 轮读取与 history 组装 | 已实现 | `summary + Headroom 压缩消息（未过期时）+ 最近 N 轮 + 本次输入` |
+| 用户/助手消息写 Redis 和 journals | 已实现 | `prepare_turn` 写用户消息，`complete_turn` 写助手消息 |
+| Redis 半天 TTL | 已实现 | 默认 `43200` 秒，每次消息写入刷新 messages 和 summary TTL |
+| Redis 过期后按 session 从 journals 恢复 | 已实现 | 在线只恢复最近 N 轮，更早内容投递后台重建，不把全量日志塞回回答链路 |
+| 优先读取持久化 summary snapshot | 部分实现 | `SummarySnapshotReader` 接口和测试存在；默认 runtime 尚未装配 Redis 之外的 snapshot reader |
+| PLAN 三类 Headroom 触发条件 | 已实现 | token 比例、消息数、session 时长任一达到阈值即排队 |
+| 回答后异步调用 `/v1/compress` | 已实现 | `ExecutorHeadroomCompressionQueue` 不阻塞下一次在线读取 |
+| Headroom 自动选择压缩器 | 已接入 | DREAM 不指定 Router、Kompress、SmartCrusher 等内部实现；由官方服务决定 |
+| 五类短期摘要写 Redis | 已实现 | 注入的 SummaryModel 提取目标、偏好、事实、未完成事项、附件引用 |
+| 压缩结果参与下一轮读取 | 已实现 | Headroom 返回的 messages 原样保存到 summary envelope，在 CCR TTL 内加入 history |
+| LLM 读取短期记忆 | 接口已实现 | `PreparedTurn.history` 和 OpenAI-compatible Proxy URL 交给公司 Agent；DREAM 不生成最终回答 |
+| 官方 CCR 相关性判断与原文召回 | 部分实现 | 已保持同一匿名 scope、保留官方 marker 并让真实模型请求经过 Proxy；真实供应商下的自动工具续跑仍需验收 |
+
+因此，对“是否已经实现记忆存储、压缩、召回、读取”的准确回答是：
+
+- **存储：已实现。** Redis 保存在线短期状态，journals 保存完整事件。
+- **压缩：已实现 DREAM 侧触发、调用、保存和失败处理。** 实际压缩能力取决于运行中的官方 Headroom 服务。
+- **读取：已实现。** Agent 可在回答前取得 Redis 组装后的 history。
+- **召回：已完成官方 Proxy 接入边界，但不能写成已全部验收。** 当前还需要用真实公司 Agent 的模型请求验证 Headroom 是否能在发现压缩信息不足时透明调用 `headroom_retrieve`、取回原文并继续生成回答。
+
+## 总体流程
+
+### 回答前、回答后与后台压缩
+
+```mermaid
+flowchart TD
+    U["用户本次输入"] --> P["Agent 调用 prepare_turn"]
+    P --> E{"Redis session 存在?"}
+    E -->|是| R["读取 Redis summary + 最近 N 轮"]
+    E -->|否| J["从 journals 恢复同一 session 最近 N 轮"]
+    J --> R
+    R --> WU["用户消息写 Redis + journals"]
+    WU --> H["PreparedTurn.history"]
+    H --> PX["公司 Agent 通过 Headroom Proxy 调用 LLM"]
+    PX --> A["LLM 回答"]
+    A --> C["Agent 调用 complete_turn"]
+    C --> WA["助手消息写 Redis + journals"]
+    WA --> T{"满足任一压缩条件?"}
+    T -->|否| END["本轮结束"]
+    T -->|是| Q["投递后台压缩任务"]
+    Q --> HC["POST Headroom /v1/compress"]
+    HC --> SM["DREAM SummaryModel 提炼五类语义"]
+    SM --> SR["写 Redis summary；保留最近 N 轮"]
+    SR --> END
+```
+
+这个位置对应“上一轮结束后预计算下一轮上下文”为主的策略：下一轮通常只需读取已经
+准备好的 summary 和最近消息，不在用户等待路径里重新压缩整个历史。若公司 Agent 的本次
+实际请求仍然过长，请求本身继续经过 Headroom Proxy，由官方 Proxy 在模型调用路径中做
+上下文优化；DREAM 不再实现第二套压缩算法。
+
+### 下一轮 LLM 如何读取和召回
+
+```mermaid
+flowchart LR
+    RS["Redis summary"] --> BH["DREAM build_history"]
+    RN["Redis 最近 N 轮"] --> BH
+    U["本次用户输入"] --> BH
+    BH --> PR["PreparedTurn.history"]
+    PR --> HP["official Headroom Proxy"]
+    HP --> CR{"官方 Context Router / Tracker"}
+    CR -->|压缩上下文足够| LLM["上游 LLM"]
+    CR -->|需要原文且存在 CCR 数据| RET["官方 headroom_retrieve"]
+    RET --> LLM
+    LLM --> OUT["回答交给公司 Agent"]
+```
+
+这里存在两种不同的“恢复/召回”，不要混为一谈：
+
+1. **Redis session 恢复**：Redis key 过期后，DREAM 根据 `user_id + session_id` 从
+   journals 恢复最近 N 轮。这是 DREAM 已实现的可靠路径。
+2. **Headroom CCR 召回**：官方 Headroom 对自己缓存的被压缩原文进行相关性判断、工具
+   注入、检索和模型续跑。DREAM 只保持官方 messages/marker、匿名稳定 scope，并让真实
+   LLM 请求经过同一 Proxy，不自行实现 CCR 缓存或 `headroom_retrieve`。
+
+单独调用 `/v1/compress` 只能证明“压缩接口工作”，不能证明“LLM 已自动召回并继续回答”。
+CCR 还要求：本次压缩实际产生可召回数据、缓存仍在 TTL 内、真实模型请求经过同一
+Headroom Proxy 和 scope，并且供应商路径支持透明工具续跑。
+
+## Redis Session Context
+
+### Key
+
+PLAN 中的逻辑名 `session:{id}:summary` 在实现中增加了用户隔离前缀：
 
 ```text
-DREAM/
-├── src/dream/
-│   ├── api.py                              # FastAPI 应用及对外接口
-│   ├── config.py                           # 环境变量和后端配置
-│   ├── application/                        # Dream 应用编排与闭环执行
-│   │   ├── service.py                      # DREAM 核心服务入口
-│   │   ├── closed_loop.py                  # 写回、发布、激活和失败回滚事务
-│   │   ├── scheduler.py                    # 自适应 Background Review 调度
-│   │   └── deadline.py                     # 300 秒截止时间与安全取消
-│   ├── core/                               # 事件、账本、作用域和标识符基础模型
-│   ├── extraction/                         # 外部模型调用与知识提取
-│   │   ├── llm_backend.py                  # Agnes/OpenAI 调用及一次非法输出修复
-│   │   ├── provider_adapter.py             # 外部输出解包、归一化和校验
-│   │   └── prompts.py                      # 用户画像、决策和 Skill 提取提示词
-│   ├── governance/                         # 知识规范化、风险治理和路由
-│   │   ├── canonicalizer.py                # 候选知识标准化
-│   │   ├── policy.py                       # 自动激活、观察和人工审核策略
-│   │   ├── router.py                       # 路由到 Persona 或 Decision Card
-│   │   └── persona_merge.py                # 画像新增、更新、合并和去重
-│   ├── memory/                             # 长期记忆、写回、发布与本地事务
-│   │   ├── writeback.py                    # 生成用户画像和 AI 决策投影
-│   │   ├── publication.py                  # 候选版本、审核和激活状态机
-│   │   ├── managers/                       # Persona、Decision Card、Skill 候选管理
-│   │   └── storage/                        # Snapshot、Rollback 和 Dream Report
-│   ├── curators/                           # 用户画像与 AI 决策规则的周期整理
-│   │   ├── user.py                         # 确定性生成用户画像投影
-│   │   ├── ai.py                           # 确定性生成 AI 决策规则
-│   │   ├── semantic.py                     # 可选的大模型语义整理
-│   │   └── schedule.py                     # 每批执行、凌晨 3 点兜底和周期状态
-│   ├── retrieval/                          # 当前任务的相关记忆检索
-│   │   ├── skill.py                        # 外部 Agent 调用入口
-│   │   └── retriever.py                    # 过滤、排序并返回 Top-K 记忆
-│   ├── integrations/                       # 手工 JSONL 和外部会话源接入
-│   └── validation/                         # 正式闭环验证和可复算评估工具
-├── docs/                                   # Dream 机制与画像/决策进化说明
-├── tests/                                  # 单元、集成和端到端测试
-├── .env.example                            # 环境变量模板，不包含真实密钥
-├── pyproject.toml                          # 依赖、测试和 Ruff 配置
-├── README.md                               # 项目说明与接入指南
-└── .gitignore                              # 排除密钥、运行数据和临时文件
+dream:session:{user_id}:{session_id}:messages
+dream:session:{user_id}:{session_id}:summary
 ```
 
-## 三项核心能力
+- `messages`：Redis List，按时间顺序存当前 session 消息。
+- `summary`：Redis String，保存 DREAM 短期摘要 envelope。
+- 默认 TTL：`43200` 秒，即 12 小时。
+- 写入消息时，以 Redis transaction pipeline 同时追加消息并刷新 TTL。
+- summary 只属于当前 session，不写 Wiki，也不是长期事实源。
 
-### 1. 用户画像
+### Summary envelope
 
-DREAM 从用户消息中识别具有长期价值的事实和行为偏好，例如：
+Headroom 负责 token 压缩，不负责保证 PLAN 要求的五类语义结构。因此后台任务在
+Headroom 之后调用注入的 SummaryModel，生成：
 
-- 沟通方式与回答结构；
-- 工作习惯和协作偏好；
-- 风险接受程度；
-- 稳定的兴趣与领域经验；
-- 长期目标和现实约束；
-- 对 Agent 的持续性要求。
+```json
+{
+  "user_id": "user-001",
+  "session_id": "session-001",
+  "coverage": {
+    "processed_message_count": 120
+  },
+  "current_goal": [],
+  "preferences": [],
+  "confirmed_facts": [],
+  "pending_items": [],
+  "attachment_references": [],
+  "compression_context": {
+    "messages": [],
+    "tokens_before": 10000,
+    "tokens_after": 6000
+  },
+  "updated_at": "2026-08-04T12:00:00+00:00"
+}
+```
 
-画像以原子条目写入用户作用域的 `USER.md`。每条画像保留来源事件、置信度和领域等元数据。Persona Canonicalizer 与 Persona Merge Strategy 负责区分：
+`compression_context.messages` 只保存 Headroom 实际应用压缩时返回的 conversation
+messages，DREAM 不解析或重写其中的 Router/CCR 信息。如果 Headroom 返回 `router:noop`，
+DREAM 仍可由 SummaryModel 生成五类语义摘要，但不会在 envelope 中复制一份未压缩的完整
+transcript。
+
+### 在线读取规则
+
+`prepare_turn` 的读取顺序是：
+
+1. 检查指定 `user_id + session_id` 是否仍在 Redis。
+2. Redis 已过期时，从 journals 恢复该 session 最近 N 轮。
+3. 读取 Redis summary。
+4. summary 中的 Headroom 压缩 messages 未超过 CCR TTL 时，将其加入 history。
+5. 追加 Redis 最近 N 轮原文。
+6. 追加本次用户输入并返回 `PreparedTurn.history`。
+
+在线默认读取不扫描 Wiki、raw 或 source。journals 也只在 Redis session 不存在的恢复场景
+进入链路，不是每轮回答的默认数据源。
+
+## Headroom 压缩
+
+### DREAM 决定何时调用
+
+每轮助手回答写入后，DREAM 检查三类 OR 条件：
 
 ```text
-new       → 新领域或新的独立画像
-update    → 更新已有原子画像
-merge     → 为已有画像增加新的维度
-duplicate → 没有新增信息，不重复写入
+estimated_tokens >= context_window_tokens * trigger_ratio
+OR message_count >= max_messages
+OR session_seconds >= max_session_seconds
 ```
 
-`USER_PERSONA.md` 是面向 Agent 的画像投影，`USER.md` 是保留证据的长期画像仓库。
+- `trigger_ratio` 必须在 `0.60`–`0.70` 之间，默认 `0.65`。
+- 默认消息阈值为 `100`。
+- 默认 session 时长阈值为 `14400` 秒。
 
-### 2. AI 决策进化
+DREAM 只决定“什么时候需要优化”，不指定 Headroom 应使用 Kompress、SmartCrusher、日志
+压缩器或其他 transform。官方 Headroom Router 根据消息类型和安全策略决定具体压缩过程；
+`router:noop` 是有效成功响应，但表示本次没有减少 token。
 
-DREAM 关注 Agent 在任务中如何判断，而不是只保存最终回答。可复用经验会形成 Decision Card：
+### Headroom 决定如何压缩和 CCR
 
-- 使用场景；
-- 决策信号；
-- 决策原则；
-- 结果与证据；
-- 反例和适用边界；
-- 置信度与来源事件。
+后台任务调用：
 
-确定性 AI Curator 会从有效 Decision Cards 生成 `DECISION_RULES.md`，使下一任务可以加载稳定、可追溯并能随新证据修正的决策规则。
+```http
+POST {HEADROOM_SERVICE_URL}/v1/compress
+Content-Type: application/json
+X-Headroom-User-Id: <HMAC scope>
+X-Headroom-Session-Id: <HMAC scope>
+X-Headroom-Project-Id: <HMAC scope>
 
-AI 决策经验位于 Agent 作用域，可以服务同一 Agent 下的不同用户；用户画像位于 User 作用域，不能跨用户读取。
+{
+  "model": "gpt-4o",
+  "messages": [
+    {"role": "user", "content": "..."},
+    {"role": "assistant", "content": "..."}
+  ]
+}
+```
 
-### 3. Memory Retrieval
+DREAM 保持 message boundary，不把整个 Redis session 拼成一个大字符串；返回 messages
+也原样进入短期 summary envelope。用户和 session 原始标识不会发送给 Headroom，三个
+scope header 使用 HMAC 去标识化，并在后台压缩与实时 Agent 请求之间保持稳定。
 
-直接把所有画像、规则和决策卡塞入模型上下文会带来无关信息、Token 浪费和领域污染。`MemoryRetrievalSkill` 提供独立、只读的运行时检索能力：
+### 失败处理
+
+- development：Headroom 不可用、超时或响应非法时允许 no-op fallback，记录 warning，
+  SummaryModel 可使用原消息生成短期摘要。
+- production：Headroom 失败时不调用 SummaryModel、不写 Redis summary、不 LTRIM，保留
+  Redis 原始消息和 journals，并进入后台重试边界。
+- 日志和 failure reason 只记录错误类别，不记录完整用户对话。
+
+## journals 的职责
+
+journals 是 append-only JSONL 事件日志，不是 Wiki 长期事实，也不直接参与正常在线回答。
+消息按用户、日期和 session 分文件：
+
+```text
+{DREAM_HOME}/{user_id}/journals/{YYYY-MM-DD}-{session_id}.jsonl
+```
+
+它承担三件事：
+
+- Redis 可过期，因为用户/助手原文已经同步写入 journals。
+- 用户重新进入一个已过期 session 时，可恢复最近 N 轮。
+- 更早内容可交给异步 Headroom/summary 重建，不阻塞在线请求。
+
+与负责长期记忆的模块对接时，对方应读取 journals 做 Daily Memory Job 和
+Persistence Classifier；短期记忆模块不把 Redis summary 直接写入 Wiki。
+
+## 公司 Agent 的 Python 调用边界
+
+### 1. 组装 runtime
+
+公司环境需要注入 token estimator、五类摘要模型、后台 executor 和 retry queue：
 
 ```python
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-from dream.retrieval import MemoryRetrievalSkill
+from dream.api.redis_runtime import RedisRuntime
+from dream.api.short_term_runtime import build_short_term_runtime
+from dream.config import load_settings
 
-skill = MemoryRetrievalSkill(
-    home=Path("/path/to/dream-home"),
-    tenant_id="enterprise-a",
-    agent_id="service-agent",
+settings = load_settings(Path(".env"))
+redis_runtime = RedisRuntime.connect(settings.redis_session.url)
+
+runtime = build_short_term_runtime(
+    home=Path(settings.home).expanduser(),
+    settings=settings,
+    redis_client=redis_runtime.client,
+    token_estimator=company_token_estimator,
+    summary_model=company_session_summary_model,
+    executor=ThreadPoolExecutor(max_workers=2),
+    retry_queue=company_background_retry_queue,
 )
+```
 
-result = skill.retrieve(
+这里的 `company_session_summary_model` 负责输出 PLAN 五类摘要；它不是最终回答模型。
+
+### 2. 回答前读取 DREAM
+
+```python
+prepared = runtime.conversation_handler.prepare_turn(
     user_id="user-001",
-    query="供应商收款账户变更应该如何处理？",
-    task_context={"domain": "finance"},
-    limit=5,
+    session_id="session-001",
+    content="继续刚才的 Redis 设计",
+    session_seconds=1800,
 )
-
-for memory in result.memories:
-    print(memory.type, memory.content)
-
-print(result.context)
 ```
 
-当前版本采用本地确定性检索，不依赖向量数据库：
+`prepared.history` 已包含当前可用的 Redis 短期记忆与本次输入；
+`prepared.headroom_proxy_url` 是当前实现提供的 OpenAI-compatible `/v1` 地址，
+`prepared.headroom_headers` 是匿名稳定 scope。
 
-- 严格校验 `tenant_id / agent_id / user_id`；
-- 读取 `USER.md`、`USER_PERSONA.md`、`DECISION_RULES.md` 和 `decision-cards/`；
-- 支持 finance、crypto、coding、writing、research 等领域识别；
-- 综合关键词相关性、Memory 类型、置信度和更新时间排序；
-- 合并近似重复记忆；
-- 冲突时优先较新且置信度更高的记忆；
-- 默认返回最多 5 条，并受上下文预算限制；
-- 用户 Persona 严格隔离，Agent 级 Decision Rules 和 Cards 可以共享。
+### 3. 真实 LLM 请求经过 Headroom Proxy
 
-`MemoryRetrievalSkill` 当前是 Python Runtime API，不是 FastAPI 路由，也不会替换 `/v1/tasks/start` 的现有快照流程。外部 Agent 应在处理具体任务时主动调用它。
+```python
+from openai import OpenAI
 
-## Knowledge Governance
-
-知识提取后先进入风险治理层，再决定是否影响 Active Memory：
-
-```text
-低风险 + 证据和置信度充分  → auto_activate
-信息不完整或仍需观察       → observe candidate
-敏感、权限或高风险内容     → ready_for_review
+client = OpenAI(
+    base_url=prepared.headroom_proxy_url,
+    api_key=company_model_api_key,
+    default_headers=prepared.headroom_headers,
+)
+response = client.chat.completions.create(
+    model=company_model,
+    messages=list(prepared.history),
+    tools=company_agent_tools,
+)
+assistant_text = response.choices[0].message.content or ""
 ```
 
-普通、稳定的用户偏好和结构完整的决策经验可以自动写回并激活。涉及敏感身份、权限放宽、绕过审批或高风险操作的内容保留人工审核。
+这一步必须经过官方 Proxy，才具备由 Headroom 注入/处理 CCR 工具的条件。DREAM 不应先
+直接调用模型、再把结果送给 Headroom。
 
-Workflow Skill 可以被识别并记录为 `pending_skill_implementation` 候选，用于审计和后续开发。当前阶段不提供根据任务自动调用这些候选的 Skill Runtime；Memory Retrieval 也不会把它们当作已验证的可执行能力。
+### 4. 回答后写回 DREAM
 
-## 调度与两层 Curator
-
-Background Review 按用户作用域自适应触发，任一条件满足即可处理：
-
-- 用户空闲达到配置时长，默认 2 小时；
-- 待处理事件达到批量上限；
-- 估算 Token 达到批量上限；
-- 最早事件等待达到最大时间。
-
-每个成功批次之后，本地确定性 Curator 会立即整理发生变化的用户画像或 AI 决策卡。每天配置时刻（默认本地时间凌晨 3 点）还会进行幂等兜底检查。
-
-大模型 Semantic Curator 默认关闭。启用后按照独立周期运行，默认要求：
-
-- 距离上次尝试至少 168 小时；
-- 对应作用域至少空闲 2 小时。
-
-## 运行产物
-
-运行数据位于 `DREAM_HOME`，不应提交到 Git：
-
-```text
-<DREAM_HOME>/
-├── ledger/
-│   └── events.jsonl
-├── source-state/
-└── tenants/<tenant_id>/agents/<agent_id>/
-    ├── users/<user_id>/
-    │   ├── USER.md
-    │   └── USER_PERSONA.md
-    ├── decision-cards/
-    │   └── *.md
-    ├── skills/
-    │   └── *.skill                    # 候选产物，不代表已注册 Runtime
-    ├── DECISION_RULES.md
-    ├── CHARACTER_DEFINITION.md
-    ├── publication/users/<user_id>/
-    │   ├── active.json
-    │   ├── latest.json
-    │   ├── pending.json
-    │   └── versions/
-    ├── snapshots/
-    ├── curator-state/
-    └── dream-reports/
-        └── review-traces/
+```python
+result = runtime.conversation_handler.complete_turn(
+    prepared,
+    assistant_content=assistant_text,
+)
 ```
 
-所有主要产物都是可检查的本地文件。Publication、Snapshot 和 Report 共同记录一次 Dream 的输入、候选、版本、激活状态和失败恢复信息。
+`result.headroom_queued` 表示 DREAM 是否因 PLAN 三类条件而投递后台压缩，不表示
+Headroom 一定应用了某个 transform；真实结果需要查看 telemetry 或 Headroom stats。
 
-## 快速开始
+## 配置
 
-### 环境要求
-
-- Python `>=3.11,<3.14`
-- macOS、Linux 或 Windows
-- 可选：OpenAI-compatible LLM Provider
-
-### 安装
-
-```bash
-git clone <repository-url>
-cd DREAM
-python -m venv .venv
-source .venv/bin/activate
-python -m pip install -e '.[dev]'
-```
-
-Windows PowerShell 激活虚拟环境：
-
-```powershell
-.venv\Scripts\Activate.ps1
-```
-
-### 配置
-
-```bash
-cp .env.example .env
-```
-
-最小模型配置：
+复制 `.env.example` 后，短期记忆只需要关注以下变量：
 
 ```dotenv
 DREAM_HOME=~/.dream
-DREAM_REVIEW_BACKEND=openai
-DREAM_REVIEW_MODEL=your-openai-compatible-model
-DREAM_REVIEW_BASE_URL=https://api.openai.com/v1
-DREAM_LLM_API_KEY=your-secret
-DREAM_LLM_STRUCTURED_MODE=auto
-DREAM_LLM_TIMEOUT_SECONDS=90
-DREAM_DEADLINE_SECONDS=300
-DREAM_CURATOR_CONSOLIDATE=false
+DREAM_ENV=development
+
+DREAM_REDIS_URL=redis://127.0.0.1:6379/0
+DREAM_REDIS_SESSION_TTL_SECONDS=43200
+DREAM_REDIS_HISTORY_TURNS=10
+DREAM_CONTEXT_WINDOW_TOKENS=128000
+DREAM_HEADROOM_TRIGGER_RATIO=0.65
+DREAM_HEADROOM_MAX_MESSAGES=100
+DREAM_HEADROOM_MAX_SESSION_SECONDS=14400
+
+HEADROOM_SERVICE_URL=http://127.0.0.1:8787
+HEADROOM_SERVICE_TIMEOUT_SECONDS=300
+HEADROOM_COMPRESSION_MODEL=gpt-4o
+HEADROOM_CCR_TTL_SECONDS=43200
+
+DREAM_OPTIMIZATION_SCOPE_SECRET=replace-with-a-production-secret
 ```
 
-离线单元测试不需要真实 API Key。真实知识提取需要配置可用的 OpenAI-compatible Provider。
+`DREAM_ENV=production` 时必须配置 `HEADROOM_SERVICE_URL` 和非默认
+`DREAM_OPTIMIZATION_SCOPE_SECRET`，否则配置加载失败；系统不会因漏配置而静默降级。
 
-如果本机代理环境会干扰模型连接，可以在确认安全和网络策略后设置：
+## 本地安装和启动
 
-```dotenv
-DREAM_LLM_TRUST_ENV=false
-```
-
-### 启动 FastAPI
+### 1. 安装 DREAM
 
 ```bash
-uvicorn dream.api:app --host 127.0.0.1 --port 8765
+python3.13 -m venv .venv
+.venv/bin/python -m pip install -e ".[dev]"
 ```
 
-如果需要使用其他环境文件：
+不要把 Headroom 安装进 DREAM 的 `.venv`。Headroom 是可替换的独立组件，建议使用
+`uv tool` 的隔离环境：
 
 ```bash
-DREAM_ENV_FILE=/absolute/path/to/.env.local \
-uvicorn dream.api:app --host 127.0.0.1 --port 8765
+uv tool install --python 3.13 "headroom-ai[proxy,ml]==0.33.0"
 ```
 
-Swagger 页面：
+如果本机已经安装 `headroom-ai[all]==0.33.0`，无需重复安装；`all` 只是包含更多可选
+能力，DREAM 当前只依赖 HTTP Proxy 和可用压缩能力。
 
-```text
-http://127.0.0.1:8765/docs
-```
-
-## 完成一次 Memory Formation
-
-### 1. 提交完整会话
+### 2. 启动 Redis
 
 ```bash
-curl --fail-with-body \
-  -X POST http://127.0.0.1:8765/v1/dream/conversations \
-  -H 'Content-Type: application/json' \
-  -d '{
-    "tenant_id": "enterprise-a",
-    "agent_id": "service-agent",
-    "user_id": "user-001",
-    "event_id": "evt-demo-001",
-    "conversation_id": "session-demo-001",
-    "completed_at": "2026-07-24T10:00:00+08:00",
-    "interrupted": false,
-    "tool_iterations": 4,
-    "messages": [
-      {
-        "role": "user",
-        "content": "以后处理高风险问题时，请先给结论，再明确暂停条件和继续条件。"
-      },
-      {
-        "role": "assistant",
-        "content": "明白。高风险任务会先核验事实，并明确当前能做什么、何时可以继续。"
-      }
-    ],
-    "final_response": "已按结论、暂停条件和继续条件给出处理建议。"
-  }'
+docker compose -f compose.redis.yml up -d
+redis-cli -u redis://127.0.0.1:6379/0 ping
 ```
 
-成功返回：
+预期：`PONG`。
 
-```json
-{
-  "event_id": "evt-demo-001",
-  "status": "queued"
-}
-```
-
-`event_id` 是幂等键，重复事件不会被重复学习。
-
-也可以将完整任务按 NDJSON 直接提交到：
-
-```http
-POST /v1/validation/import
-Content-Type: application/x-ndjson
-```
-
-### 2. 显式执行一次 Dream
+### 3. 启动 Headroom
 
 ```bash
-curl --fail-with-body \
-  -X POST http://127.0.0.1:8765/v1/validation/dream \
-  -H 'Content-Type: application/json' \
-  -d '{
-    "tenant_id": "enterprise-a",
-    "agent_id": "service-agent",
-    "user_id": "user-001"
-  }'
+HEADROOM_CCR_TTL_SECONDS=43200 headroom proxy \
+  --host 127.0.0.1 \
+  --port 8787 \
+  --mode token
 ```
 
-返回状态可能是：
+DREAM 不固定 `--compressor` 或 `--target-ratio`，让官方 Headroom 自动选择 transform。
 
-- `active`：低风险结果已经自动写回并激活；
-- `ready_for_review`：高风险候选需要执行 approve、confirm-writeback、activate；
-- HTTP `503`：候选生成失败，修改前状态已经恢复，pending 事件保留。
-
-不要在失败后重复导入相同事件；修复原因后重新调用一次 `/v1/validation/dream`。
-
-### 3. 读取下一任务上下文
+在另一个终端检查：
 
 ```bash
-curl --fail-with-body \
-  -X POST http://127.0.0.1:8765/v1/tasks/start \
-  -H 'Content-Type: application/json' \
-  -d '{
-    "tenant_id": "enterprise-a",
-    "agent_id": "service-agent",
-    "user_id": "user-001"
-  }'
+curl -s http://127.0.0.1:8787/health
+headroom doctor
 ```
 
-响应包括：
+对普通文本使用 Kompress 时，`/health` 中应看到 `checks.kompress.status=healthy`；首次请求
+可能触发 lazy initialization。单条很短的消息返回 `router:noop` 是正常现象，不能用它
+判断长 session 压缩失败。
 
-```json
-{
-  "snapshot_id": "sha256...",
-  "user_profile": "当前 Active 用户画像",
-  "decision_rules": "当前 Active AI 决策规则",
-  "decision_cards": ["当前 Active Decision Cards"]
-}
-```
+## 验证
 
-同一前台任务应固定使用一个 `snapshot_id`，避免后台 Dream 改变正在执行的任务。
-
-## FastAPI 接口
-
-### 会话与任务
-
-| 方法 | 路径 | 作用 |
-|---|---|---|
-| `POST` | `/v1/dream/conversations` | 写入一段已完成会话 |
-| `POST` | `/v1/tasks/start` | 创建下一任务的冻结上下文 |
-| `POST` | `/v1/dream/run-pending` | 立即处理所有 pending 作用域 |
-| `POST` | `/v1/dream/run-curators` | 强制运行指定作用域的确定性 Curator |
-| `POST` | `/v1/dream/run-due-curators` | 执行已到期的每日兜底 Curator |
-| `POST` | `/v1/dream/rollback/{snapshot_id}` | 恢复指定快照 |
-| `GET` | `/v1/dream/reports/{run_id}` | 读取 Dream 报告 |
-
-### 验证与发布
-
-| 方法 | 路径 | 作用 |
-|---|---|---|
-| `POST` | `/v1/validation/import` | 导入完整任务 NDJSON |
-| `POST` | `/v1/validation/dream` | 对指定用户执行一次闭环 Dream |
-| `GET` | `/v1/validation/publications/status` | 查询 latest 与 active 版本 |
-| `POST` | `/v1/validation/publications/{version}/approve` | 批准高风险候选 |
-| `POST` | `/v1/validation/publications/{version}/confirm-writeback` | 确认两份回写投影 |
-| `POST` | `/v1/validation/publications/{version}/activate` | 激活已就绪版本 |
-| `POST` | `/v1/validation/publications/{version}/reject` | 拒绝候选并恢复 |
-| `POST` | `/v1/validation/publications/{version}/rollback` | 恢复历史 Active 版本 |
-
-Memory Retrieval 当前不提供 HTTP 接口。请通过 `dream.retrieval.MemoryRetrievalSkill` 从 Agent Runtime 调用。
-
-## 接入现有 Agent
-
-现有 Agent 只需要连接两个位置。
-
-### 任务完成后：写入经历
-
-将完整的 user、assistant、system、tool 消息和 final response 提交给 DREAM：
-
-```text
-Agent completes task
-        ↓
-POST /v1/dream/conversations
-        ↓
-DREAM Event Ledger
-```
-
-也可以通过 `integrations/internship` 从只读 NDJSON 导出接口增量拉取。Cursor 只有在事件持久化成功或确认重复后才推进。
-
-### 新任务开始前：读取相关记忆
-
-```text
-Agent receives query
-        ↓
-MemoryRetrievalSkill.retrieve(...)
-        ↓
-Top-K Persona / Decision Rules / Decision Cards
-        ↓
-Inject result.context into Agent prompt
-```
-
-如果业务要求严格的版本冻结，可以先调用 `/v1/tasks/start` 获得 Active Snapshot，再由外部 Agent 使用 Retrieval Skill 构造更紧凑的任务上下文。
-
-## 多租户和作用域
-
-DREAM 使用三级作用域：
-
-```text
-tenant_id / agent_id / user_id
-```
-
-- `tenant_id`：租户或组织；
-- `agent_id`：同一组织内的 Agent；
-- `user_id`：Agent 服务的具体用户。
-
-三个 ID 仅允许字母、数字、下划线和连字符，长度不超过 64。调用方不能传入磁盘路径。
-
-User Persona 严格位于用户作用域。Decision Cards 和 `DECISION_RULES.md` 位于 Agent 作用域，用于同一 Agent 的通用决策进化。
-
-## 可靠性与安全失败
-
-- 普通 Dream 事务默认总截止时间为 300 秒；
-- 单次模型请求有独立超时；
-- 正常结构化输出只调用一次模型；
-- 仅在检测到非法结构化输出时最多进行一次修复调用；
-- Provider 输出先归一化，再进行严格业务校验；
-- 已验证的语义结果进入本地缓存，本地步骤重试可以复用；
-- 修改前创建 Snapshot，写回、版本、报告和激活在本地事务中衔接；
-- 任一步骤失败都会恢复修改前状态；
-- 失败 Publication 记录 `failure_reason` 和 `fallback_version`；
-- pending 事件不会因失败丢失；
-- 本地文件使用原子替换，避免读取到半写入结果；
-- API Key、认证头和不必要的完整敏感对话不会写入 Review Trace。
-
-## 主要配置
-
-| 变量 | 说明 | 默认值 |
-|---|---|---|
-| `DREAM_HOME` | Ledger、Memory、Snapshot 和 Report 目录 | `~/.dream` |
-| `DREAM_REVIEW_BACKEND` | `deterministic` 或 `openai` | `deterministic` |
-| `DREAM_REVIEW_MODEL` | Background Review 模型 | — |
-| `DREAM_REVIEW_BASE_URL` | OpenAI-compatible Base URL | — |
-| `DREAM_LLM_API_KEY` | Provider API Key | — |
-| `DREAM_REVIEW_IDLE_HOURS` | 空闲触发时长 | `2` |
-| `DREAM_REVIEW_MAX_BATCH_TOKENS` | 单批估算 Token 上限 | `16000` |
-| `DREAM_REVIEW_MAX_BATCH_EVENTS` | 单批事件上限 | `20` |
-| `DREAM_REVIEW_MAX_WAIT_HOURS` | 最早事件最大等待 | `24` |
-| `DREAM_LLM_STRUCTURED_MODE` | `auto`、`tools` 或 `json` | `auto` |
-| `DREAM_LLM_TIMEOUT_SECONDS` | 单次 Provider 请求超时 | `90` |
-| `DREAM_LLM_TRUST_ENV` | 是否读取 HTTP(S) 代理环境 | `true` |
-| `DREAM_DEADLINE_SECONDS` | 一次普通 Dream 总截止时间 | `300` |
-| `DREAM_TIMEZONE` | 调度时区 | `Asia/Shanghai` |
-| `DREAM_CURATOR_DAILY_HOUR` | 确定性 Curator 每日兜底小时 | `3` |
-| `DREAM_CURATOR_CONSOLIDATE` | 是否启用语义 Curator | `false` |
-| `DREAM_CURATOR_CONSOLIDATE_INTERVAL_HOURS` | 语义 Curator 周期 | `168` |
-| `DREAM_CURATOR_CONSOLIDATE_MIN_IDLE_HOURS` | 语义 Curator 最小空闲 | `2` |
-| `DREAM_VALIDATION_REQUIRE_ACTIVE_WRITEBACK` | 下一任务是否强制要求 Active 版本 | `false` |
-
-完整配置见 [.env.example](.env.example)。
-
-## 在 PyCharm 中运行
-
-### Python 解释器
-
-选择项目自己的解释器：
-
-```text
-<project>/DREAM/.venv/bin/python
-```
-
-### FastAPI Run Configuration
-
-在 `Run/Debug Configurations` 中新增 Python 配置：
-
-```text
-Name: DREAM API
-Run: Module name
-Module: uvicorn
-Parameters: dream.api:app --host 127.0.0.1 --port 8765
-Working directory: <project>/DREAM
-Environment variables:
-  DREAM_ENV_FILE=<project>/DREAM/.env
-```
-
-如果使用独立测试数据，创建新的 `.env.local` 并设置新的 `DREAM_HOME`，不要删除或复用正式运行目录。
-
-## 测试
-
-运行完整测试：
+### 不依赖外部服务的短期记忆测试
 
 ```bash
-PYTHONDONTWRITEBYTECODE=1 \
-python -m pytest -q -p no:cacheprovider
+PYTHONPATH=src .venv/bin/python -m pytest -q \
+  tests/api/test_conversation_handler.py \
+  tests/api/test_redis_session_context.py \
+  tests/headroom/test_session_compression.py \
+  tests/integrations/test_headroom_client.py \
+  tests/application/test_short_term_runtime.py
 ```
 
-运行三个核心能力的最小验证：
+这些测试验证 Redis key/TTL、读写顺序、journals 恢复、三类触发条件、后台压缩、summary
+写入、production 失败保护、匿名 scope 和 Agent Proxy 边界。
+
+### 真实 Redis
 
 ```bash
-PYTHONDONTWRITEBYTECODE=1 \
-python -m pytest -q -p no:cacheprovider \
-  tests/governance/test_closed_loop_governance.py \
-  tests/e2e/test_api.py \
-  tests/retrieval/test_memory_retrieval_skill.py
+DREAM_RUN_REDIS_INTEGRATION=1 \
+DREAM_REDIS_URL=redis://127.0.0.1:6379/15 \
+PYTHONPATH=src .venv/bin/python -m pytest -q -s \
+tests/integrations/test_redis_session_context.py
 ```
 
-代码检查：
+### 真实 Headroom 自动路由
 
 ```bash
-ruff check src tests
+DREAM_RUN_HEADROOM_AUTO_ROUTING=1 \
+HEADROOM_SERVICE_URL=http://127.0.0.1:8787 \
+PYTHONPATH=src .venv/bin/python -m pytest -q -s \
+tests/headroom/test_headroom_auto_routing.py
 ```
 
-正式端到端测试必须通过 FastAPI 导入原始会话，并由 DREAM 完成提取、治理、写回、版本和激活。测试脚本不能直接调用模型后手工写 `USER.md` 或 Decision Cards。
+### 官方 Proxy CCR 验收
 
-## GitHub 与本地数据安全
-
-可以提交：
-
-- `src/dream/`
-- `tests/`
-- `docs/`
-- `README.md`
-- `pyproject.toml`
-- `.env.example`
-
-必须留在本地：
-
-```text
-.env
-.env.*
-.venv/
-.idea/
-validation-run/
-__pycache__/
-.pytest_cache/
-.ruff_cache/
-*.local.jsonl
+```bash
+DREAM_RUN_HEADROOM_PROXY_CCR=1 \
+DREAM_HEADROOM_BINARY="$HOME/.local/bin/headroom" \
+PYTHONPATH=src .venv/bin/python -m pytest -q -s \
+tests/headroom/test_headroom_proxy_ccr_flow.py
 ```
 
-不要把 API Key、真实聊天记录、Ledger、用户画像、决策卡、Snapshot 或运行报告上传到 GitHub。
+这个测试必须验证完整链路，而不只是 token 下降：
 
-## 文档
+1. Proxy 对上下文进行了真实压缩。
+2. 模型侧发现需要压缩前的原文。
+3. 官方 Headroom 处理 `headroom_retrieve`。
+4. Proxy 自动继续上游请求并得到最终回答。
 
-- [AI 决策进化与用户画像](docs/ai-evolution-and-user-persona.md)
-- [DREAM 做梦机制](docs/dream-mechanism.md)
+当前不能把第 3–4 步写成已通过；只有该 opt-in 验收在目标 Headroom 版本和真实公司模型
+供应商路径上成功后，CCR 才能从“部分实现”改为“已验收”。
 
-## 当前边界
+## 关键代码位置
 
-- Retrieval 当前使用本地词法匹配和确定性排序，尚未接入 Embedding、BM25 或外部 Reranker；
-- Memory Retrieval 是独立 Python Runtime，尚未提供 HTTP 接口；
-- Workflow Skill 仍处于候选和审计阶段，没有完整的检索、选择和执行 Runtime；
-- 语义 Curator 默认关闭；
-- DREAM 默认只监听本机，生产部署需要由外部网关提供认证、授权、TLS、限流和审计。
+| 职责 | 文件 |
+|---|---|
+| Redis session、history、journals 恢复、触发策略 | `src/dream/api/conversation_handler.py` |
+| Agent-facing runtime 装配 | `src/dream/api/short_term_runtime.py` |
+| redis-py 连接生命周期 | `src/dream/api/redis_runtime.py` |
+| Headroom `/v1/compress` HTTP 适配器 | `src/dream/integrations/headroom_client.py` |
+| 后台压缩、五类 summary、Redis 写入 | `src/dream/memory/session_compression.py` |
+| journals JSONL | `src/dream/storage/journal_store.py` |
+| 去标识化 Headroom scope | `src/dream/api/optimization_scope.py` |
+| 配置 | `src/dream/config.py` |
+
+更详细的实现说明见 [docs/short-term-memory.md](docs/short-term-memory.md)。
+
+## 当前明确限制
+
+- DREAM 不调用最终回答模型；只有公司 Agent 接入后才能完成真实回答链路。
+- 当前 `PreparedTurn.headroom_proxy_url` 直接提供 OpenAI-compatible `/v1` 路径；若公司
+  Agent 使用 Anthropic 原生 SDK，需要在 Agent adapter 中使用 Headroom 服务根 URL。
+- Redis 之外的持久化 summary snapshot 只有读取接口，默认 runtime 尚未装配；Redis 和
+  summary 同时过期时，当前可靠恢复源是 journals。
+- Headroom CCR 缓存有 TTL，不能替代 journals 的长期、精确、可审计原文。
+- 不是每次 Headroom 压缩都会产生 CCR marker；`router:noop` 或不带 marker 的结果不能
+  通过 CCR 恢复。DREAM 不伪造 marker，也不自行实现私有召回协议。
+- 历史会话 UI、跨 session 中长期记忆检索和 Wiki 写入不属于本分支。
