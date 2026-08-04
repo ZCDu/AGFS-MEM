@@ -54,6 +54,17 @@ There are two credential kinds, and both arrive in the same
 
 Configure at least one. Either satisfies startup.
 
+### Built-in admin account
+
+On first startup, if no users exist, the server creates a default admin:
+
+- **Username:** `admin`
+- **Password:** `admin123456`
+- **Admin:** yes
+
+**Change the password immediately.** Log in at `http://localhost:8000/chat`
+or `POST /v1/auth/login`, then `POST /v1/auth/password`.
+
 ### Username and password (people)
 
 ```powershell
@@ -211,6 +222,21 @@ Served by the app rather than opened as a file, because there is no CORS
 middleware — a `file://` page cannot call the API.
 
 `http://127.0.0.1:8000/docs` remains available for raw request/response work.
+
+## Chat UI
+
+```
+http://127.0.0.1:8000/chat
+```
+
+A ChatGPT-style interface with memory-aware responses. Features:
+- Drag and drop files anywhere on the page
+- Ctrl+V to paste files
+- Click the 📎 paperclip button to browse
+- Files appear as chips below the input, then move into the message bubble on send
+- Supported formats: .txt, .md, .json, .csv, .log, .docx, .xlsx, .pdf
+- .docx, .xlsx, .pdf are text-extracted for the LLM
+- Files are stored per session under `{user_id}/raw/{session_id}/{file_id}/`
 
 ## The `mem` command
 
