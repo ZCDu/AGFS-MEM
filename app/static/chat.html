@@ -1,0 +1,426 @@
+<!DOCTYPE html>
+<!--
+  Chat UI, served by the app at /chat.
+
+  Three panes, matching the three stages of the pipeline: the conversation on
+  the left, what memory was retrieved to answer it in the middle-right, and
+  the extraction review below that. The middle pane exists because a memory
+  system that silently decides what it knows is impossible to debug — you need
+  to see WHICH entities informed an answer.
+
+  Extraction is two explicit steps: Review builds a plan and writes nothing,
+  Apply commits it. A model deciding on its own what to write into long-term
+  memory is how memory fills with hallucinations.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Chat</title>
+<style>
+  :root {
+    --bg:#e9edf2; --panel:#fff; --ink:#16202b; --ink-soft:#5c6b7a;
+    --line:#ccd5de; --line-soft:#e3e9ef; --accent:#2f4fd4;
+    --danger:#b3442f; --ok:#1f7a6b; --warn:#c07d12;
+    --mono: ui-monospace,"Cascadia Mono",Consolas,"Liberation Mono",monospace;
+    --sans:"Segoe UI",system-ui,-apple-system,sans-serif;
+  }
+  *{box-sizing:border-box} html,body{height:100%;margin:0}
+  body{font:14px/1.5 var(--sans); color:var(--ink); background:var(--bg);
+       display:grid; grid-template-columns:1fr 340px; grid-template-rows:46px 1fr;
+       grid-template-areas:"top top" "chat side"}
+
+  header{grid-area:top; display:flex; align-items:center; gap:12px; padding:0 14px;
+         background:var(--panel); border-bottom:1px solid var(--line)}
+  header h1{font:600 13px var(--sans); letter-spacing:.08em; text-transform:uppercase;
+            margin:0; color:var(--ink-soft)}
+  header .sp{flex:1}
+  a.navlink{font-size:12px; color:var(--accent); text-decoration:none}
+  a.navlink:hover{text-decoration:underline}
+
+  main{grid-area:chat; display:flex; flex-direction:column; min-height:0}
+  #log{flex:1; overflow-y:auto; padding:18px 20px}
+  .msg{max-width:min(760px,92%); margin:0 0 14px; display:flex; gap:10px}
+  .msg .who{font:600 10px var(--sans); letter-spacing:.08em; text-transform:uppercase;
+            color:var(--ink-soft); flex:0 0 46px; padding-top:3px}
+  .msg .body{background:var(--panel); border:1px solid var(--line-soft);
+             border-radius:4px; padding:9px 12px; white-space:pre-wrap; flex:1}
+  .msg.user .body{background:#e8ecfb; border-color:#d2daf5}
+  .msg.err .body{border-color:#e6c4bc; color:var(--danger)}
+  .msg .cite{margin-top:7px; padding-top:6px; border-top:1px solid var(--line-soft);
+             font:11px var(--mono); color:var(--ink-soft)}
+
+  .composer{border-top:1px solid var(--line); background:var(--panel); padding:11px 14px}
+  .composer .row{display:flex; gap:8px; align-items:flex-end}
+  textarea,input,select,button{font:14px var(--sans); color:var(--ink);
+    border:1px solid var(--line); border-radius:3px; padding:8px 10px; background:#fff}
+  textarea{flex:1; resize:vertical; min-height:44px; max-height:180px}
+  button{cursor:pointer; background:var(--ink); color:#fff; border-color:var(--ink);
+         font-weight:600; white-space:nowrap}
+  button:hover{background:#22303f}
+  button:disabled{opacity:.5; cursor:default}
+  button.ghost{background:#fff; color:var(--ink); border-color:var(--line); font-weight:500}
+  button.ghost:hover{background:var(--bg)}
+  button.sm{padding:4px 9px; font-size:12px}
+  :focus-visible{outline:2px solid var(--accent); outline-offset:1px}
+  .hint{font-size:11px; color:var(--ink-soft); margin-top:6px}
+
+  aside{grid-area:side; background:var(--panel); border-left:1px solid var(--line);
+        overflow-y:auto; display:flex; flex-direction:column}
+  section{padding:12px 14px; border-bottom:1px solid var(--line-soft)}
+  section h2{font:600 11px var(--sans); letter-spacing:.09em; text-transform:uppercase;
+             color:var(--ink-soft); margin:0 0 9px}
+  label{display:block; font-size:11px; color:var(--ink-soft); margin:7px 0 3px}
+  .muted{color:var(--ink-soft); font-size:12px}
+  .item{border:1px solid var(--line-soft); border-radius:3px; padding:7px 9px;
+        margin-bottom:6px; background:#fcfdfe}
+  .id{font:10px var(--mono); color:var(--ink-soft)}
+  .pill{display:inline-block; font:10px var(--mono); letter-spacing:.04em;
+        text-transform:uppercase; color:#fff; padding:2px 6px; border-radius:2px}
+  .op{font:11px var(--mono); padding:3px 0; border-bottom:1px solid var(--line-soft);
+       overflow-wrap:anywhere}
+  .op:last-child{border-bottom:0}
+  .errbox{border:1px solid #e6c4bc; background:#fdf3f1; color:var(--danger);
+          border-radius:3px; padding:8px; margin-top:8px; font-size:12px;
+          max-height:220px; overflow-y:auto; white-space:pre-wrap;
+          overflow-wrap:anywhere}
+  .errbox .top{font-weight:600; margin-bottom:4px}
+  .errbox button{margin-top:6px}
+
+  #toast{position:fixed; right:16px; bottom:16px; max-width:min(460px,calc(100vw - 32px));
+         max-height:40vh; overflow-y:auto; background:var(--ink);
+         color:#fff; padding:9px 12px; border-radius:3px; font-size:13px; opacity:0;
+         transform:translateY(6px); transition:opacity .18s,transform .18s;
+         pointer-events:none; z-index:9;
+         /* Errors from a model or a stack trace can be one unbroken string
+            with nothing to wrap on, which otherwise runs off the screen and
+            takes the layout with it. */
+         white-space:pre-wrap; overflow-wrap:anywhere}
+  #toast.show{opacity:1; transform:none}
+  #toast.err{background:var(--danger)}
+  @media (prefers-reduced-motion: reduce){#toast{transition:none}}
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Chat</h1>
+  <label for="user" style="margin:0">User</label>
+  <input id="user" value="demo" style="width:110px; font-family:var(--mono); padding:4px 7px">
+  <label for="token" style="margin:0">Token</label>
+  <input id="token" type="password" placeholder="if auth is on" autocomplete="off"
+         style="width:130px; font-family:var(--mono); padding:4px 7px">
+  <button class="sm ghost" id="signin" style="padding:4px 9px">Sign in</button>
+  <button class="sm ghost" id="signout" style="padding:4px 9px">Sign out</button>
+  <span class="sp"></span>
+  <span id="who" class="muted" style="font-size:11px"></span>
+  <a class="navlink" href="/gui">Graph editor &rarr;</a>
+</header>
+
+<main>
+  <div id="log">
+    <div class="msg">
+      <span class="who">System</span>
+      <div class="body">Ask something. Anything already in memory for this user will be
+retrieved and used to answer — what was retrieved appears on the right.
+
+When the conversation contains something worth keeping, press <strong>Review extraction</strong>.
+That proposes changes without writing anything.</div>
+    </div>
+  </div>
+  <div class="composer">
+    <div class="row">
+      <textarea id="input" placeholder="Type a message, then Enter to send (Shift+Enter for a new line)"></textarea>
+      <button id="send">Send</button>
+    </div>
+    <div class="hint">
+      <label style="display:inline; margin:0">
+        <input type="checkbox" id="usemem" checked style="width:auto; vertical-align:-2px"> use memory
+      </label>
+      &nbsp;·&nbsp; <span id="turns">0 turns</span>
+      &nbsp;·&nbsp; <span id="sess" class="muted"></span>
+      &nbsp;·&nbsp; <a href="#" id="clear" class="navlink">clear conversation</a>
+    </div>
+  </div>
+</main>
+
+<aside>
+  <section>
+    <h2>Memory used in the last reply</h2>
+    <div id="context"><p class="muted">Nothing retrieved yet.</p></div>
+  </section>
+
+  <section>
+    <h2>Extraction</h2>
+    <p class="muted">Turn this conversation into stored memory. Review first — it writes nothing.</p>
+    <div style="height:8px"></div>
+    <div class="row" style="display:flex; gap:6px">
+      <button class="ghost sm" id="review">Review extraction</button>
+      <button class="sm" id="apply" disabled>Apply</button>
+    </div>
+    <div id="plan" style="margin-top:10px"></div>
+  </section>
+</aside>
+
+<div id="toast" role="status" aria-live="polite"></div>
+
+<script src="/static/auth.js"></script>
+<script>
+const $ = id => document.getElementById(id);
+let messages = [];          // {role, content}
+// The operations from the last reviewed plan. /extract/apply takes these, not
+// the transcript — so what gets written is exactly what was shown, rather than
+// a fresh extraction that might differ.
+let reviewedOps = null;
+let reviewedFrom = null;    // transcript the plan was built from
+// Assigned by the server on the first turn and echoed back on every later one,
+// so the whole conversation lands in a single session file rather than one
+// file per turn.
+let sessionId = null;
+let sessionDate = null;
+
+const user = () => $("user").value.trim() || "demo";
+const base = () => `/v1/users/${encodeURIComponent(user())}`;
+const esc = t => String(t == null ? "" : t).replace(/[<>&"]/g, c =>
+  ({"<":"&lt;",">":"&gt;","&":"&amp;",'"':"&quot;"}[c]));
+
+function toast(msg, isErr) {
+  const t = $("toast");
+  t.textContent = msg;
+  t.className = "show" + (isErr ? " err" : "");
+  clearTimeout(toast._t);
+  toast._t = setTimeout(() => (t.className = ""), 4000);
+}
+
+const authHeaders = () => MemAuth.headers();
+
+async function api(method, path, body) {
+  const res = await fetch(base() + path, {
+    method,
+    headers: {...(body ? {"content-type": "application/json"} : {}), ...authHeaders()},
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  const text = await res.text();
+  let data = null;
+  try { data = text ? JSON.parse(text) : null; } catch { data = text; }
+  if (!res.ok) {
+    let detail = data && data.detail
+      ? (typeof data.detail === "string" ? data.detail : JSON.stringify(data.detail))
+      : `HTTP ${res.status}`;
+    if (res.status === 401) detail += " — paste a token above.";
+    if (res.status === 403) detail += " — that token is for a different user.";
+    if (res.status === 503) detail += " — set DEEPSEEK_API_KEY in .env and restart.";
+    throw new Error(detail);
+  }
+  return data;
+}
+
+/* ---------------- conversation ---------------- */
+
+function render() {
+  $("log").innerHTML = messages.map(m => `
+    <div class="msg ${m.role === "user" ? "user" : ""}${m.error ? " err" : ""}">
+      <span class="who">${m.role === "user" ? "You" : "Bot"}</span>
+      <div class="body">${esc(m.content)}${
+        m.cites && m.cites.length
+          ? `<div class="cite">memory: ${m.cites.map(c => esc(c.wiki_id)).join(", ")}</div>`
+          : ""}</div>
+    </div>`).join("");
+  $("log").scrollTop = $("log").scrollHeight;
+  $("turns").textContent = `${messages.length} turn${messages.length === 1 ? "" : "s"}`;
+}
+
+function transcript() {
+  return messages.map(m => `${m.role === "user" ? "User" : "Assistant"}: ${m.content}`)
+                 .join("\n\n");
+}
+
+async function send() {
+  const text = $("input").value.trim();
+  if (!text) return;
+  $("input").value = "";
+  messages.push({role: "user", content: text});
+  render();
+
+  $("send").disabled = true;
+  messages.push({role: "assistant", content: "…"});
+  render();
+
+  try {
+    const res = await api("POST", "/chat", {
+      messages: messages.filter(m => m.content !== "…")
+                        .map(m => ({role: m.role, content: m.content})),
+      use_memory: $("usemem").checked,
+      session_id: sessionId,
+    });
+    if (res.session_id) {
+      sessionId = res.session_id;
+      sessionDate = new Date().toISOString().slice(0, 10);
+      $("sess").textContent = "session " + sessionId;
+    }
+    messages.pop();
+    messages.push({role: "assistant", content: res.reply, cites: res.context_used});
+    renderContext(res.context_used);
+  } catch (e) {
+    messages.pop();
+    messages.push({role: "assistant", content: e.message, error: true});
+  } finally {
+    $("send").disabled = false;
+    render();
+    // The plan was built from an older transcript, so it no longer matches
+    // what is on screen. Better to invalidate than to apply something stale.
+    if (reviewedFrom !== null && reviewedFrom !== transcript()) {
+      $("apply").disabled = true;
+      reviewedOps = null; reviewedFrom = null;
+    }
+  }
+}
+
+function renderContext(used) {
+  if (!used || !used.length) {
+    $("context").innerHTML = `<p class="muted">Nothing in memory matched that message.</p>`;
+    return;
+  }
+  $("context").innerHTML = used.map(c => `
+    <div class="item">
+      <div>${esc(c.title)}</div>
+      <div class="id">${esc(c.wiki_id)} · matched on ${esc(c.matched_on)} · ${c.confidence}</div>
+    </div>`).join("");
+}
+
+/* ---------------- extraction ---------------- */
+
+const OP_COLOUR = {upsert_entity: "var(--accent)", add_fact: "var(--ok)",
+                   link_entities: "var(--warn)"};
+
+function showError(title, message) {
+  // Truncate on screen but keep the whole thing reachable: a validation error
+  // can be thousands of characters, and burying the first line — which is the
+  // part that names the problem — makes it unreadable.
+  const full = String(message || "");
+  const short = full.length > 400 ? full.slice(0, 400) + "…" : full;
+  console.error(title + ":", full);
+  $("plan").innerHTML = `
+    <div class="errbox">
+      <div class="top">${esc(title)}</div>
+      <div id="errtext">${esc(short)}</div>
+      ${full.length > 400
+        ? `<button class="ghost sm" id="errmore">Show all ${full.length} characters</button>`
+        : ""}
+      <button class="ghost sm" id="errcopy">Copy</button>
+    </div>`;
+  const more = $("errmore");
+  if (more) more.onclick = () => { $("errtext").textContent = full; more.remove(); };
+  $("errcopy").onclick = async () => {
+    try { await navigator.clipboard.writeText(full); toast("Copied"); }
+    catch { toast("Could not copy — it is also in the browser console", true); }
+  };
+}
+
+function renderPlan(plan) {
+  const parts = [];
+  const tone = plan.decision === "store" ? "var(--ok)"
+             : plan.decision === "review" ? "var(--warn)" : "var(--ink-soft)";
+  parts.push(`<div><span class="pill" style="background:${tone}">${esc(plan.decision)}</span>
+    <span class="muted" style="margin-left:6px">${plan.llm_used ? "model ran" : "no model call"}</span></div>`);
+
+  if (!plan.operations.length) {
+    parts.push(`<p class="muted" style="margin-top:8px">Nothing proposed.</p>`);
+  } else {
+    parts.push(`<div style="margin-top:9px">` + plan.operations.map(o => `
+      <div class="op"><span style="color:${OP_COLOUR[o.op] || "var(--ink)"}">${esc(o.op)}</span>
+        ${esc(o.wiki_id)}${o.status !== "proposed" ? ` <em>${esc(o.status)}</em>` : ""}
+        ${o.detail ? `<div class="muted" style="font-size:10px">${esc(o.detail)}</div>` : ""}
+      </div>`).join("") + `</div>`);
+  }
+  for (const r of plan.rejected || []) {
+    parts.push(`<div class="muted" style="margin-top:7px; color:var(--danger)">${esc(r.reason)}</div>`);
+  }
+  if (plan.discarded && plan.discarded.length) {
+    parts.push(`<div class="muted" style="margin-top:7px">Left out: ${
+      plan.discarded.map(esc).join("; ")}</div>`);
+  }
+  $("plan").innerHTML = parts.join("");
+}
+
+$("review").onclick = async () => {
+  if (!messages.length) return toast("Say something first", true);
+  $("review").disabled = true;
+  try {
+    const text = transcript();
+    // Passing the session stamps every extracted fact with where it came
+    // from, so a stored claim can be traced back to the exact conversation.
+    const plan = await api("POST", "/extract",
+      {text, session_id: sessionId, session_date: sessionDate});
+    renderPlan(plan);
+    reviewedOps = plan.operations.filter(o => o.status === "proposed");
+    reviewedFrom = text;
+    $("apply").disabled = !reviewedOps.length;
+    if (!plan.operations.length) toast("Nothing worth storing yet");
+  } catch (e) {
+    showError("Review failed", e.message);
+  } finally { $("review").disabled = false; }
+};
+
+$("apply").onclick = async () => {
+  if (!reviewedOps || !reviewedOps.length) return toast("Review first", true);
+  $("apply").disabled = true;
+  try {
+    const res = await api("POST", "/extract/apply", {
+      operations: reviewedOps.map(o => ({
+        op: o.op, wiki_id: o.wiki_id, payload: o.payload, reason: o.reason || "",
+      })),
+    });
+    renderPlan({decision: "applied", llm_used: false,
+                operations: res.operations, rejected: [], discarded: []});
+    toast(res.failed
+      ? `Stored ${res.applied}, ${res.failed} failed — see the panel`
+      : `Stored ${res.applied} change${res.applied === 1 ? "" : "s"}`,
+      res.failed > 0);
+    reviewedOps = null; reviewedFrom = null;
+  } catch (e) {
+    showError("Apply failed", e.message);
+    $("apply").disabled = false;
+  }
+};
+
+/* ---------------- wiring ---------------- */
+
+$("send").onclick = send;
+$("input").addEventListener("keydown", e => {
+  if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); }
+});
+$("clear").onclick = e => {
+  e.preventDefault();
+  messages = []; reviewedOps = null; reviewedFrom = null;
+  // A new conversation is a new session; keeping the old id would append
+  // unrelated turns to a stored transcript.
+  sessionId = null; sessionDate = null;
+  $("sess").textContent = "";
+  $("apply").disabled = true;
+  $("plan").innerHTML = "";
+  renderContext([]);
+  render();
+};
+
+MemAuth.install({
+  onSignedIn: () => {
+    // A new identity means a different memory namespace, so anything on
+    // screen was answered from someone else's graph.
+    messages = []; reviewedOps = null; reviewedFrom = null;
+  // A new conversation is a new session; keeping the old id would append
+  // unrelated turns to a stored transcript.
+  sessionId = null; sessionDate = null;
+  $("sess").textContent = "";
+    $("apply").disabled = true;
+    $("plan").innerHTML = "";
+    renderContext([]);
+    render();
+    toast("Signed in");
+  },
+});
+
+render();
+</script>
+</body>
+</html>

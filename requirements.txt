@@ -1,0 +1,27 @@
+fastapi>=0.115
+uvicorn[standard]>=0.30
+pydantic>=2.7
+pyyaml>=6.0
+python-dotenv>=1.0
+
+# Needed only when STORAGE_BACKEND=s3:
+# boto3>=1.34
+
+# Storage via a mirage-ai Workspace (STORAGE_BACKEND=mirage). Installed by
+# default: leaving these commented out meant MirageBackend was never
+# exercised and its whole test file skipped silently.
+# Requires Python >= 3.12. aioboto3 is what mirage's S3Resource imports.
+mirage-ai>=0.0.4
+aioboto3>=13.0
+
+# Optional: shared cache across workers/replicas. Mirage's cache is
+# per-process RAM by default; the redis extra provides RedisIndexCacheStore
+# and RedisFileCacheStore so cache state is shared and survives restarts.
+# Worth adding if you run more than one worker (see "Cache" in the README).
+# mirage-ai[redis]>=0.0.4
+
+# Needed only for running tests:
+# pytest>=8.0
+# httpx>=0.27
+# moto[s3]>=5.0     # simulates S3 for tests/test_s3_backend.py
+python-multipart>=0.0.9

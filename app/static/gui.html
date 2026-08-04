@@ -1,0 +1,812 @@
+<!DOCTYPE html>
+<!--
+  Memory graph editor, served by the app itself at /gui.
+
+  Served from the API's own origin on purpose: the app has no CORS
+  middleware, so a page opened from the filesystem could not call the API at
+  all. Same-origin removes the question entirely.
+
+  No CDN, no build step, no framework. Every asset is inline because this has
+  to work on a machine that cannot reliably reach a CDN, and because a tool
+  for inspecting storage should not itself depend on the network.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Memory graph</title>
+<style>
+  :root {
+    --bg: #e9edf2;
+    --panel: #ffffff;
+    --ink: #16202b;
+    --ink-soft: #5c6b7a;
+    --line: #ccd5de;
+    --line-soft: #e3e9ef;
+    --accent: #2f4fd4;
+    --danger: #b3442f;
+    --ok: #1f7a6b;
+
+    /* One hue per entity type. Eight types need eight distinguishable
+       colours; these are muted enough to sit behind text without shouting. */
+    --t-person: #c9455e;
+    --t-organization: #1f7a6b;
+    --t-project: #2f6fb5;
+    --t-event: #c07d12;
+    --t-concept: #7048a8;
+    --t-artifact: #55707f;
+    --t-preference: #6f8a1e;
+    --t-decision: #b3442f;
+
+    --mono: ui-monospace, "Cascadia Mono", "Cascadia Code", Consolas, "Liberation Mono", monospace;
+    --sans: "Segoe UI", system-ui, -apple-system, sans-serif;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    font: 14px/1.45 var(--sans);
+    color: var(--ink);
+    background: var(--bg);
+    display: grid;
+    grid-template-columns: 260px 1fr 340px;
+    grid-template-rows: 46px 1fr;
+    grid-template-areas: "top top top" "left canvas right";
+  }
+
+  /* ---------- chrome ---------- */
+  header {
+    grid-area: top; display: flex; align-items: center; gap: 12px;
+    padding: 0 14px; background: var(--panel);
+    border-bottom: 1px solid var(--line);
+  }
+  header h1 {
+    font: 600 13px var(--sans); letter-spacing: .08em; text-transform: uppercase;
+    margin: 0; color: var(--ink-soft);
+  }
+  header .sp { flex: 1; }
+  #stats { font: 12px var(--mono); color: var(--ink-soft); }
+
+  aside {
+    background: var(--panel); overflow-y: auto;
+    display: flex; flex-direction: column;
+  }
+  aside.left { grid-area: left; border-right: 1px solid var(--line); }
+  aside.right { grid-area: right; border-left: 1px solid var(--line); }
+
+  section { padding: 12px 14px; border-bottom: 1px solid var(--line-soft); }
+  section h2 {
+    font: 600 11px var(--sans); letter-spacing: .09em; text-transform: uppercase;
+    color: var(--ink-soft); margin: 0 0 9px;
+  }
+
+  /* ---------- controls ---------- */
+  label { display: block; font-size: 11px; color: var(--ink-soft); margin: 8px 0 3px; }
+  input, select, textarea, button {
+    font: 13px var(--sans); color: var(--ink);
+    width: 100%; padding: 6px 8px;
+    border: 1px solid var(--line); border-radius: 3px; background: #fff;
+  }
+  input[type=number] { font-family: var(--mono); }
+  textarea { resize: vertical; min-height: 54px; }
+  button {
+    cursor: pointer; background: var(--ink); color: #fff; border-color: var(--ink);
+    font-weight: 600; letter-spacing: .02em;
+  }
+  button:hover { background: #22303f; }
+  button.ghost { background: #fff; color: var(--ink); border-color: var(--line); font-weight: 500; }
+  button.ghost:hover { background: var(--bg); }
+  button.danger { background: #fff; color: var(--danger); border-color: #e6c4bc; }
+  button.danger:hover { background: #fdf3f1; }
+  button.sm { padding: 3px 7px; font-size: 12px; width: auto; }
+  .row { display: flex; gap: 6px; align-items: center; }
+  .row > * { min-width: 0; }
+  :focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+  /* ---------- entity list ---------- */
+  .elist { padding: 0; }
+  .eitem {
+    display: flex; align-items: baseline; gap: 8px;
+    padding: 7px 14px; cursor: pointer; border-bottom: 1px solid var(--line-soft);
+  }
+  .eitem:hover { background: var(--bg); }
+  .eitem[aria-selected=true] { background: #e8ecfb; box-shadow: inset 3px 0 0 var(--accent); }
+  .dot { width: 8px; height: 8px; border-radius: 50%; flex: 0 0 8px; }
+  .eitem .tt { flex: 1; }
+  .eitem .id { font: 11px var(--mono); color: var(--ink-soft); }
+
+  /* ---------- graph ---------- */
+  main { grid-area: canvas; position: relative; overflow: hidden; }
+  svg { width: 100%; height: 100%; display: block; cursor: grab; }
+  svg.dragging { cursor: grabbing; }
+  .edge { stroke: #9aa8b6; stroke-width: 1.3; }
+  .edge.refines { stroke-dasharray: 5 3; }
+  .edge.contradicts { stroke: var(--danger); stroke-width: 2; }
+  .edge.causes { stroke: var(--ok); }
+  .edge.temporal_before, .edge.temporal_after { stroke-dasharray: 2 3; }
+  .edge.dim { stroke-opacity: .18; }
+  .elabel { font: 10px var(--mono); fill: var(--ink-soft); pointer-events: none; }
+  .node circle { stroke: #fff; stroke-width: 2; cursor: pointer; }
+  .node.sel circle { stroke: var(--ink); stroke-width: 3; }
+  .node.dim { opacity: .28; }
+  .node text { font: 11px var(--sans); fill: var(--ink); pointer-events: none; }
+  .node text.badge { font: 600 9px var(--mono); fill: var(--ink-soft); }
+  .empty {
+    position: absolute; inset: 0; display: grid; place-content: center;
+    text-align: center; color: var(--ink-soft); padding: 24px;
+    /* Never intercept clicks. This overlay covers the entire canvas, so
+       without this any pointer event aimed at a node hits the overlay
+       instead and the graph appears unresponsive. */
+    pointer-events: none;
+  }
+  /* Required. [hidden] is a user-agent rule, and the author-level
+     `display: grid` above beats it — so setting .hidden in JS did nothing and
+     the overlay stayed on screen even once entities existed. */
+  .empty[hidden] { display: none; }
+
+  /* The sign-in modal lives in /static/auth.js now, which carries its own
+     styles. Its [hidden] handling is the lesson from .empty above: display
+     must come from CSS, never an inline style, or [hidden] cannot win. */
+  .empty code { font: 12px var(--mono); background: var(--panel); padding: 2px 5px; border-radius: 3px; }
+
+  .legend {
+    /* Also an overlay over the canvas, so it must not eat clicks either. */
+    pointer-events: none;
+    position: absolute; left: 12px; bottom: 12px; background: var(--panel);
+    border: 1px solid var(--line); border-radius: 3px; padding: 8px 10px;
+    display: grid; grid-template-columns: auto auto; gap: 2px 10px;
+    font-size: 11px; color: var(--ink-soft);
+  }
+  .legend span { display: flex; align-items: center; gap: 5px; }
+
+  /* ---------- detail ---------- */
+  .pill {
+    display: inline-block; font: 10px var(--mono); letter-spacing: .04em;
+    text-transform: uppercase; color: #fff; padding: 2px 6px; border-radius: 2px;
+  }
+  .item {
+    border: 1px solid var(--line-soft); border-radius: 3px;
+    padding: 8px; margin-bottom: 7px; background: #fcfdfe;
+  }
+  .item .id { font: 10px var(--mono); color: var(--ink-soft); }
+  .muted { color: var(--ink-soft); font-size: 12px; }
+  #toast {
+    position: fixed; right: 16px; bottom: 16px; max-width: 380px;
+    background: var(--ink); color: #fff; padding: 9px 12px; border-radius: 3px;
+    font-size: 13px; opacity: 0; transform: translateY(6px);
+    transition: opacity .18s, transform .18s; pointer-events: none; z-index: 9;
+  }
+  #toast.show { opacity: 1; transform: none; }
+  #toast.err { background: var(--danger); }
+  @media (prefers-reduced-motion: reduce) { #toast { transition: none; } }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Memory graph</h1>
+  <div class="row" style="width:auto">
+    <label for="user" style="margin:0">User</label>
+    <input id="user" value="demo" style="width:130px; font-family:var(--mono)">
+    <label for="token" style="margin:0">Token</label>
+    <input id="token" type="password" placeholder="token, or sign in"
+           style="width:130px; font-family:var(--mono)" autocomplete="off">
+    <button class="sm" id="load">Load</button>
+    <button class="sm ghost" id="signin">Sign in</button>
+    <button class="sm ghost" id="signout">Sign out</button>
+    <label for="depth" style="margin:0">Depth</label>
+    <select id="depth" style="width:56px">
+      <option>1</option><option selected>2</option><option>3</option><option>4</option>
+    </select>
+    <span id="who" class="muted" style="font-size:11px"></span>
+  </div>
+  <span class="sp"></span>
+  <span id="stats"></span>
+</header>
+
+<aside class="left">
+  <section>
+    <h2>Add entity</h2>
+    <label for="ntype">Type</label>
+    <select id="ntype">
+      <option>person</option><option>organization</option><option>project</option>
+      <option>event</option><option>concept</option><option>artifact</option>
+      <option>preference</option><option>decision</option>
+    </select>
+    <label for="ntitle">Title</label>
+    <input id="ntitle" placeholder="Alice Chen">
+    <label for="nsummary">Summary</label>
+    <textarea id="nsummary" placeholder="What should be remembered about this?"></textarea>
+    <div style="height:8px"></div>
+    <button id="create">Add entity</button>
+  </section>
+
+  <section style="flex:1; display:flex; flex-direction:column; min-height:0">
+    <h2>Entities <span id="count" class="muted"></span></h2>
+    <input id="filter" placeholder="Filter by name or type">
+    <div class="elist" id="elist" style="margin:9px -14px 0; overflow-y:auto"></div>
+  </section>
+
+  <section>
+    <h2>Assess text</h2>
+    <textarea id="atext" placeholder="Paste conversation text to score against this graph"></textarea>
+    <div style="height:8px"></div>
+    <button class="ghost" id="assess">Assess</button>
+    <div id="aout" style="margin-top:9px"></div>
+  </section>
+</aside>
+
+<main>
+  <svg id="svg"><g id="viewport"></g></svg>
+  <div class="empty" id="empty" hidden>
+    <div>
+      <p style="margin:0 0 6px"><strong>Nothing stored for this user yet.</strong></p>
+      <p style="margin:0">Add an entity on the left, or switch users above.</p>
+      <p style="margin:8px 0 0; font-size:12px">Double-click a node to expand its
+      neighbourhood. A dashed ring means there is more to load.</p>
+    </div>
+  </div>
+  <button id="more" hidden class="sm ghost"
+          style="position:absolute; right:12px; top:12px; width:auto">
+    More graph beyond this — increase depth
+  </button>
+  <div class="legend" id="legend"></div>
+</main>
+
+<aside class="right" id="detail">
+  <section><h2>Selected entity</h2><p class="muted">Click a node to edit it.</p></section>
+</aside>
+
+<div id="toast" role="status" aria-live="polite"></div>
+
+<script src="/static/auth.js"></script>
+<script>
+const TYPES = ["person","organization","project","event","concept","artifact","preference","decision"];
+const CATS = ["related_to","refines","contradicts","causes","temporal_before","temporal_after"];
+const colour = t => getComputedStyle(document.documentElement).getPropertyValue("--t-" + t).trim() || "#55707f";
+
+let entities = [];      // nodes currently drawn
+let catalogue = [];     // sidebar list, fetched separately and paged
+let graph = {nodes: [], edges: []};
+let nodes = [], links = [];
+let selected = null;    // wiki_id
+let sim = null;
+
+const $ = id => document.getElementById(id);
+const user = () => $("user").value.trim() || "demo";
+const base = () => `/v1/users/${encodeURIComponent(user())}`;
+
+function toast(msg, isErr) {
+  const t = $("toast");
+  t.textContent = msg;
+  t.className = "show" + (isErr ? " err" : "");
+  clearTimeout(toast._t);
+  toast._t = setTimeout(() => (t.className = ""), 3600);
+}
+
+const authHeaders = () => MemAuth.headers();
+
+async function api(method, path, body) {
+  const res = await fetch(base() + path, {
+    method,
+    headers: {
+      ...(body ? {"content-type": "application/json"} : {}),
+      ...authHeaders(),
+    },
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  const text = await res.text();
+  let data = null;
+  try { data = text ? JSON.parse(text) : null; } catch { data = text; }
+  if (!res.ok) {
+    // Surface the API's own message. It names the entity or field at fault,
+    // which a bare status code does not.
+    let detail = data && data.detail ? (typeof data.detail === "string"
+      ? data.detail : JSON.stringify(data.detail)) : `HTTP ${res.status}`;
+    // 401/403 are configuration mistakes, not bugs; say which.
+    if (res.status === 401) detail += " — paste a token in the Token field.";
+    if (res.status === 403) detail += " — that token belongs to a different user.";
+    throw new Error(detail);
+  }
+  return data;
+}
+
+/* ---------------- data ---------------- */
+
+// wiki_ids currently on the canvas. The graph view is a NEIGHBOURHOOD, not
+// the whole index: a page of a graph has edges pointing at nodes you were not
+// sent, which cannot be laid out. Expanding adds to this set.
+let loaded = new Set();
+
+async function load(keepSelection) {
+  try {
+    const depth = parseInt($("depth").value, 10) || 2;
+    const body = loaded.size
+      ? {entry_wiki_ids: [...loaded], max_depth: 0, max_nodes: 600}
+      : {max_depth: depth, max_nodes: 40};   // seed from the highest-degree nodes
+    const g = await api("POST", "/wiki/subgraph", body);
+    graph = g;
+    loaded = new Set(g.nodes.map(n => n.wiki_id));
+    entities = g.nodes;   // the sidebar list is filled separately, from /wiki
+  } catch (e) { toast("Could not load: " + e.message, true); return; }
+  await loadCatalogue();
+
+  const s = await api("GET", "/wiki/_stats").catch(() => null);
+  const shown = graph.nodes.length;
+  $("stats").textContent = s
+    ? `showing ${shown} of ${s.entities} entities · ${s.edges} edges total`
+    : `showing ${shown}`;
+  $("empty").hidden = shown > 0;
+  // `truncated` means the walk hit max_nodes with frontier left over, so the
+  // user is looking at part of a larger graph. Without surfacing it there is
+  // no way to tell a complete picture from a clipped one.
+  $("more").hidden = !graph.truncated;
+
+  buildGraph();
+  renderList();
+  if (!keepSelection || !entities.some(e => e.wiki_id === selected)) selected = null;
+  if (selected) showDetail(selected); else clearDetail();
+  layout();
+}
+
+function buildGraph() {
+  const prev = new Map(nodes.map(n => [n.id, n]));
+  nodes = graph.nodes.map(e => {
+    const p = prev.get(e.wiki_id);
+    // Saved coordinates win, so the layout is stable between sessions and the
+    // simulation has nothing to do on load.
+    const hasSaved = e.x !== null && e.x !== undefined;
+    return {
+      id: e.wiki_id, title: e.title, type: e.type,
+      hidden: e.hidden_neighbours || 0, degree: e.degree || 0,
+      x: p ? p.x : (hasSaved ? e.x : (Math.random() - 0.5) * 300),
+      y: p ? p.y : (hasSaved ? e.y : (Math.random() - 0.5) * 300),
+      vx: 0, vy: 0, placed: hasSaved && !p,
+    };
+  });
+  const byId = new Map(nodes.map(n => [n.id, n]));
+  // The subgraph endpoint guarantees both endpoints are present, so there is
+  // nothing to filter out here.
+  links = graph.edges.map(e => ({
+    source: byId.get(e.source), target: byId.get(e.target), cat: e.category,
+  })).filter(l => l.source && l.target);
+}
+
+async function expand(wikiId) {
+  try {
+    const g = await api("POST", "/wiki/subgraph",
+      {entry_wiki_ids: [wikiId], max_depth: 1, max_nodes: 60});
+    for (const n of g.nodes) loaded.add(n.wiki_id);
+    const added = g.nodes.filter(n => !graph.nodes.some(x => x.wiki_id === n.wiki_id)).length;
+    await load(true);
+    toast(added ? `Added ${added} connected ${added === 1 ? "entity" : "entities"}`
+                : "Nothing further connected");
+  } catch (e) { toast(e.message, true); }
+}
+
+async function loadCatalogue() {
+  // The sidebar is a CATALOGUE: flat, searchable, paged. Separate request
+  // because it wants different fields and different semantics from the graph.
+  try {
+    const q = $("filter").value.trim();
+    const rows = await api("GET", "/wiki" +
+      `?limit=200${q ? "&q=" + encodeURIComponent(q) : ""}`);
+    catalogue = rows;
+    $("count").textContent = rows.length ? `(${rows.length})` : "";
+    renderList();
+  } catch { /* the graph is still usable without the sidebar */ }
+}
+
+/* ---------------- force layout ----------------
+   Hand-rolled rather than pulled from a CDN: this has to run on a machine
+   that may not reach one. Repulsion between all pairs, springs along edges,
+   weak pull to centre, velocity damping. Fine at this scale. */
+
+function layout() {
+  if (sim) cancelAnimationFrame(sim);
+  if (!nodes.length) { draw(); return; }
+  let alpha = 1;
+  const step = () => {
+    for (let i = 0; i < nodes.length; i++) {
+      const a = nodes[i];
+      for (let j = i + 1; j < nodes.length; j++) {
+        const b = nodes[j];
+        let dx = b.x - a.x, dy = b.y - a.y;
+        let d2 = dx * dx + dy * dy || 0.01;
+        const f = 5200 / d2;
+        const d = Math.sqrt(d2);
+        const fx = (dx / d) * f, fy = (dy / d) * f;
+        if (!a.fixed) { a.vx -= fx; a.vy -= fy; }
+        if (!b.fixed) { b.vx += fx; b.vy += fy; }
+      }
+    }
+    for (const l of links) {
+      const dx = l.target.x - l.source.x, dy = l.target.y - l.source.y;
+      const d = Math.hypot(dx, dy) || 0.01;
+      const f = (d - 130) * 0.045;
+      const fx = (dx / d) * f, fy = (dy / d) * f;
+      if (!l.source.fixed) { l.source.vx += fx; l.source.vy += fy; }
+      if (!l.target.fixed) { l.target.vx -= fx; l.target.vy -= fy; }
+    }
+    for (const n of nodes) {
+      if (n.fixed || n.pinned) { n.vx = n.vy = 0; continue; }
+      n.vx -= n.x * 0.006; n.vy -= n.y * 0.006;
+      n.vx *= 0.82; n.vy *= 0.82;
+      n.x += n.vx * alpha; n.y += n.vy * alpha;
+    }
+    draw();
+    alpha *= 0.985;
+    if (alpha > 0.02) sim = requestAnimationFrame(step);
+  };
+  step();
+}
+
+function draw() {
+  const svg = $("svg"), vp = $("viewport");
+  const w = svg.clientWidth || 800, h = svg.clientHeight || 600;
+  svg.setAttribute("viewBox", `${-w / 2} ${-h / 2} ${w} ${h}`);
+
+  const near = new Set();
+  if (selected) {
+    near.add(selected);
+    for (const l of links) {
+      if (l.source.id === selected) near.add(l.target.id);
+      if (l.target.id === selected) near.add(l.source.id);
+    }
+  }
+  const dim = id => selected && !near.has(id);
+
+  let s = "";
+  for (const l of links) {
+    const faded = selected && !(near.has(l.source.id) && near.has(l.target.id));
+    s += `<line class="edge ${l.cat}${faded ? " dim" : ""}" x1="${l.source.x}" y1="${l.source.y}" x2="${l.target.x}" y2="${l.target.y}"></line>`;
+  }
+  for (const n of nodes) {
+    const r = n.id === selected ? 11 : 8;
+    // A ring plus a count marks nodes with neighbours that are not on the
+    // canvas. Without it a node looks like a leaf when it is not, and
+    // expand-on-click is undiscoverable.
+    const more = n.hidden > 0
+      ? `<circle r="${r + 4}" fill="none" stroke="${colour(n.type)}" stroke-opacity=".45"
+                 stroke-width="1.5" stroke-dasharray="3 2"></circle>
+         <text class="badge" x="0" y="${-r - 7}" text-anchor="middle">+${n.hidden}</text>` : "";
+    s += `<g class="node${n.id === selected ? " sel" : ""}${dim(n.id) ? " dim" : ""}" data-id="${n.id}" transform="translate(${n.x},${n.y})">
+      ${more}<circle r="${r}" fill="${colour(n.type)}"></circle>
+      <text x="${r + 5}" y="4">${esc(n.title)}</text></g>`;
+  }
+  vp.innerHTML = s;
+}
+
+const esc = t => String(t == null ? "" : t).replace(/[<>&"]/g, c =>
+  ({"<": "&lt;", ">": "&gt;", "&": "&amp;", '"': "&quot;"}[c]));
+
+/* ---------------- dragging ---------------- */
+
+(function dragging() {
+  const svg = $("svg");
+  let drag = null;
+  const pt = ev => {
+    const r = svg.getBoundingClientRect();
+    return {x: ev.clientX - r.left - r.width / 2, y: ev.clientY - r.top - r.height / 2};
+  };
+  svg.addEventListener("pointerdown", ev => {
+    const g = ev.target.closest(".node");
+    window.__hitNode = !!g;
+    if (!g) return;
+    const n = nodes.find(x => x.id === g.dataset.id);
+    if (!n) return;
+    drag = n; n.fixed = true; svg.classList.add("dragging");
+    svg.setPointerCapture(ev.pointerId);
+    select(n.id);
+  });
+  svg.addEventListener("pointermove", ev => {
+    if (!drag) return;
+    const p = pt(ev); drag.x = p.x; drag.y = p.y; draw();
+  });
+  svg.addEventListener("pointerup", () => {
+    if (!drag) return;
+    const moved = drag;
+    drag.fixed = false; drag = null; svg.classList.remove("dragging");
+    // Save on drag END, not during: one write per gesture rather than per
+    // pointermove. The write itself is buffered server-side too.
+    savePosition(moved);
+    layout();
+  });
+
+  svg.addEventListener("dblclick", ev => {
+    const g = ev.target.closest(".node");
+    if (g) expand(g.dataset.id);
+  });
+})();
+
+/* ---------------- position persistence ---------------- */
+
+let pendingPositions = {};
+let saveTimer = null;
+
+function savePosition(node) {
+  pendingPositions[node.id] = [Math.round(node.x), Math.round(node.y)];
+  clearTimeout(saveTimer);
+  saveTimer = setTimeout(flushPositions, 600);
+}
+
+async function flushPositions() {
+  const positions = pendingPositions;
+  pendingPositions = {};
+  if (!Object.keys(positions).length) return;
+  try {
+    await api("POST", "/wiki/layout", {positions});
+  } catch (e) {
+    // Layout is cosmetic; a failure must not interrupt editing.
+    console.warn("could not save positions:", e.message);
+  }
+}
+
+/* ---------------- left list ---------------- */
+
+function renderList() {
+  $("elist").innerHTML = catalogue.map(e => `
+    <div class="eitem" role="option" data-id="${e.wiki_id}" aria-selected="${e.wiki_id === selected}">
+      <span class="dot" style="background:${colour(e.type)}"></span>
+      <span class="tt"><div>${esc(e.title)}${loaded.has(e.wiki_id) ? "" :
+        ' <span class="muted" style="font-size:10px">not shown</span>'}</div>
+        <div class="id">${esc(e.wiki_id)}</div></span>
+    </div>`).join("") || `<p class="muted" style="padding:0 14px">No matches.</p>`;
+}
+
+function select(id) { selected = id; renderList(); showDetail(id); draw(); }
+function clearDetail() {
+  $("detail").innerHTML = `<section><h2>Selected entity</h2><p class="muted">Click a node to edit it.</p></section>`;
+}
+
+/* ---------------- detail / editing ---------------- */
+
+async function showDetail(id) {
+  const [type, ...rest] = id.split("/");
+  let e;
+  try {
+    e = await api("GET", `/wiki/${type}/${rest.join("/")}?touch=false`);
+  } catch (err) {
+    $("detail").innerHTML = `<section><h2>Selected entity</h2>
+      <p class="muted">${esc(err.message)}</p></section>`;
+    return;
+  }
+
+  const others = entities.filter(x => x.wiki_id !== id);
+  $("detail").innerHTML = `
+    <section>
+      <h2>Selected entity</h2>
+      <span class="pill" style="background:${colour(e.type)}">${esc(e.type)}</span>
+      <div style="font:600 17px var(--sans); margin:7px 0 2px">${esc(e.title)}</div>
+      <div class="id" style="font:11px var(--mono); color:var(--ink-soft)">${esc(e.wiki_id)}</div>
+      ${(() => {
+        const n = nodes.find(x => x.id === e.wiki_id);
+        return n && n.hidden > 0
+          ? `<div style="height:8px"></div>
+             <button class="ghost" id="d_expand">Show ${n.hidden} connected
+               ${n.hidden === 1 ? "entity" : "entities"}</button>
+             <p class="muted" style="margin:5px 0 0; font-size:11px">Or double-click the node.</p>`
+          : "";
+      })()}
+
+      <label for="d_alias">Also known as</label>
+      <input id="d_alias" value="${esc((e.aliases || []).join(", "))}" placeholder="comma separated">
+      <label for="d_sig">Significance (0-1)</label>
+      <input id="d_sig" type="number" min="0" max="1" step="0.05" value="${e.metadata.significance}">
+      <label for="d_add">Add to summary</label>
+      <textarea id="d_add" placeholder="Appended, not replaced"></textarea>
+      <div style="height:8px"></div>
+      <button id="d_save">Save changes</button>
+      <div style="height:8px"></div>
+      <details><summary class="muted" style="cursor:pointer">Current summary</summary>
+        <p class="muted" style="white-space:pre-wrap">${esc(e.summary) || "&mdash;"}</p></details>
+    </section>
+
+    <section>
+      <h2>Facts (${e.facts.length})</h2>
+      ${e.facts.map(f => `
+        <div class="item">
+          <div class="id">${esc(f.fact_id)} &middot; confidence ${f.confidence}</div>
+          <textarea data-fact="${esc(f.fact_id)}" style="margin-top:5px">${esc(f.text)}</textarea>
+          <div class="row" style="margin-top:5px">
+            <button class="sm ghost" data-savefact="${esc(f.fact_id)}">Save</button>
+            <button class="sm danger" data-delfact="${esc(f.fact_id)}">Remove</button>
+          </div>
+        </div>`).join("") || `<p class="muted">No facts recorded.</p>`}
+      <label for="f_new">New fact</label>
+      <textarea id="f_new" placeholder="One claim about this entity"></textarea>
+      <div style="height:6px"></div>
+      <button class="ghost" id="f_add">Add fact</button>
+    </section>
+
+    <section>
+      <h2>Relations (${e.relations.length})</h2>
+      ${e.relations.map(r => `
+        <div class="item">
+          <div class="id">${esc(r.relation_id)} &middot; ${esc(r.category)}</div>
+          <div style="margin:3px 0"><strong>${esc(r.label || "—")}</strong> &rarr;
+            <span style="font-family:var(--mono); font-size:12px">${esc(r.target)}</span></div>
+          <button class="sm danger" data-delrel="${esc(r.relation_id)}">Remove</button>
+        </div>`).join("") || `<p class="muted">No relations.</p>`}
+      <label for="r_target">Link to</label>
+      <select id="r_target">${others.map(o =>
+        `<option value="${esc(o.wiki_id)}">${esc(o.title)} — ${esc(o.wiki_id)}</option>`).join("")}</select>
+      <div class="row" style="margin-top:6px">
+        <select id="r_cat">${CATS.map(c => `<option>${c}</option>`).join("")}</select>
+        <input id="r_label" placeholder="verb, e.g. leads">
+      </div>
+      <div style="height:6px"></div>
+      <button class="ghost" id="r_add" ${others.length ? "" : "disabled"}>Add relation</button>
+    </section>
+
+    <section>
+      <h2>Danger zone</h2>
+      <p class="muted">Removing an entity also strips relations pointing at it.</p>
+      <div style="height:6px"></div>
+      <button class="danger" id="d_del">Delete this entity</button>
+    </section>`;
+
+  const path = `/wiki/${type}/${rest.join("/")}`;
+  const guard = fn => async () => { try { await fn(); } catch (err) { toast(err.message, true); } };
+
+  const expandBtn = $("detail").querySelector("#d_expand");
+  if (expandBtn) expandBtn.onclick = () => expand(e.wiki_id);
+
+  $("d_save").onclick = guard(async () => {
+    await api("PUT", "/wiki", {
+      type: e.type, title: e.title,
+      aliases: $("d_alias").value.split(",").map(s => s.trim()).filter(Boolean),
+      significance: parseFloat($("d_sig").value),
+      summary_append: $("d_add").value.trim() || null,
+    });
+    toast("Saved " + e.wiki_id); await load(true);
+  });
+  $("f_add").onclick = guard(async () => {
+    const text = $("f_new").value.trim();
+    if (!text) return toast("Write the fact first", true);
+    await api("POST", path + "/facts", {text, confidence: 1.0});
+    toast("Fact added"); await load(true);
+  });
+  $("r_add").onclick = guard(async () => {
+    await api("POST", path + "/relations", {
+      target_wiki_id: $("r_target").value,
+      category: $("r_cat").value,
+      label: $("r_label").value.trim(),
+    });
+    toast("Relation added"); await load(true);
+  });
+  $("d_del").onclick = guard(async () => {
+    if (!confirm(`Delete ${e.wiki_id}? This cannot be undone.`)) return;
+    await api("DELETE", path + "?hard_delete=true&cascade=true");
+    toast("Deleted " + e.wiki_id); selected = null; await load(false);
+  });
+  $("detail").querySelectorAll("[data-savefact]").forEach(b => b.onclick = guard(async () => {
+    const id2 = b.dataset.savefact;
+    const ta = $("detail").querySelector(`[data-fact="${id2}"]`);
+    await api("PATCH", `${path}/facts/${id2}`, {text: ta.value});
+    toast("Fact updated"); await load(true);
+  }));
+  $("detail").querySelectorAll("[data-delfact]").forEach(b => b.onclick = guard(async () => {
+    await api("DELETE", `${path}/facts/${b.dataset.delfact}`);
+    toast("Fact removed"); await load(true);
+  }));
+  $("detail").querySelectorAll("[data-delrel]").forEach(b => b.onclick = guard(async () => {
+    await api("DELETE", `${path}/relations/${b.dataset.delrel}`);
+    toast("Relation removed"); await load(true);
+  }));
+}
+
+/* ---------------- wiring ---------------- */
+
+$("legend").innerHTML = TYPES.map(t =>
+  `<span><i class="dot" style="background:${colour(t)}"></i>${t}</span>`).join("");
+
+try {
+  const saved = sessionStorage.getItem("memtoken");
+  if (saved) $("token").value = saved;
+  const savedUser = sessionStorage.getItem("memuser");
+  if (savedUser) $("user").value = savedUser;
+} catch { /* private browsing can block sessionStorage; not worth failing over */ }
+
+function remember() {
+  try {
+    sessionStorage.setItem("memtoken", $("token").value.trim());
+    sessionStorage.setItem("memuser", $("user").value.trim());
+  } catch { /* ignore */ }
+}
+
+$("depth").onchange = () => { loaded = new Set(); selected = null; load(false); };
+
+$("more").onclick = () => {
+  // Step the depth up one and reseed, rather than silently fetching more at
+  // the same depth — the user asked to see further, not just more of the same.
+  const sel = $("depth");
+  const next = Math.min(parseInt(sel.value, 10) + 1, 4);
+  if (next === parseInt(sel.value, 10)) { toast("Already at maximum depth"); return; }
+  sel.value = String(next);
+  loaded = new Set();
+  selected = null;
+  load(false);
+};
+
+$("load").onclick = () => { remember(); selected = null; load(false); };
+$("token").addEventListener("keydown", e => { if (e.key === "Enter") { remember(); selected = null; load(false); } });
+$("user").addEventListener("keydown", e => { if (e.key === "Enter") { remember(); selected = null; load(false); } });
+let filterTimer = null;
+$("filter").addEventListener("input", () => {
+  // Search runs server-side, so debounce rather than firing per keystroke.
+  clearTimeout(filterTimer);
+  filterTimer = setTimeout(loadCatalogue, 250);
+});
+$("elist").addEventListener("click", async e => {
+  const row = e.target.closest(".eitem");
+  if (!row) return;
+  const id = row.dataset.id;
+  if (!loaded.has(id)) { loaded.add(id); await load(true); }
+  select(id);
+});
+$("svg").addEventListener("click", () => {
+  // draw() rebuilds the SVG during pointerdown, so the pressed element is
+  // detached by the time click fires and testing e.target is unreliable.
+  // pointerdown already recorded whether a node was hit.
+  if (!window.__hitNode) { selected = null; renderList(); clearDetail(); draw(); }
+});
+
+$("create").onclick = async () => {
+  const title = $("ntitle").value.trim();
+  if (!title) return toast("Give it a title", true);
+  try {
+    const made = await api("PUT", "/wiki", {
+      type: $("ntype").value, title,
+      summary_append: $("nsummary").value.trim() || null,
+    });
+    $("ntitle").value = ""; $("nsummary").value = "";
+    toast("Added " + made.wiki_id);
+    selected = made.wiki_id;
+    await load(true);
+  } catch (e) { toast(e.message, true); }
+};
+
+$("assess").onclick = async () => {
+  const text = $("atext").value.trim();
+  if (!text) return toast("Paste some text first", true);
+  try {
+    const r = await api("POST", "/assess", {text});
+    const tone = r.decision === "store" ? "var(--ok)" : r.decision === "review" ? "var(--t-event)" : "var(--ink-soft)";
+    $("aout").innerHTML = `
+      <div class="item">
+        <div><span class="pill" style="background:${tone}">${esc(r.decision)}</span>
+          <span class="muted" style="margin-left:6px">score ${r.usefulness}</span></div>
+        <div class="muted" style="font-family:var(--mono); font-size:11px; margin-top:5px">
+          relevance ${r.relevance} · novelty ${r.novelty}<br>importance ${r.importance} · density ${r.density}</div>
+        ${r.related.length ? `<div style="margin-top:5px; font-size:12px">Links to ${
+          r.related.map(x => `<span style="font-family:var(--mono)">${esc(x.wiki_id)}</span>`).join(", ")}</div>` : ""}
+        ${r.new_candidates.length ? `<div style="margin-top:4px; font-size:12px">New names: ${
+          r.new_candidates.map(esc).join(", ")}</div>` : ""}
+        <div class="muted" style="margin-top:5px; font-size:11px">${esc(r.reasons.join("; "))}</div>
+      </div>`;
+  } catch (e) { toast(e.message, true); }
+};
+
+/* ---------------- sign in ---------------- */
+
+// Delegated to /static/auth.js, shared with /chat. The two pages previously
+// had separate implementations and drifted: this one grew a modal, chat never
+// did, and chat users had to fetch a token with curl and paste it in.
+
+MemAuth.install({
+  onSignedIn: (data) => {
+    toast(`Signed in as ${data.username}${data.is_admin ? " (admin)" : ""}`);
+    // A different identity is a different memory namespace, so nothing on
+    // screen belongs to the new user.
+    loaded = new Set();
+    selected = null;
+    load(false);
+  },
+});
+
+addEventListener("beforeunload", flushPositions);
+addEventListener("resize", draw);
+load(false).then(refreshWho);
+</script>
+</body>
+</html>
