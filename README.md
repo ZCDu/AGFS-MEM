@@ -1,11 +1,16 @@
 # short-term-memory
 
-`short-term-memory` 是一个面向大模型与 AI Agent 的独立短期记忆组件。它使用 Redis
-保存当前 session 的在线上下文，使用 journals JSONL 保存完整对话事件，并在达到 PLAN
-规定的阈值后异步调用官方 Headroom 服务优化上下文。
+`short-term-memory` 是一个面向大模型与 AI Agent 的独立短期记忆组件。
 
-公司 Agent 在生成回答前调用 `prepare_turn()` 取得短期记忆，在回答后调用
-`complete_turn()` 写回助手消息。组件不实现最终回答模型，也不新增聊天 HTTP 接口。
+它使用 Redis 保存当前 session 的在线上下文，包括最近消息、summary 和恢复状态；
+使用 journals JSONL 作为完整对话事件日志，保存原始会话记录。
+
+当 session 上下文达到 PLAN 定义的触发条件（token 数量、消息数量或 session 时长）时，
+short-term-memory 调用官方 Headroom 服务进行上下文优化。
+压缩策略、CCR 可逆缓存以及后续原文召回均由 Headroom 管理。
+
+Agent 接入层在生成回答前调用 `prepare_turn()` 获取当前 session 上下文，
+在回答完成后调用 `complete_turn()` 写回 assistant 消息并更新短期记忆状态。
 
 | 职责 | 实现 |
 |---|---|
@@ -15,7 +20,7 @@
 | 五类 session 摘要 | 公司注入的 SummaryModel |
 | 最终回答 | 公司自己的 LLM / Agent |
 
-本项目只覆盖短期记忆，不包含历史会话 UI、Memory Retrieval Skill、用户画像、AI 决策卡、
+本项目只覆盖短期记忆，不包含历史会话窗口、Memory Retrieval Skill、用户画像、AI 决策卡、
 Wiki、索引或 Daily Memory Job。
 
 ## 架构
