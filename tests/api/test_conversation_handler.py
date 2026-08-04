@@ -1,13 +1,11 @@
 from datetime import datetime, timezone
 from pathlib import Path
 
-from dream.api.conversation_handler import (
-    ConversationHandler,
-    RedisSessionContext,
-)
+from short_term_memory.api.conversation_handler import ConversationHandler
 from short_term_memory.compression.policy import HeadroomPolicy
 from short_term_memory.compression.scope import OptimizationScopeFactory
 from short_term_memory.storage.journal_store import JournalMessageEvent, JournalStore
+from short_term_memory.storage.redis_session_context import RedisSessionContext
 from short_term_memory.storage.vfs_adapter import VFSAdapter
 
 from tests.storage.fake_redis import FakeRedis
@@ -231,8 +229,10 @@ def test_prepare_turn_returns_scope_without_inline_compression(
         "role": "user",
         "content": "long request",
     }
-    assert prepared.optimization_scope == (
-        handler.optimization_scope_factory.for_session("user-1", "sess-1")
+    assert prepared.headroom_headers == (
+        handler.optimization_scope_factory.for_session(
+            "user-1", "sess-1"
+        ).as_headroom_headers()
     )
     assert queue.calls == []
 
@@ -247,9 +247,10 @@ def test_prepare_turn_exposes_proxy_route_without_calling_a_model(
     )
 
     assert prepared.headroom_proxy_url == "http://127.0.0.1:8787/v1"
-    assert (
-        prepared.headroom_headers
-        == prepared.optimization_scope.as_headroom_headers()
+    assert prepared.headroom_headers == (
+        handler.optimization_scope_factory.for_session(
+            "user-1", "sess-1"
+        ).as_headroom_headers()
     )
     assert prepared.history[-1] == {
         "role": "user",

@@ -2,9 +2,12 @@ from concurrent.futures import Future
 from dataclasses import replace
 from pathlib import Path
 
-from dream.api.short_term_runtime import build_short_term_runtime
-from dream.config import DreamSettings, HeadroomServiceSettings
+from short_term_memory import build_runtime
 from short_term_memory.compression.headroom_client import HeadroomHttpClient
+from short_term_memory.config import (
+    HeadroomServiceSettings,
+    ShortTermMemorySettings,
+)
 from short_term_memory.models import (
     HeadroomCompressionResult,
     HeadroomCompressionStatus,
@@ -62,7 +65,7 @@ class FixedCompressionClient:
 
 
 def test_builder_exposes_only_short_term_memory_boundary(tmp_path: Path) -> None:
-    base = DreamSettings()
+    base = ShortTermMemorySettings()
     settings = replace(
         base,
         redis_session=replace(
@@ -73,7 +76,7 @@ def test_builder_exposes_only_short_term_memory_boundary(tmp_path: Path) -> None
     )
     executor = RecordingExecutor()
 
-    runtime = build_short_term_runtime(
+    runtime = build_runtime(
         home=tmp_path,
         settings=settings,
         redis_client=FakeRedis(),
@@ -84,10 +87,10 @@ def test_builder_exposes_only_short_term_memory_boundary(tmp_path: Path) -> None
         compression_client=FixedCompressionClient(),
     )
 
-    prepared = runtime.conversation_handler.prepare_turn(
+    prepared = runtime.prepare_turn(
         "user-1", "session-1", "请继续 DREAM", session_seconds=10
     )
-    completed = runtime.conversation_handler.complete_turn(
+    completed = runtime.complete_turn(
         prepared,
         assistant_content="公司 Agent 生成的回答",
     )
@@ -106,9 +109,9 @@ def test_builder_exposes_only_short_term_memory_boundary(tmp_path: Path) -> None
 
 def test_builder_accepts_replaceable_compression_client(tmp_path: Path) -> None:
     plugin = FixedCompressionClient()
-    runtime = build_short_term_runtime(
+    runtime = build_runtime(
         home=tmp_path,
-        settings=DreamSettings(),
+        settings=ShortTermMemorySettings(),
         redis_client=FakeRedis(),
         token_estimator=FixedTokenEstimator(),
         summary_model=FixedSummaryModel(),
@@ -123,7 +126,7 @@ def test_builder_accepts_replaceable_compression_client(tmp_path: Path) -> None:
 
 def test_builder_defaults_to_headroom_http_adapter(tmp_path: Path) -> None:
     settings = replace(
-        DreamSettings(),
+        ShortTermMemorySettings(),
         headroom_service=HeadroomServiceSettings(
             url="http://127.0.0.1:8787",
             timeout_seconds=123.0,
@@ -132,7 +135,7 @@ def test_builder_defaults_to_headroom_http_adapter(tmp_path: Path) -> None:
         ),
     )
 
-    runtime = build_short_term_runtime(
+    runtime = build_runtime(
         home=tmp_path,
         settings=settings,
         redis_client=FakeRedis(),
@@ -151,10 +154,10 @@ def test_runtime_exposes_proxy_for_every_prepared_agent_turn(
     tmp_path: Path,
 ) -> None:
     settings = replace(
-        DreamSettings(),
+        ShortTermMemorySettings(),
         headroom_service=HeadroomServiceSettings(url="http://headroom:8787"),
     )
-    runtime = build_short_term_runtime(
+    runtime = build_runtime(
         home=tmp_path,
         settings=settings,
         redis_client=FakeRedis(),
@@ -164,7 +167,7 @@ def test_runtime_exposes_proxy_for_every_prepared_agent_turn(
         retry_queue=RecordingRetryQueue(),
     )
 
-    prepared = runtime.conversation_handler.prepare_turn(
+    prepared = runtime.prepare_turn(
         "user", "session", "question"
     )
 

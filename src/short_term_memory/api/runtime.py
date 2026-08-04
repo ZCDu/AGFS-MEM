@@ -5,13 +5,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Callable
 
-from dream.api.conversation_handler import (
-    ConversationHandler,
-    RedisClient,
-    RedisSessionContext,
-    TokenEstimator,
-)
-from dream.config import DreamSettings
+from short_term_memory.api.conversation_handler import ConversationHandler
 from short_term_memory.compression.headroom_client import HeadroomHttpClient
 from short_term_memory.compression.policy import HeadroomPolicy
 from short_term_memory.compression.scope import OptimizationScopeFactory
@@ -23,13 +17,20 @@ from short_term_memory.jobs.session_compression_job import (
     ExecutorSessionCompressionQueue,
     SessionCompressionJob,
 )
+from short_term_memory.config import ShortTermMemorySettings
+from short_term_memory.models import CompletionResult, PreparedTurn
 from short_term_memory.ports import (
     BackgroundExecutor,
     CompressionClient,
     RetryQueue,
     SummaryModel,
+    TokenEstimator,
 )
 from short_term_memory.storage.journal_store import JournalStore
+from short_term_memory.storage.redis_session_context import (
+    RedisClient,
+    RedisSessionContext,
+)
 from short_term_memory.storage.vfs_adapter import VFSAdapter
 
 
@@ -42,11 +43,39 @@ class ShortTermMemoryRuntime:
     compression_queue: ExecutorSessionCompressionQueue
     telemetry: HeadroomTelemetry
 
+    def prepare_turn(
+        self,
+        user_id: str,
+        session_id: str,
+        content: str,
+        *,
+        timestamp: datetime | None = None,
+        session_seconds: int = 0,
+    ) -> PreparedTurn:
+        return self.conversation_handler.prepare_turn(
+            user_id,
+            session_id,
+            content,
+            timestamp=timestamp,
+            session_seconds=session_seconds,
+        )
 
-def build_short_term_runtime(
+    def complete_turn(
+        self,
+        prepared: PreparedTurn,
+        *,
+        assistant_content: str,
+    ) -> CompletionResult:
+        return self.conversation_handler.complete_turn(
+            prepared,
+            assistant_content=assistant_content,
+        )
+
+
+def build_runtime(
     *,
     home: Path,
-    settings: DreamSettings,
+    settings: ShortTermMemorySettings,
     redis_client: RedisClient,
     token_estimator: TokenEstimator,
     summary_model: SummaryModel,
