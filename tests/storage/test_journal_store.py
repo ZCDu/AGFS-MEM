@@ -2,8 +2,12 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 
-from dream.storage.journal_store import JournalFileEvent, JournalMessageEvent, JournalStore
-from dream.storage.vfs_adapter import VFSAdapter
+from short_term_memory.storage.journal_store import (
+    JournalFileEvent,
+    JournalMessageEvent,
+    JournalStore,
+)
+from short_term_memory.storage.vfs_adapter import VFSAdapter
 
 
 NOW = datetime(2026, 7, 23, 6, 30, tzinfo=timezone.utc)

@@ -4,11 +4,12 @@ from pathlib import Path
 
 import pytest
 
-from dream.api.conversation_handler import HeadroomPolicy, RedisSessionContext
+from dream.api.conversation_handler import HeadroomPolicy
 from dream.integrations.headroom_telemetry import InMemoryHeadroomTelemetry
-from dream.storage.journal_store import JournalStore
-from dream.storage.vfs_adapter import VFSAdapter
-from tests.api.fake_redis import FakeRedis
+from short_term_memory.storage.journal_store import JournalStore
+from short_term_memory.storage.redis_session_context import RedisSessionContext
+from short_term_memory.storage.vfs_adapter import VFSAdapter
+from tests.storage.fake_redis import FakeRedis
 
 
 NOW = datetime(2026, 7, 23, 6, 30, tzinfo=timezone.utc)

@@ -4,22 +4,22 @@ from uuid import uuid4
 
 import pytest
 
-from dream.api.conversation_handler import RedisSessionContext
-from dream.api.redis_runtime import RedisRuntime
-from dream.storage.journal_store import JournalStore
-from dream.storage.vfs_adapter import VFSAdapter
+from short_term_memory.storage.journal_store import JournalStore
+from short_term_memory.storage.redis_runtime import RedisRuntime
+from short_term_memory.storage.redis_session_context import RedisSessionContext
+from short_term_memory.storage.vfs_adapter import VFSAdapter
 
 
 pytestmark = pytest.mark.skipif(
-    os.environ.get("DREAM_RUN_REDIS_INTEGRATION") != "1",
-    reason="set DREAM_RUN_REDIS_INTEGRATION=1 to run Redis 7.2 integration",
+    os.environ.get("SHORT_TERM_MEMORY_RUN_REDIS_INTEGRATION") != "1",
+    reason="set SHORT_TERM_MEMORY_RUN_REDIS_INTEGRATION=1 for Redis integration",
 )
 
 
 @pytest.fixture
 def runtime():
     value = RedisRuntime.connect(
-        os.environ.get("DREAM_REDIS_URL", "redis://127.0.0.1:6379/0")
+        os.environ.get("REDIS_URL", "redis://127.0.0.1:6379/0")
     )
     try:
         yield value

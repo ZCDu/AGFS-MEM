@@ -1,12 +1,12 @@
-"""User-isolated storage for journals, raw files, source OKF, and Wiki OKF."""
+"""Temporary imports while short-term storage moves to its standalone package."""
 
-from dream.storage.journal_store import (
+from short_term_memory.storage.journal_store import (
     JournalEvent,
     JournalFileEvent,
     JournalMessageEvent,
     JournalStore,
 )
-from dream.storage.vfs_adapter import UserPaths, VFSAdapter
+from short_term_memory.storage.vfs_adapter import UserPaths, VFSAdapter
 
 __all__ = [
     "JournalEvent",

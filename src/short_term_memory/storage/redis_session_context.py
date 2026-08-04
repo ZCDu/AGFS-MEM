@@ -1,12 +1,12 @@
-"""Redis Session Context and Headroom state from PLAN.md."""
+"""Redis Session Context with journals-based expiry recovery."""
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 import json
 from typing import Any, Callable, Protocol
 
-from dream.api.optimization_scope import OptimizationScope, OptimizationScopeFactory
-from dream.integrations.headroom_telemetry import HeadroomTelemetry
+from short_term_memory.models import SessionSummaryDocument
+from short_term_memory.ports import SessionCompressionQueue, SummarySnapshotReader
 from short_term_memory.storage.journal_store import (
     JournalFileEvent,
     JournalMessageEvent,
@@ -38,72 +38,14 @@ class RedisClient(Protocol):
     def llen(self, key: str) -> object: ...
 
 
-class TokenEstimator(Protocol):
-    def estimate(self, messages: tuple[dict[str, Any], ...]) -> int: ...
-
-
-class HeadroomCompressionQueue(Protocol):
-    def enqueue(
-        self,
-        user_id: str,
-        session_id: str,
-        messages: tuple[dict[str, Any], ...],
-        processed_message_count: int,
-        keep_recent_turns: int,
-    ) -> None: ...
-
-
-class SummarySnapshotReader(Protocol):
-    def read(self, user_id: str, session_id: str) -> str | None: ...
-
-
-class RecoveryCompressionQueue(Protocol):
-    def enqueue(
-        self,
-        user_id: str,
-        session_id: str,
-        messages: tuple[dict[str, Any], ...],
-        processed_message_count: int,
-        keep_recent_turns: int,
-    ) -> None: ...
+class ContextAttachmentTelemetry(Protocol):
+    def record_context_attached(self) -> None: ...
 
 
 @dataclass(frozen=True)
 class CompressionSnapshot:
     messages: tuple[dict[str, Any], ...]
     processed_message_count: int
-
-
-@dataclass(frozen=True)
-class HeadroomPolicy:
-    context_window_tokens: int
-    trigger_ratio: float
-    max_messages: int
-    max_session_seconds: int
-
-    def __post_init__(self) -> None:
-        if not 0.60 <= self.trigger_ratio <= 0.70:
-            raise ValueError("trigger_ratio must be between 0.60 and 0.70")
-        if self.context_window_tokens < 1:
-            raise ValueError("context_window_tokens must be positive")
-        if self.max_messages < 1:
-            raise ValueError("max_messages must be positive")
-        if self.max_session_seconds < 1:
-            raise ValueError("max_session_seconds must be positive")
-
-    def should_compress(
-        self,
-        *,
-        estimated_tokens: int,
-        message_count: int,
-        session_seconds: int,
-    ) -> bool:
-        return (
-            estimated_tokens
-            >= self.context_window_tokens * self.trigger_ratio
-            or message_count >= self.max_messages
-            or session_seconds >= self.max_session_seconds
-        )
 
 
 class RedisSessionContext:
@@ -114,8 +56,8 @@ class RedisSessionContext:
         *,
         ttl_seconds: int = 43_200,
         snapshot_reader: SummarySnapshotReader | None = None,
-        recovery_queue: RecoveryCompressionQueue | None = None,
-        telemetry: HeadroomTelemetry | None = None,
+        recovery_queue: SessionCompressionQueue | None = None,
+        telemetry: ContextAttachmentTelemetry | None = None,
         ccr_ttl_seconds: int = 43_200,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
@@ -198,8 +140,11 @@ class RedisSessionContext:
         )
 
     def set_summary(self, user_id: str, session_id: str, summary: str) -> None:
-        key = self._summary_key(user_id, session_id)
-        self.client.set(key, summary, ex=self.ttl_seconds)
+        self.client.set(
+            self._summary_key(user_id, session_id),
+            summary,
+            ex=self.ttl_seconds,
+        )
 
     def trim_messages(self, user_id: str, session_id: str, limit: int) -> None:
         if limit < 1:
@@ -353,15 +298,15 @@ class RedisSessionContext:
         return tuple(result)
 
     @staticmethod
-    def _structured_summary(value: str) -> Any | None:
-        from dream.memory.session_compression import SessionSummaryDocument
-
+    def _structured_summary(value: str) -> SessionSummaryDocument | None:
         try:
             return SessionSummaryDocument.model_validate_json(value)
         except (TypeError, ValueError):
             return None
 
-    def _compression_context_is_fresh(self, document: Any) -> bool:
+    def _compression_context_is_fresh(
+        self, document: SessionSummaryDocument
+    ) -> bool:
         if not document.compression_context.messages:
             return True
         updated_at = datetime.fromisoformat(
@@ -398,122 +343,3 @@ class RedisSessionContext:
         user = safe_component(user_id, "user_id")
         session = safe_component(session_id, "session_id")
         return f"dream:session:{user}:{session}:summary"
-
-
-@dataclass(frozen=True)
-class PreparedTurn:
-    user_id: str
-    session_id: str
-    history: tuple[dict[str, Any], ...]
-    timestamp: datetime | None
-    session_seconds: int
-    optimization_scope: OptimizationScope
-    headroom_proxy_url: str | None
-
-    @property
-    def headroom_headers(self) -> dict[str, str]:
-        return self.optimization_scope.as_headroom_headers()
-
-
-@dataclass(frozen=True)
-class CompletionResult:
-    headroom_queued: bool
-
-
-class ConversationHandler:
-    def __init__(
-        self,
-        *,
-        session_context: RedisSessionContext,
-        journal_store: JournalStore,
-        headroom_policy: HeadroomPolicy,
-        token_estimator: TokenEstimator,
-        headroom_queue: HeadroomCompressionQueue,
-        history_turns: int,
-        optimization_scope_factory: OptimizationScopeFactory,
-        headroom_proxy_url: str | None = None,
-    ) -> None:
-        if history_turns < 1:
-            raise ValueError("history_turns must be positive")
-        self.session_context = session_context
-        self.journal_store = journal_store
-        self.headroom_policy = headroom_policy
-        self.token_estimator = token_estimator
-        self.headroom_queue = headroom_queue
-        self.history_turns = history_turns
-        self.optimization_scope_factory = optimization_scope_factory
-        self.headroom_proxy_url = headroom_proxy_url
-
-    def prepare_turn(
-        self,
-        user_id: str,
-        session_id: str,
-        content: str,
-        *,
-        timestamp: datetime | None = None,
-        session_seconds: int = 0,
-    ) -> PreparedTurn:
-        self.session_context.ensure_session_loaded(
-            user_id, session_id, self.history_turns
-        )
-        prior_history = self.session_context.build_history(
-            user_id, session_id, self.history_turns
-        )
-        user_message = {"role": "user", "content": content}
-        self.session_context.append_message(user_id, session_id, user_message)
-        self.journal_store.append_message(
-            user_id,
-            session_id,
-            role="user",
-            content=content,
-            timestamp=timestamp,
-        )
-
-        return PreparedTurn(
-            user_id=user_id,
-            session_id=session_id,
-            history=(*prior_history, user_message),
-            timestamp=timestamp,
-            session_seconds=session_seconds,
-            optimization_scope=self.optimization_scope_factory.for_session(
-                user_id, session_id
-            ),
-            headroom_proxy_url=self.headroom_proxy_url,
-        )
-
-    def complete_turn(
-        self,
-        prepared: PreparedTurn,
-        *,
-        assistant_content: str,
-    ) -> CompletionResult:
-        assistant_message = {"role": "assistant", "content": assistant_content}
-        self.session_context.append_message(
-            prepared.user_id, prepared.session_id, assistant_message
-        )
-        self.journal_store.append_message(
-            prepared.user_id,
-            prepared.session_id,
-            role="assistant",
-            content=assistant_content,
-            timestamp=prepared.timestamp,
-        )
-
-        snapshot = self.session_context.compression_snapshot(
-            prepared.user_id, prepared.session_id
-        )
-        compression_input = snapshot.messages
-        should_compress = self.headroom_policy.should_compress(
-            estimated_tokens=self.token_estimator.estimate(compression_input),
-            message_count=snapshot.processed_message_count,
-            session_seconds=prepared.session_seconds,
-        )
-        if should_compress:
-            self.headroom_queue.enqueue(
-                prepared.user_id,
-                prepared.session_id,
-                compression_input,
-                snapshot.processed_message_count,
-                self.history_turns,
-            )
-        return CompletionResult(headroom_queued=should_compress)

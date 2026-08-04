@@ -9,7 +9,7 @@ from dream.memory.session_compression import (
     HeadroomCompressionResult,
     HeadroomCompressionStatus,
 )
-from tests.api.fake_redis import FakeRedis
+from tests.storage.fake_redis import FakeRedis
 
 
 class FixedTokenEstimator:

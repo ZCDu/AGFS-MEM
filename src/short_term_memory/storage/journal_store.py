@@ -9,7 +9,7 @@ from typing import Literal
 
 from pydantic import BaseModel
 
-from dream.storage.vfs_adapter import VFSAdapter, safe_component
+from short_term_memory.storage.vfs_adapter import VFSAdapter, safe_component
 
 
 JournalRole = Literal["user", "assistant", "system", "tool", "unknown"]

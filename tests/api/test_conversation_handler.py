@@ -7,10 +7,10 @@ from dream.api.conversation_handler import (
     RedisSessionContext,
 )
 from dream.api.optimization_scope import OptimizationScopeFactory
-from dream.storage.journal_store import JournalMessageEvent, JournalStore
-from dream.storage.vfs_adapter import VFSAdapter
+from short_term_memory.storage.journal_store import JournalMessageEvent, JournalStore
+from short_term_memory.storage.vfs_adapter import VFSAdapter
 
-from tests.api.fake_redis import FakeRedis
+from tests.storage.fake_redis import FakeRedis
 
 
 NOW = datetime(2026, 7, 23, 6, 30, tzinfo=timezone.utc)

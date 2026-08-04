@@ -1,4 +1,4 @@
-from dream.api.redis_runtime import RedisRuntime
+from short_term_memory.storage.redis_runtime import RedisRuntime
 
 
 class FakePool:
@@ -32,11 +32,11 @@ def test_runtime_reuses_one_pool_and_validates_connection(monkeypatch) -> None:
         return pool
 
     monkeypatch.setattr(
-        "dream.api.redis_runtime.redis.ConnectionPool.from_url",
+        "short_term_memory.storage.redis_runtime.redis.ConnectionPool.from_url",
         from_url,
     )
     monkeypatch.setattr(
-        "dream.api.redis_runtime.redis.Redis",
+        "short_term_memory.storage.redis_runtime.redis.Redis",
         lambda *, connection_pool: client,
     )
 

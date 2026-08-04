@@ -27,8 +27,8 @@ from dream.memory.session_compression import (
     HeadroomRetryQueue,
     SummaryModel,
 )
-from dream.storage.journal_store import JournalStore
-from dream.storage.vfs_adapter import VFSAdapter
+from short_term_memory.storage.journal_store import JournalStore
+from short_term_memory.storage.vfs_adapter import VFSAdapter
 
 
 @dataclass(frozen=True)
