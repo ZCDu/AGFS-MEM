@@ -1,71 +1,65 @@
-# Memory Graph Backend
+# Memory Graph Backend（记忆图谱后端）
 
-A FastAPI service that stores a per-user knowledge graph as flat files in S3
-(or local disk). No database. Each entity is one Markdown file with YAML
-front-matter following [Google's OKF v0.2](https://github.com/GoogleCloudPlatform/knowledge-catalog/blob/main/okf/SPEC.md)
-specification. Includes a chat UI with file upload support.
+一个 FastAPI 服务，将每个用户的知识图谱以 OKF v0.2 规范的 Markdown 文件存储在 S3（或本地磁盘）中。无需数据库。每条实体是一个带 YAML front-matter 的 `.md` 文件。包含带文件上传功能的聊天界面。
 
-## Quickstart
+## 快速开始
 
 ```bash
 pip install -r requirements.txt
-cp .env.example .env    # fill in DEEPSEEK_API_KEY and storage settings
+cp .env.example .env    # 填入 DEEPSEEK_API_KEY 和存储配置
 uvicorn app.main:app --host 0.0.0.0 --port 8000
 ```
 
-Opens on `http://localhost:8000`. Interactive API docs at `http://localhost:8000/docs`.
+服务运行在 `http://localhost:8000`。交互式 API 文档在 `http://localhost:8000/docs`。
 
-**Chat UI** at `http://localhost:8000/chat` — supports drag-drop file upload, paste,
-and paperclip button. Files are extracted for LLM processing (.docx, .xlsx, .pdf, .txt).
+**聊天界面** `http://localhost:8000/chat` — 支持拖拽上传文件、粘贴和纸夹按钮。文件会被提取文本供 LLM 处理（.docx、.xlsx、.pdf、.txt）。
 
-**Default admin account** is created automatically on first startup if no users exist:
-- Username: `admin`
-- Password: `admin123456`
-- Change it immediately via `POST /v1/auth/password` or the chat UI sign-in.
+**默认管理员账号** 首次启动时如果没有任何用户会自动创建：
+- 用户名：`admin`
+- 密码：`admin123456`
+- 请立即通过 `POST /v1/auth/password` 或聊天界面的登录功能修改密码。
 
-## Configuration
+## 配置
 
-Everything lives in `.env`. Copy `.env.example` and fill in the blanks.
+所有配置都在 `.env` 文件中。复制 `.env.example` 并填入实际值。
 
-### Required
+### 必填
 
-| Var | Notes |
+| 变量 | 说明 |
 |---|---|
-| `STORAGE_BACKEND` | `mirage` (S3), `disk` (local), `s3` (plain boto3) |
-| `MIRAGE_S3_BUCKET` | Required when `STORAGE_BACKEND=mirage` |
-| `MIRAGE_S3_ACCESS_KEY_ID` | S3 credentials |
-| `MIRAGE_S3_SECRET_ACCESS_KEY` | S3 credentials |
-| `AUTH_TOKENS` | At least one `token:user_id` pair, e.g. `abc123:demo` |
-| `DEEPSEEK_API_KEY` | For LLM extraction and chat |
+| `STORAGE_BACKEND` | `mirage`（S3）、`disk`（本地）、`s3`（原生 boto3） |
+| `MIRAGE_S3_BUCKET` | `STORAGE_BACKEND=mirage` 时必填 |
+| `MIRAGE_S3_ACCESS_KEY_ID` | S3 凭证 |
+| `MIRAGE_S3_SECRET_ACCESS_KEY` | S3 凭证 |
+| `AUTH_TOKENS` | 至少一对 `token:user_id`，如 `abc123:demo` |
+| `DEEPSEEK_API_KEY` | LLM 提取和聊天功能所需 |
 
-### Optional
+### 可选
 
-| Var | Default | Notes |
+| 变量 | 默认值 | 说明 |
 |---|---|---|
-| `AUTH_MODE` | `token` | `token` or `off` (dev only) |
-| `AUTH_SECRET` | — | Required for password login. Generate with `python -c "import secrets; print(secrets.token_urlsafe(32))"` |
-| `AUTH_SESSION_HOURS` | `12` | Session token lifetime |
-| `STORAGE_BACKEND` | `mirage` | `mirage`, `s3`, or `disk` |
-| `MIRAGE_S3_REGION` | — | S3 region |
-| `MIRAGE_S3_ENDPOINT_URL` | — | For non-AWS S3-compatible gateways |
-| `MIRAGE_S3_KEY_PREFIX` | `memory_backend/` | Key prefix inside bucket |
-| `LLM_MODEL` | `deepseek-chat` | Model for chat/extraction |
-| `LLM_BASE_URL` | `https://api.deepseek.com/v1` | OpenAI-compatible endpoint |
-| `FLUSH_INTERVAL_SECONDS` | `2.0` | Write-behind buffer flush interval |
-| `FLUSH_MAX_PENDING` | `100` | Flush early once this many mutations are pending |
+| `AUTH_MODE` | `token` | `token` 或 `off`（仅开发环境） |
+| `AUTH_SECRET` | — | 密码登录必填。用 `python -c "import secrets; print(secrets.token_urlsafe(32))"` 生成 |
+| `AUTH_SESSION_HOURS` | `12` | 会话令牌有效期（小时） |
+| `MIRAGE_S3_REGION` | — | S3 区域 |
+| `MIRAGE_S3_ENDPOINT_URL` | — | 非 AWS 的 S3 兼容网关地址 |
+| `MIRAGE_S3_KEY_PREFIX` | `memory_backend/` | 存储桶内的键前缀 |
+| `LLM_MODEL` | `deepseek-chat` | 聊天/提取使用的模型 |
+| `LLM_BASE_URL` | `https://api.deepseek.com/v1` | OpenAI 兼容的 API 端点 |
+| `FLUSH_INTERVAL_SECONDS` | `2.0` | 写缓冲刷新间隔 |
+| `FLUSH_MAX_PENDING` | `100` | 累积此数量后提前刷新 |
 
-## Authentication
+## 认证
 
-The API requires a bearer token. Two credential types, both sent as
-`Authorization: Bearer <token>`:
+API 需要 Bearer 令牌。两种凭证类型，都以 `Authorization: Bearer <token>` 发送：
 
-### Static tokens (services, scripts)
+### 静态令牌（服务、脚本）
 
-Set `AUTH_TOKENS=token:user_id` in `.env`. Multiple tokens: `tok1:user1,tok2:user2`.
+在 `.env` 中设置 `AUTH_TOKENS=token:user_id`。多个令牌：`tok1:user1,tok2:user2`。
 
-### Password login (people)
+### 密码登录（人员）
 
-Set `AUTH_SECRET` in `.env`, then create accounts:
+在 `.env` 中设置 `AUTH_SECRET`，然后创建账号：
 
 ```powershell
 python scripts\manage_users.py add alice
@@ -73,40 +67,39 @@ python scripts\manage_users.py add ops --admin
 python scripts\manage_users.py list
 ```
 
-Log in via `POST /v1/auth/login` or the chat UI's **Sign in** button.
+通过 `POST /v1/auth/login` 或聊天界面的**登录**按钮登录。
 
-The default `admin` account is bootstrapped automatically on first startup.
+首次启动时会自动创建默认 `admin` 账号。
 
-## Storage layout
+## 存储结构
 
 ```
-{user_id}/wiki/{type}/{slug}.md           entity files (OKF v0.2 markdown)
-{user_id}/wiki/_manifest/snapshot.json     entity index + deltas
-{user_id}/wiki/_ops/{date}/*.jsonl         audit log
-{user_id}/raw/{session_id}/{file_id}/      uploaded files per session
-{user_id}/sessions/{YYYY}/{MM}/{day}/      conversation transcripts
-_auth/users.json                           user accounts (scrypt hashed)
+{user_id}/wiki/{type}/{slug}.md          实体文件（OKF v0.2 markdown）
+{user_id}/wiki/_manifest/snapshot.json    实体索引 + 增量
+{user_id}/wiki/_ops/{date}/*.jsonl        审计日志
+{user_id}/raw/{session_id}/{file_id}/     按会话组织的上传文件
+{user_id}/sessions/{YYYY}/{MM}/{day}/     对话记录
+_auth/users.json                          用户账号（scrypt 哈希）
 ```
 
-Entity files are the source of truth. The manifest, ops log, and session files
-are derived and rebuildable.
+实体文件是唯一的数据源。清单、操作日志和会话文件都是派生的，可以重建。
 
-## OKF v0.2 entities
+## OKF v0.2 实体
 
-Each entity is a single `.md` file:
+每条实体是一个单独的 `.md` 文件：
 
 ```yaml
 ---
 type: person
-title: Alice Chen
-description: Staff engineer on the retrieval team.
-tags: [alice, engineer]
+title: 陈爱丽
+description: 检索团队的资深工程师。
+tags: [爱丽, 工程师]
 generated: { by: memory_backend/1.0, at: '2026-08-03T08:51:55+00:00' }
 status: stable
 okf_version: '0.2'
 wiki_id: person/alice-chen
 facts:
-  - text: Leads the retrieval workstream.
+  - text: 负责检索工作流。
     confidence: 0.9
 relations:
   - target: project/orion
@@ -115,56 +108,54 @@ metadata:
   significance: 0.8
 ---
 
-Alice Chen is a staff engineer.
+陈爱丽是一名资深工程师。
 
-Works on [project/orion](/project/orion.md) (lead engineer).
+负责 [project/orion](/project/orion.md)（主管工程师）。
 ```
 
-Status values: `stable` (default), `draft`, `deprecated`.
+状态值：`stable`（默认）、`draft`、`deprecated`。
 
-## File uploads
+## 文件上传
 
-Files are organized by session: `{user_id}/raw/{session_id}/{file_id}/`
+文件按会话组织：`{user_id}/raw/{session_id}/{file_id}/`
 
-The chat UI extracts text from uploaded files for LLM processing:
-- `.txt`, `.md`, `.json`, `.csv`, `.log` — read directly
-- `.docx` — XML text extraction
-- `.xlsx` — cell value extraction via shared strings
-- `.pdf` — best-effort text extraction
+聊天界面会从上传的文件中提取文本供 LLM 处理：
+- `.txt`、`.md`、`.json`、`.csv`、`.log` — 直接读取
+- `.docx` — XML 文本提取
+- `.xlsx` — 通过共享字符串提取单元格值
+- `.pdf` — 尽力文本提取
 
-`POST /v1/users/{user_id}/files` accepts multipart uploads. `session_id` is required.
+`POST /v1/users/{user_id}/files` 接受 multipart 上传。`session_id` 为必填项。
 
-## Chat UI
+## 聊天界面
 
-Open `http://localhost:8000/chat`. Features:
-- Drag and drop files anywhere, Ctrl+V paste, or click the 📎 button
-- Files appear as chips below the input, then move into the message bubble on send
-- Supports sending messages with files only (no text required)
-- Session-based file organization
+打开 `http://localhost:8000/chat`。功能：
+- 页面任意位置拖放文件、Ctrl+V 粘贴、或点击 📎 按钮
+- 文件在输入框下方显示为标签，发送后移入消息气泡中
+- 支持仅发送文件（无需文字）
+- 按会话组织文件存储
 
-## LLM extraction
+## LLM 提取
 
-Turns conversation into memory operations. Requires `DEEPSEEK_API_KEY`.
+将对话转化为记忆操作。需要 `DEEPSEEK_API_KEY`。
 
 ```
 POST /v1/users/{user_id}/extract  {"text": "..."}
 ```
 
-Returns proposed operations (upsert entities, add facts, create relations).
-Review them, then apply with `?apply=true` or `POST /extract/apply`.
+返回建议的操作（创建实体、添加事实、建立关系）。审核后使用 `?apply=true` 或 `POST /extract/apply` 应用。
 
-## Running on S3
+## 在 S3 上运行
 
 ```bash
 STORAGE_BACKEND=mirage MIRAGE_S3_BUCKET=your-bucket uvicorn app.main:app --port 8000
 ```
 
-Or plain boto3: `STORAGE_BACKEND=s3 S3_BUCKET=your-bucket`.
+或原生 boto3：`STORAGE_BACKEND=s3 S3_BUCKET=your-bucket`。
 
-Run `python scripts/s3_preflight.py --bucket YOUR_BUCKET` first to validate
-the bucket supports conditional writes (required).
+先运行 `python scripts/s3_preflight.py --bucket YOUR_BUCKET` 验证存储桶是否支持条件写入（必需）。
 
-### IAM policy
+### IAM 策略
 
 ```json
 {
@@ -185,67 +176,58 @@ the bucket supports conditional writes (required).
 }
 ```
 
-`s3:ListBucket` is not optional — without it S3 returns `403` instead of `404`
-for missing keys, which breaks nearly every code path.
+`s3:ListBucket` 不可省略——没有它，S3 对不存在的键返回 `403` 而非 `404`，会导致几乎所有代码路径失效。
 
-## Test suite
+## 测试
 
 ```bash
 pip install pytest httpx
 python -m pytest tests/ -v
 ```
 
-## API overview
+## API 概览
 
-| Endpoint | Purpose |
+| 端点 | 用途 |
 |---|---|
-| `GET /healthz` | Health check, reports active storage backend |
-| `POST /v1/auth/login` | Username/password → session token |
-| `GET /v1/auth/me` | Who am I? (debug 403s) |
-| `POST /v1/auth/password` | Change your password |
-| `GET /v1/users/{id}/wiki` | List entities (filterable, pageable) |
-| `PUT /v1/users/{id}/wiki` | Create or update an entity |
-| `GET /v1/users/{id}/wiki/{type}/{slug}` | Get one entity |
-| `DELETE /v1/users/{id}/wiki/{type}/{slug}` | Delete (tombstone) |
-| `POST /v1/users/{id}/wiki/subgraph` | Traverse graph neighbourhood |
-| `POST /v1/users/{id}/wiki/_rebuild_manifest` | Rebuild index from entity files |
-| `POST /v1/users/{id}/wiki/_reconcile` | Fix dangling relations |
-| `POST /v1/users/{id}/extract` | LLM extraction from text |
-| `POST /v1/users/{id}/chat` | Chat with memory context |
-| `POST /v1/users/{id}/files` | Upload files |
-| `GET /v1/users/{id}/files/{session_id}` | List files in a session |
-| `GET /v1/users/{id}/sessions` | List conversation sessions |
+| `GET /healthz` | 健康检查，报告当前使用的存储后端 |
+| `POST /v1/auth/login` | 用户名/密码 → 会话令牌 |
+| `GET /v1/auth/me` | 我是谁？（调试 403 用） |
+| `POST /v1/auth/password` | 修改密码 |
+| `GET /v1/users/{id}/wiki` | 列出实体（可筛选、分页） |
+| `PUT /v1/users/{id}/wiki` | 创建或更新实体 |
+| `GET /v1/users/{id}/wiki/{type}/{slug}` | 获取单个实体 |
+| `DELETE /v1/users/{id}/wiki/{type}/{slug}` | 删除（逻辑删除） |
+| `POST /v1/users/{id}/wiki/subgraph` | 遍历图谱邻域 |
+| `POST /v1/users/{id}/wiki/_rebuild_manifest` | 从实体文件重建索引 |
+| `POST /v1/users/{id}/wiki/_reconcile` | 修复悬空关系 |
+| `POST /v1/users/{id}/extract` | 从文本中 LLM 提取 |
+| `POST /v1/users/{id}/chat` | 带记忆上下文的聊天 |
+| `POST /v1/users/{id}/files` | 上传文件 |
+| `GET /v1/users/{id}/files/{session_id}` | 列出会话中的文件 |
+| `GET /v1/users/{id}/sessions` | 列出对话会话 |
 
-Full interactive docs at `http://localhost:8000/docs`.
+完整交互式文档：`http://localhost:8000/docs`。
 
-## Troubleshooting
+## 故障排查
 
-| Symptom | Cause |
+| 症状 | 原因 |
 |---|---|
-| App won't start, "no tokens configured" | Set `AUTH_TOKENS` in `.env` |
-| `401 Missing bearer token` | Send `Authorization: Bearer <token>` |
-| `401 Invalid username or password` | Also shown for unknown/disabled accounts |
-| `429 Too many failed attempts` | Login throttle; wait for Retry-After |
-| `503 Password login is not enabled` | `AUTH_SECRET` not set |
-| `401 Session expired` | Log in again |
-| Everything ~600ms per request | `MIRAGE_REUSE_CONNECTIONS` disabled, or bucket in wrong region |
-| `_stats` shows 0 entities | You're pointed at an empty user_id |
-| HTTP 422 "Entity file is corrupt" | Run `python scripts\check_bucket.py --fix` |
+| 应用无法启动，"no tokens configured" | 在 `.env` 中设置 `AUTH_TOKENS` |
+| `401 Missing bearer token` | 发送 `Authorization: Bearer <token>` |
+| `401 Invalid username or password` | 未知或已禁用账号也会显示此提示 |
+| `429 Too many failed attempts` | 登录限流；等待 Retry-After 指定的时间 |
+| `503 Password login is not enabled` | 未设置 `AUTH_SECRET` |
+| `401 Session expired` | 重新登录 |
+| 每次请求约 600ms | `MIRAGE_REUSE_CONNECTIONS` 被禁用，或存储桶区域不对 |
+| `_stats` 显示 0 条实体 | 当前指向的是一个空的 user_id |
+| HTTP 422 "Entity file is corrupt" | 运行 `python scripts\check_bucket.py --fix` |
 
-## Architecture notes
+## 架构说明
 
-- **Entity files are source of truth.** Manifest and ops log are derived and
-  rebuildable with `POST /wiki/_rebuild_manifest`.
-- **Write-behind buffering** holds manifest and ops log in memory, flushing on
-  a timer. Reduces writes from 3 PUTs per upsert to 1.
-- **Log-structured manifest** uses snapshots + deltas instead of rewriting a
-  single growing file. Total write volume is O(N log N) instead of O(N²).
-- **Conditional writes** (S3 `If-Match` / `If-None-Match`) protect against
-  concurrent write races. Mirage emulates this with read-then-write.
-- **Stateless session tokens** — no storage read on every request. Tradeoff:
-  individual tokens cannot be revoked before expiry. Rotate `AUTH_SECRET` to
-  invalidate all sessions.
-- **Adjacency index** in the manifest means `traverse()` costs zero storage
-  reads — edges are indexed per entity.
-- **Connection reuse** patches mirage to keep TLS connections alive instead of
-  reconnecting per operation (~10x latency improvement on remote endpoints).
+- **实体文件是唯一数据源。** 清单和操作日志是派生的，可通过 `POST /wiki/_rebuild_manifest` 重建。
+- **写缓冲** 将清单和操作日志保存在内存中，定时刷新。将每次 upsert 的 3 次 PUT 减少为 1 次。
+- **日志结构清单** 使用快照 + 增量，而非重写单个不断增长的文件。总写入量是 O(N log N) 而非 O(N²)。
+- **条件写入**（S3 `If-Match` / `If-None-Match`）防止并发写入冲突。Mirage 通过先读后写模拟此功能。
+- **无状态会话令牌** — 每个请求无需读取存储。代价：单个令牌在过期前无法撤销。轮换 `AUTH_SECRET` 可使所有会话失效。
+- **邻接索引** 在清单中维护，`traverse()` 零次存储读取即可完成——每条实体的边都已索引。
+- **连接复用** 修补了 mirage 使其保持 TLS 连接，而非每次操作重新连接（远程端点延迟提升约 10 倍）。
