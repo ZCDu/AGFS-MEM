@@ -1,6 +1,6 @@
 # Redis third-party runtime
 
-DREAM uses Redis as an external short-term session service. DREAM does not
+short-term-memory uses Redis as an external short-term session service. It does not
 vendor or modify Redis Server or redis-py source code.
 
 ## Redis Server
@@ -18,8 +18,8 @@ vendor or modify Redis Server or redis-py source code.
 - Tag commit: `fff669daaf43ae8092ea8ab7a2a3196a9b1b7e41`
 - License: MIT
 
-## DREAM usage
+## short-term-memory usage
 
-DREAM uses `PING`, `RPUSH`, `LRANGE`, `LLEN`, `LTRIM`, `SET` with `EX`,
+short-term-memory uses `PING`, `RPUSH`, `LRANGE`, `LLEN`, `LTRIM`, `SET` with `EX`,
 `GET`, `EXISTS`, `EXPIRE`, `DEL`, and redis-py transaction pipelines. No
-upstream Redis implementation file is copied into the DREAM Python package.
+upstream Redis implementation file is copied into the short-term-memory Python package.

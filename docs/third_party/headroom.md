@@ -1,6 +1,6 @@
 # Headroom external service
 
-DREAM integrates Headroom only as a replaceable HTTP service. It does not copy,
+short-term-memory integrates Headroom only as a replaceable HTTP service. It does not copy,
 package, import, or execute Headroom source code, Kompress models, ONNX Runtime or
 Headroom Python dependencies.
 
@@ -14,7 +14,7 @@ Headroom Python dependencies.
 - Background compression endpoint: `POST /v1/compress`
 - Agent model paths: OpenAI/Anthropic-compatible Headroom Proxy endpoints
 
-Install Headroom outside the DREAM `.venv`:
+Install Headroom outside the short-term-memory `.venv`:
 
 ```bash
 uv tool install --python 3.13 "headroom-ai[all]==0.33.0"
@@ -29,11 +29,11 @@ HEADROOM_CCR_TTL_SECONDS=43200 headroom proxy \
   --mode token
 ```
 
-DREAM decides only when its three PLAN thresholds require background compression.
+short-term-memory decides only when its three configured thresholds require background compression.
 Headroom owns ContentRouter selection, Kompress and other compressors, CCR cache,
 markers, `headroom_retrieve`, relevance decisions and supported model continuation.
-DREAM preserves Headroom messages as opaque protocol objects.
+short-term-memory preserves Headroom messages as opaque protocol objects.
 
-Because no Headroom code or model artifact is redistributed, DREAM has no vendored
+Because no Headroom code or model artifact is redistributed, short-term-memory has no vendored
 Headroom license/source tree or ML dependency. Another service can replace Headroom
 by implementing the same `CompressionClient` HTTP contract and Agent proxy boundary.
