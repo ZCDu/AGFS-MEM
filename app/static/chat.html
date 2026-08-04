@@ -12,11 +12,11 @@
   Apply commits it. A model deciding on its own what to write into long-term
   memory is how memory fills with hallucinations.
 -->
-<html lang="en">
+<html lang="zh-CN">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Chat</title>
+<title>对话</title>
 <style>
   :root {
     --bg:#e9edf2; --panel:#fff; --ink:#16202b; --ink-soft:#5c6b7a;
@@ -116,9 +116,6 @@
          color:#fff; padding:9px 12px; border-radius:3px; font-size:13px; opacity:0;
          transform:translateY(6px); transition:opacity .18s,transform .18s;
          pointer-events:none; z-index:9;
-         /* Errors from a model or a stack trace can be one unbroken string
-            with nothing to wrap on, which otherwise runs off the screen and
-            takes the layout with it. */
          white-space:pre-wrap; overflow-wrap:anywhere}
   #toast.show{opacity:1; transform:none}
   #toast.err{background:var(--danger)}
@@ -128,62 +125,61 @@
 <body>
 
 <header>
-  <h1>Chat</h1>
-  <label for="user" style="margin:0">User</label>
+  <h1>对话</h1>
+  <label for="user" style="margin:0">用户</label>
   <input id="user" value="demo" style="width:110px; font-family:var(--mono); padding:4px 7px">
-  <label for="token" style="margin:0">Token</label>
-  <input id="token" type="password" placeholder="if auth is on" autocomplete="off"
+  <label for="token" style="margin:0">令牌</label>
+  <input id="token" type="password" placeholder="如已启用认证" autocomplete="off"
          style="width:130px; font-family:var(--mono); padding:4px 7px">
-  <button class="sm ghost" id="signin" style="padding:4px 9px">Sign in</button>
-  <button class="sm ghost" id="signout" style="padding:4px 9px">Sign out</button>
+  <button class="sm ghost" id="signin" style="padding:4px 9px">登录</button>
+  <button class="sm ghost" id="signout" style="padding:4px 9px">退出</button>
   <span class="sp"></span>
   <span id="who" class="muted" style="font-size:11px"></span>
-  <a class="navlink" href="/gui">Graph editor &rarr;</a>
+  <a class="navlink" href="/gui">图谱编辑器 &rarr;</a>
 </header>
 
 <main>
   <div id="log">
     <div class="msg">
-      <span class="who">System</span>
-      <div class="body">Ask something. Anything already in memory for this user will be
-retrieved and used to answer — what was retrieved appears on the right.
+      <span class="who">系统</span>
+      <div class="body">随便问点什么。该用户已存储在记忆中的内容会被检索并用于回答——右侧面板会显示检索到了什么。
 
-When the conversation contains something worth keeping, press <strong>Review extraction</strong>.
-That proposes changes without writing anything.</div>
+当对话中包含值得保留的内容时，点击<strong>审查提取</strong>。
+它会提出修改建议，但不会写入任何内容。</div>
     </div>
   </div>
   <div class="composer">
     <div id="file-chips"></div>
     <div class="row">
-      <button id="attach-btn" title="Attach files">📎</button>
+      <button id="attach-btn" title="添加附件">📎</button>
       <input type="file" id="file-input" multiple>
-      <textarea id="input" placeholder="Type a message, or drop files here…"></textarea>
-      <button id="send">Send</button>
+      <textarea id="input" placeholder="输入消息，或将文件拖放到此处…"></textarea>
+      <button id="send">发送</button>
     </div>
     <div class="hint">
       <label style="display:inline; margin:0">
-        <input type="checkbox" id="usemem" checked style="width:auto; vertical-align:-2px"> use memory
+        <input type="checkbox" id="usemem" checked style="width:auto; vertical-align:-2px"> 使用记忆
       </label>
-      &nbsp;·&nbsp; <span id="turns">0 turns</span>
+      &nbsp;·&nbsp; <span id="turns">0 轮</span>
       &nbsp;·&nbsp; <span id="sess" class="muted"></span>
-      &nbsp;·&nbsp; <a href="#" id="clear" class="navlink">clear conversation</a>
+      &nbsp;·&nbsp; <a href="#" id="clear" class="navlink">清空对话</a>
     </div>
   </div>
 </main>
 
 <aside>
   <section>
-    <h2>Memory used in the last reply</h2>
-    <div id="context"><p class="muted">Nothing retrieved yet.</p></div>
+    <h2>上次回复使用的记忆</h2>
+    <div id="context"><p class="muted">尚未检索到任何内容。</p></div>
   </section>
 
   <section>
-    <h2>Extraction</h2>
-    <p class="muted">Turn this conversation into stored memory. Review first — it writes nothing.</p>
+    <h2>提取</h2>
+    <p class="muted">将这段对话转化为长期记忆。先审查——不会写入任何内容。</p>
     <div style="height:8px"></div>
     <div class="row" style="display:flex; gap:6px">
-      <button class="ghost sm" id="review">Review extraction</button>
-      <button class="sm" id="apply" disabled>Apply</button>
+      <button class="ghost sm" id="review">审查提取</button>
+      <button class="sm" id="apply" disabled>应用</button>
     </div>
     <div id="plan" style="margin-top:10px"></div>
   </section>
@@ -195,14 +191,8 @@ That proposes changes without writing anything.</div>
 <script>
 const $ = id => document.getElementById(id);
 let messages = [];          // {role, content}
-// The operations from the last reviewed plan. /extract/apply takes these, not
-// the transcript — so what gets written is exactly what was shown, rather than
-// a fresh extraction that might differ.
 let reviewedOps = null;
-let reviewedFrom = null;    // transcript the plan was built from
-// Assigned by the server on the first turn and echoed back on every later one,
-// so the whole conversation lands in a single session file rather than one
-// file per turn.
+let reviewedFrom = null;    // 生成计划时的对话记录
 let sessionId = null;
 let sessionDate = null;
 
@@ -234,34 +224,34 @@ async function api(method, path, body) {
     let detail = data && data.detail
       ? (typeof data.detail === "string" ? data.detail : JSON.stringify(data.detail))
       : `HTTP ${res.status}`;
-    if (res.status === 401) detail += " — paste a token above.";
-    if (res.status === 403) detail += " — that token is for a different user.";
-    if (res.status === 503) detail += " — set DEEPSEEK_API_KEY in .env and restart.";
+    if (res.status === 401) detail += " — 请在上方输入令牌。";
+    if (res.status === 403) detail += " — 该令牌属于其他用户。";
+    if (res.status === 503) detail += " — 请在 .env 中设置 DEEPSEEK_API_KEY 并重启。";
     throw new Error(detail);
   }
   return data;
 }
 
-/* ---------------- conversation ---------------- */
+/* ---------------- 对话 ---------------- */
 
 function render() {
   $("log").innerHTML = messages.map(m => `
     <div class="msg ${m.role === "user" ? "user" : ""}${m.error ? " err" : ""}">
-      <span class="who">${m.role === "user" ? "You" : "Bot"}</span>
+      <span class="who">${m.role === "user" ? "你" : "助手"}</span>
       <div class="body">${esc(m.content)}${m.files && m.files.length ? `
         <div class="files">${m.files.map(f =>
           `<span class="file-badge"><span class="ficon">📄</span>${esc(f.name)}</span>`
         ).join("")}</div>` : ""}${
         m.cites && m.cites.length
-          ? `<div class="cite">memory: ${m.cites.map(c => esc(c.wiki_id)).join(", ")}</div>`
+          ? `<div class="cite">记忆来源: ${m.cites.map(c => esc(c.wiki_id)).join(", ")}</div>`
           : ""}</div>
     </div>`).join("");
   $("log").scrollTop = $("log").scrollHeight;
-  $("turns").textContent = `${messages.length} turn${messages.length === 1 ? "" : "s"}`;
+  $("turns").textContent = `${messages.length} 轮`;
 }
 
 function transcript() {
-  return messages.map(m => `${m.role === "user" ? "User" : "Assistant"}: ${m.content}`)
+  return messages.map(m => `${m.role === "user" ? "用户" : "助手"}: ${m.content}`)
                  .join("\n\n");
 }
 
@@ -271,7 +261,7 @@ async function send() {
   if (!text && !hasFiles) return;
   $("input").value = "";
 
-  // Grab files that are done uploading, attach them to the message
+  // 收集已上传完成的文件，附加到消息中
   const attachedFiles = pendingFiles.filter(f => f.uploaded && f.file_id);
   const fileNames = attachedFiles.map(f => ({name: f.name}));
   pendingFiles = pendingFiles.filter(f => !f.uploaded || !f.file_id);
@@ -291,7 +281,6 @@ async function send() {
       use_memory: $("usemem").checked,
       session_id: sessionId,
     };
-    // Attach the files that were sent with this message.
     if (attachedFiles.length) {
       body.attachments = attachedFiles.map(f => `file:${f.session_id}:${f.file_id}`);
     }
@@ -299,7 +288,7 @@ async function send() {
     if (res.session_id) {
       sessionId = res.session_id;
       sessionDate = new Date().toISOString().slice(0, 10);
-      $("sess").textContent = "session " + sessionId;
+      $("sess").textContent = "会话 " + sessionId;
     }
     messages.pop();
     messages.push({role: "assistant", content: res.reply, cites: res.context_used});
@@ -310,8 +299,6 @@ async function send() {
   } finally {
     $("send").disabled = false;
     render();
-    // The plan was built from an older transcript, so it no longer matches
-    // what is on screen. Better to invalidate than to apply something stale.
     if (reviewedFrom !== null && reviewedFrom !== transcript()) {
       $("apply").disabled = true;
       reviewedOps = null; reviewedFrom = null;
@@ -321,25 +308,22 @@ async function send() {
 
 function renderContext(used) {
   if (!used || !used.length) {
-    $("context").innerHTML = `<p class="muted">Nothing in memory matched that message.</p>`;
+    $("context").innerHTML = `<p class="muted">记忆中没有匹配该消息的内容。</p>`;
     return;
   }
   $("context").innerHTML = used.map(c => `
     <div class="item">
       <div>${esc(c.title)}</div>
-      <div class="id">${esc(c.wiki_id)} · matched on ${esc(c.matched_on)} · ${c.confidence}</div>
+      <div class="id">${esc(c.wiki_id)} · 匹配方式: ${esc(c.matched_on)} · ${c.confidence}</div>
     </div>`).join("");
 }
 
-/* ---------------- extraction ---------------- */
+/* ---------------- 提取 ---------------- */
 
 const OP_COLOUR = {upsert_entity: "var(--accent)", add_fact: "var(--ok)",
                    link_entities: "var(--warn)"};
 
 function showError(title, message) {
-  // Truncate on screen but keep the whole thing reachable: a validation error
-  // can be thousands of characters, and burying the first line — which is the
-  // part that names the problem — makes it unreadable.
   const full = String(message || "");
   const short = full.length > 400 ? full.slice(0, 400) + "…" : full;
   console.error(title + ":", full);
@@ -348,15 +332,15 @@ function showError(title, message) {
       <div class="top">${esc(title)}</div>
       <div id="errtext">${esc(short)}</div>
       ${full.length > 400
-        ? `<button class="ghost sm" id="errmore">Show all ${full.length} characters</button>`
+        ? `<button class="ghost sm" id="errmore">显示全部 ${full.length} 个字符</button>`
         : ""}
-      <button class="ghost sm" id="errcopy">Copy</button>
+      <button class="ghost sm" id="errcopy">复制</button>
     </div>`;
   const more = $("errmore");
   if (more) more.onclick = () => { $("errtext").textContent = full; more.remove(); };
   $("errcopy").onclick = async () => {
-    try { await navigator.clipboard.writeText(full); toast("Copied"); }
-    catch { toast("Could not copy — it is also in the browser console", true); }
+    try { await navigator.clipboard.writeText(full); toast("已复制"); }
+    catch { toast("无法复制 — 详情已输出到浏览器控制台", true); }
   };
 }
 
@@ -365,10 +349,10 @@ function renderPlan(plan) {
   const tone = plan.decision === "store" ? "var(--ok)"
              : plan.decision === "review" ? "var(--warn)" : "var(--ink-soft)";
   parts.push(`<div><span class="pill" style="background:${tone}">${esc(plan.decision)}</span>
-    <span class="muted" style="margin-left:6px">${plan.llm_used ? "model ran" : "no model call"}</span></div>`);
+    <span class="muted" style="margin-left:6px">${plan.llm_used ? "已调用模型" : "未调用模型"}</span></div>`);
 
   if (!plan.operations.length) {
-    parts.push(`<p class="muted" style="margin-top:8px">Nothing proposed.</p>`);
+    parts.push(`<p class="muted" style="margin-top:8px">未提出任何建议。</p>`);
   } else {
     parts.push(`<div style="margin-top:9px">` + plan.operations.map(o => `
       <div class="op"><span style="color:${OP_COLOUR[o.op] || "var(--ink)"}">${esc(o.op)}</span>
@@ -380,33 +364,31 @@ function renderPlan(plan) {
     parts.push(`<div class="muted" style="margin-top:7px; color:var(--danger)">${esc(r.reason)}</div>`);
   }
   if (plan.discarded && plan.discarded.length) {
-    parts.push(`<div class="muted" style="margin-top:7px">Left out: ${
+    parts.push(`<div class="muted" style="margin-top:7px">已忽略: ${
       plan.discarded.map(esc).join("; ")}</div>`);
   }
   $("plan").innerHTML = parts.join("");
 }
 
 $("review").onclick = async () => {
-  if (!messages.length) return toast("Say something first", true);
+  if (!messages.length) return toast("请先输入内容", true);
   $("review").disabled = true;
   try {
     const text = transcript();
-    // Passing the session stamps every extracted fact with where it came
-    // from, so a stored claim can be traced back to the exact conversation.
     const plan = await api("POST", "/extract",
       {text, session_id: sessionId, session_date: sessionDate});
     renderPlan(plan);
     reviewedOps = plan.operations.filter(o => o.status === "proposed");
     reviewedFrom = text;
     $("apply").disabled = !reviewedOps.length;
-    if (!plan.operations.length) toast("Nothing worth storing yet");
+    if (!plan.operations.length) toast("暂无可存储的内容");
   } catch (e) {
-    showError("Review failed", e.message);
+    showError("审查失败", e.message);
   } finally { $("review").disabled = false; }
 };
 
 $("apply").onclick = async () => {
-  if (!reviewedOps || !reviewedOps.length) return toast("Review first", true);
+  if (!reviewedOps || !reviewedOps.length) return toast("请先审查", true);
   $("apply").disabled = true;
   try {
     const res = await api("POST", "/extract/apply", {
@@ -417,17 +399,17 @@ $("apply").onclick = async () => {
     renderPlan({decision: "applied", llm_used: false,
                 operations: res.operations, rejected: [], discarded: []});
     toast(res.failed
-      ? `Stored ${res.applied}, ${res.failed} failed — see the panel`
-      : `Stored ${res.applied} change${res.applied === 1 ? "" : "s"}`,
+      ? `已存储 ${res.applied} 项，${res.failed} 项失败 — 详见面板`
+      : `已存储 ${res.applied} 项`,
       res.failed > 0);
     reviewedOps = null; reviewedFrom = null;
   } catch (e) {
-    showError("Apply failed", e.message);
+    showError("应用失败", e.message);
     $("apply").disabled = false;
   }
 };
 
-/* ---------------- file upload ---------------- */
+/* ---------------- 文件上传 ---------------- */
 
 let pendingFiles = [];  // {name, file_id, session_id, size, uploaded, error}
 
@@ -437,7 +419,7 @@ const chips = $("file-chips");
 $("attach-btn").onclick = () => fi.click();
 fi.onchange = () => { if (fi.files.length) uploadFiles(fi.files); fi.value = ""; };
 
-// Drag & drop anywhere on the page
+// 页面任意位置拖放
 let dragCounter = 0;
 document.addEventListener("dragenter", e => { e.preventDefault(); dragCounter++; });
 document.addEventListener("dragleave", () => { dragCounter--; });
@@ -448,7 +430,7 @@ document.addEventListener("drop", e => {
   if (e.dataTransfer.files.length) uploadFiles(e.dataTransfer.files);
 });
 
-// Paste files from clipboard
+// 从剪贴板粘贴文件
 $("input").addEventListener("paste", e => {
   const items = e.clipboardData?.items;
   if (!items) return;
@@ -483,7 +465,7 @@ function removeFile(i) { pendingFiles.splice(i, 1); renderChips(); }
 async function uploadFiles(fileList) {
   if (!sessionId) {
     sessionId = "sess-" + Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 8);
-    $("sess").textContent = "session " + sessionId;
+    $("sess").textContent = "会话 " + sessionId;
   }
   for (const file of fileList) {
     const entry = {name: file.name, file_id: null, session_id: sessionId,
@@ -521,8 +503,6 @@ $("clear").onclick = e => {
   e.preventDefault();
   messages = []; reviewedOps = null; reviewedFrom = null;
   pendingFiles = []; renderChips();
-  // A new conversation is a new session; keeping the old id would append
-  // unrelated turns to a stored transcript.
   sessionId = null; sessionDate = null;
   $("sess").textContent = "";
   $("apply").disabled = true;
@@ -533,18 +513,14 @@ $("clear").onclick = e => {
 
 MemAuth.install({
   onSignedIn: () => {
-    // A new identity means a different memory namespace, so anything on
-    // screen was answered from someone else's graph.
     messages = []; reviewedOps = null; reviewedFrom = null;
-  // A new conversation is a new session; keeping the old id would append
-  // unrelated turns to a stored transcript.
   sessionId = null; sessionDate = null;
   $("sess").textContent = "";
     $("apply").disabled = true;
     $("plan").innerHTML = "";
     renderContext([]);
     render();
-    toast("Signed in");
+    toast("已登录");
   },
 });
 
