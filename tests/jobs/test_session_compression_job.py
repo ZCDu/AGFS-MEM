@@ -4,13 +4,15 @@ import json
 from types import SimpleNamespace
 from typing import Any, Mapping
 
-from dream.memory.session_compression import (
-    ExecutorHeadroomCompressionQueue,
-    HeadroomCompressionJob,
+from short_term_memory.compression.summary import SessionSummaryGenerator
+from short_term_memory.jobs.session_compression_job import (
+    ExecutorSessionCompressionQueue,
+    SessionCompressionJob,
+)
+from short_term_memory.models import (
     HeadroomCompressionResult,
     HeadroomCompressionStatus,
     HeadroomFailureReason,
-    SessionSummaryGenerator,
     SessionSummaryPayload,
 )
 
@@ -165,7 +167,7 @@ class RecordingSummaryModel:
 
 def test_job_uses_scope_headers_for_the_same_user_and_session() -> None:
     client = FixedCompressionClient(success_result())
-    job = HeadroomCompressionJob(
+    job = SessionCompressionJob(
         store=RecordingSummaryStore(),
         compression_client=client,
         summary_model=RecordingSummaryModel(summary_payload()),
@@ -241,7 +243,7 @@ class RecordingRetryQueue:
 def test_success_stores_dream_owned_structured_redis_summary() -> None:
     store = RecordingSummaryStore()
     model = RecordingSummaryModel(summary_payload())
-    job = HeadroomCompressionJob(
+    job = SessionCompressionJob(
         store=store,
         compression_client=FixedCompressionClient(success_result()),
         summary_model=model,
@@ -275,7 +277,7 @@ def test_job_stores_headroom_messages_unchanged_without_reference_index() -> Non
     store = RecordingSummaryStore()
     model = RecordingSummaryModel(summary_payload())
 
-    HeadroomCompressionJob(
+    SessionCompressionJob(
         store=store,
         compression_client=FixedCompressionClient(compression),
         summary_model=model,
@@ -310,7 +312,7 @@ def test_noop_does_not_duplicate_original_transcript_in_envelope() -> None:
     )
     store = RecordingSummaryStore()
 
-    HeadroomCompressionJob(
+    SessionCompressionJob(
         store=store,
         compression_client=FixedCompressionClient(compression),
         summary_model=RecordingSummaryModel(summary_payload()),
@@ -325,7 +327,7 @@ def test_noop_does_not_duplicate_original_transcript_in_envelope() -> None:
 def test_attachment_reference_must_exist_in_summary_input() -> None:
     store = RecordingSummaryStore()
     retry = RecordingRetryQueue()
-    job = HeadroomCompressionJob(
+    job = SessionCompressionJob(
         store=store,
         compression_client=FixedCompressionClient(success_result()),
         summary_model=RecordingSummaryModel(summary_payload(attachment=True)),
@@ -358,7 +360,7 @@ def test_noop_and_development_fallback_still_generate_summary() -> None:
     ):
         store = RecordingSummaryStore()
         model = RecordingSummaryModel(summary_payload())
-        result = HeadroomCompressionJob(
+        result = SessionCompressionJob(
             store=store,
             compression_client=FixedCompressionClient(compression),
             summary_model=model,
@@ -375,7 +377,7 @@ def test_production_compression_failure_does_not_summarize_store_or_trim() -> No
     retry = RecordingRetryQueue()
     store = RecordingSummaryStore()
     model = RecordingSummaryModel(summary_payload())
-    result = HeadroomCompressionJob(
+    result = SessionCompressionJob(
         store=store,
         compression_client=FixedCompressionClient(
             failed_result(messages=(), fallback_used=False)
@@ -397,7 +399,7 @@ def test_production_compression_failure_does_not_summarize_store_or_trim() -> No
 def test_summary_failure_is_safe_and_scheduled_without_store() -> None:
     retry = RecordingRetryQueue()
     store = RecordingSummaryStore()
-    result = HeadroomCompressionJob(
+    result = SessionCompressionJob(
         store=store,
         compression_client=FixedCompressionClient(success_result()),
         summary_model=FailingSummaryModel(),
@@ -425,7 +427,7 @@ class RecordingExecutor:
 
 def test_executor_queue_defers_compression_summary_and_store_work() -> None:
     store = RecordingSummaryStore()
-    job = HeadroomCompressionJob(
+    job = SessionCompressionJob(
         store=store,
         compression_client=FixedCompressionClient(success_result()),
         summary_model=RecordingSummaryModel(summary_payload()),
@@ -433,7 +435,7 @@ def test_executor_queue_defers_compression_summary_and_store_work() -> None:
         clock=lambda: NOW,
     )
     executor = RecordingExecutor()
-    queue = ExecutorHeadroomCompressionQueue(job, executor)
+    queue = ExecutorSessionCompressionQueue(job, executor)
 
     queue.enqueue("user", "session", MESSAGES, 2, 1)
 

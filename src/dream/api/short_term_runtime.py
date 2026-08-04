@@ -19,12 +19,14 @@ from short_term_memory.compression.telemetry import (
     HeadroomTelemetry,
     InMemoryHeadroomTelemetry,
 )
-from dream.memory.session_compression import (
+from short_term_memory.jobs.session_compression_job import (
+    ExecutorSessionCompressionQueue,
+    SessionCompressionJob,
+)
+from short_term_memory.ports import (
     BackgroundExecutor,
     CompressionClient,
-    ExecutorHeadroomCompressionQueue,
-    HeadroomCompressionJob,
-    HeadroomRetryQueue,
+    RetryQueue,
     SummaryModel,
 )
 from short_term_memory.storage.journal_store import JournalStore
@@ -36,8 +38,8 @@ class ShortTermMemoryRuntime:
     session_context: RedisSessionContext
     conversation_handler: ConversationHandler
     compression_client: CompressionClient
-    compression_job: HeadroomCompressionJob
-    compression_queue: ExecutorHeadroomCompressionQueue
+    compression_job: SessionCompressionJob
+    compression_queue: ExecutorSessionCompressionQueue
     telemetry: HeadroomTelemetry
 
 
@@ -49,7 +51,7 @@ def build_short_term_runtime(
     token_estimator: TokenEstimator,
     summary_model: SummaryModel,
     executor: BackgroundExecutor,
-    retry_queue: HeadroomRetryQueue,
+    retry_queue: RetryQueue,
     compression_client: CompressionClient | None = None,
     telemetry: HeadroomTelemetry | None = None,
     clock: Callable[[], datetime] | None = None,
@@ -77,7 +79,7 @@ def build_short_term_runtime(
         settings.optimization_scope_secret,
         telemetry=metrics,
     )
-    compression_job = HeadroomCompressionJob(
+    compression_job = SessionCompressionJob(
         store=context,
         compression_client=selected_client,
         summary_model=summary_model,
@@ -87,7 +89,7 @@ def build_short_term_runtime(
             scope_factory.for_session(user_id, session_id).as_headroom_headers()
         ),
     )
-    compression_queue = ExecutorHeadroomCompressionQueue(
+    compression_queue = ExecutorSessionCompressionQueue(
         compression_job,
         executor,
     )
