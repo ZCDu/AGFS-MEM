@@ -37,6 +37,71 @@ Both are the same code path, differing only in the mounted resource.
 
 ---
 
+## Docker（快速部署）
+
+### 使用 docker compose（推荐）
+
+```bash
+# 1. 配置 .env（参考 .env.example）
+cp .env.example .env
+# 编辑 .env：设置 STORAGE_BACKEND、LLM_API_KEY 等
+
+# 2. 构建并启动
+docker compose up -d
+
+# 3. 查看日志
+docker compose logs -f
+
+# 4. 打开 http://localhost:8000/chat
+```
+
+### 使用 Makefile
+
+```bash
+make build    # 构建镜像
+make up       # 启动服务
+make logs     # 查看日志
+make down     # 停止服务
+make test     # 运行测试
+```
+
+### 手动 Docker 命令
+
+```bash
+# 构建
+docker build -t memory-backend .
+
+# 运行（挂载本地数据目录）
+docker run -d -p 8000:8000 \
+  --env-file .env \
+  -v memory_data:/data \
+  --name memory-backend \
+  memory-backend
+
+# 查看日志
+docker logs -f memory-backend
+
+# 停止
+docker stop memory-backend && docker rm memory-backend
+```
+
+### Docker 环境变量覆盖
+
+在 `docker-compose.yml` 或 `docker run -e` 中覆盖关键变量：
+
+```yaml
+environment:
+  - STORAGE_BACKEND=disk          # 使用本地存储（无需 S3）
+  - LOCAL_BUCKET_ROOT=/data/bucket
+  - AUTH_MODE=token
+  - AUTH_SECRET=your-secret-here
+  - LLM_BASE_URL=https://api.deepseek.com/v1
+  - LLM_MODEL=deepseek-chat
+  - DEEPSEEK_API_KEY=sk-xxx
+```
+
+---
+
 ## Authentication
 
 The API requires a bearer token, and **the app refuses to start without one**

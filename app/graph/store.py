@@ -480,10 +480,16 @@ class EntityGraphStore:
             meta = {**meta, "updated_at": updated_at}
 
         try:
+            wiki_id = d.get("wiki_id", "")
+            if not wiki_id:
+                raise MalformedEntityError("Missing wiki_id in front-matter")
+            entity_type = d.get("type", "")
+            if not entity_type:
+                raise MalformedEntityError("Missing type in front-matter")
             return Entity(
-                wiki_id=d.get("wiki_id", ""),
-                type=d.get("type", "concept"),
-                title=d.get("title", d.get("wiki_id", "")),
+                wiki_id=wiki_id,
+                type=entity_type,
+                title=d.get("title", wiki_id),
                 # Accept both spellings for backward compat with old files.
                 aliases=list(d.get("tags") or d.get("aliases") or []),
                 compact=d.get("description") or d.get("compact", ""),

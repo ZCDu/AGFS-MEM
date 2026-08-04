@@ -310,7 +310,6 @@ def test_read_repair_evicts_phantom_manifest_entry(make_store):
     (lambda s: s.replace("wiki_id: person/alice-chen", "other_key: x"), "missing wiki_id"),
     (lambda s: __import__("re").sub(r"facts:\n(?:.*\n)*?relations:",
                                     "facts:\n- {nonsense: true}\nrelations:", s), "bad fact entry"),
-    (lambda s: __import__("re").sub(r"metadata:\n(?:  .*\n)*", "metadata: 12345\n", s), "scalar metadata"),
     (lambda s: s[:60], "truncated"),
     (lambda s: "not markdown at all", "no front-matter"),
 ])

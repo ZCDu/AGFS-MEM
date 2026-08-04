@@ -197,11 +197,13 @@ def test_uploaded_bytes_are_stored_unchanged(client):
     not exist yet — could never be applied to files already uploaded."""
     original = b"# Orion\n\nAlice Chen leads retrieval.\n\x01\x02"
     r = client.post("/v1/users/demo/files",
-                    files={"file": ("notes.md", original, "text/markdown")})
+                    files={"file": ("notes.md", original, "text/markdown")},
+                    data={"session_id": "test-session"})
     assert r.status_code == 200
     file_id = r.json()["file_id"]
+    sid = r.json()["session_id"]
 
-    got = client.get(f"/v1/users/demo/files/{file_id}/content")
+    got = client.get(f"/v1/users/demo/files/{file_id}/content?session_id={sid}")
     assert got.content == original
 
 
@@ -210,27 +212,32 @@ def test_binary_files_are_stored_but_reported_as_unreadable(client):
     the file is unreadable is strictly better."""
     r = client.post("/v1/users/demo/files",
                     files={"file": ("report.pdf", b"%PDF-1.7\x00\x00junk",
-                                    "application/pdf")})
+                                    "application/pdf")},
+                    data={"session_id": "test-session"})
+    assert r.status_code == 200
     meta = r.json()
     assert meta["text_extractable"] is False
     assert "PDF" in meta["note"]
     # Stored regardless, so a PDF reader added later can use it.
-    assert client.get(f"/v1/users/demo/files/{meta['file_id']}/content").status_code == 200
+    assert client.get(f"/v1/users/demo/files/{meta['file_id']}/content?session_id={meta['session_id']}").status_code == 200
 
 
 def test_filenames_never_become_storage_keys(client):
     """A hostile or awkward filename must not escape its prefix, collide, or
     overwrite anything. The key uses a generated id; the name is display only."""
     r = client.post("/v1/users/demo/files",
-                    files={"file": ("../../etc/passwd", b"harmless", "text/plain")})
+                    files={"file": ("../../etc/passwd", b"harmless", "text/plain")},
+                    data={"session_id": "test-session"})
+    assert r.status_code == 200
     meta = r.json()
     assert "/" not in meta["file_id"]
-    assert client.get(f"/v1/users/demo/files/{meta['file_id']}/content").content == b"harmless"
+    assert client.get(f"/v1/users/demo/files/{meta['file_id']}/content?session_id={meta['session_id']}").content == b"harmless"
 
 
 def test_empty_upload_is_rejected(client):
     r = client.post("/v1/users/demo/files",
-                    files={"file": ("empty.txt", b"", "text/plain")})
+                    files={"file": ("empty.txt", b"", "text/plain")},
+                    data={"session_id": "test-session"})
     assert r.status_code == 422
 
 
@@ -253,12 +260,16 @@ def test_chat_reads_an_attached_file_and_journals_it(client, monkeypatch):
 
     up = client.post("/v1/users/demo/files",
                      files={"file": ("notes.md",
-                                     b"Orion deadline is 2026-08-15.", "text/markdown")})
-    file_id = up.json()["file_id"]
+                                     b"Orion deadline is 2026-08-15.", "text/markdown")},
+                     data={"session_id": "test-session"})
+    assert up.status_code == 200
+    meta = up.json()
+    file_id = meta["file_id"]
+    session_id = meta["session_id"]
 
     r = client.post("/v1/users/demo/chat", json={
         "messages": [{"role": "user", "content": "what is the deadline?"}],
-        "attachments": [file_id],
+        "attachments": [f"file:{session_id}:{file_id}"],
     })
     assert r.status_code == 200
     assert "Orion deadline is 2026-08-15." in seen["system"], \
@@ -289,12 +300,15 @@ def test_an_unreadable_attachment_is_declared_to_the_model(client, monkeypatch):
 
     up = client.post("/v1/users/demo/files",
                      files={"file": ("scan.pdf", b"%PDF-1.7\x00binary",
-                                     "application/pdf")})
+                                     "application/pdf")},
+                     data={"session_id": "test-session"})
+    assert up.status_code == 200
+    meta = up.json()
     client.post("/v1/users/demo/chat", json={
         "messages": [{"role": "user", "content": "what does it say?"}],
-        "attachments": [up.json()["file_id"]],
+        "attachments": [f"file:{meta['session_id']}:{meta['file_id']}"],
     })
-    assert "cannot be read" in seen["system"]
+    assert "could not be read" in seen["system"]
 
 
 def test_a_missing_attachment_does_not_fail_the_turn(client, monkeypatch):

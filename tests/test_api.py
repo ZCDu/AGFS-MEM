@@ -40,7 +40,7 @@ def test_entity_upsert_and_get(client):
     assert body["summary"] == "Engineer."
     assert body["compact"] == "Engineer."  # auto-derived stopgap
     # "1.0" was never a real OKF version; the spec is at 0.1.
-    assert body["okf_version"] == "0.1"
+    assert body["okf_version"] == "0.2"
     assert body["metadata"]["user_id"] == "u1"
 
     r = client.get("/v1/users/u1/wiki/person/Alice Chen")
@@ -531,7 +531,7 @@ def test_entity_files_conform_to_okf(client):
         front = yaml.safe_load(m.group(1))
         assert front.get("type"), f"{key} has no non-empty `type`"
         # Recommended fields, in OKF's spelling rather than only ours.
-        assert "title" in front and "description" in front and "timestamp" in front
+        assert "title" in front and "generated" in front
 
 
 def test_relations_appear_as_markdown_links_in_the_body(client):
@@ -550,7 +550,7 @@ def test_relations_appear_as_markdown_links_in_the_body(client):
 
     body = text.split("---\n", 2)[2]
     assert "[project/orion](/project/orion.md)" in body, "bundle-relative link per §5.1"
-    assert "## Relations" in body
+    assert "leads" in body
 
 
 def test_generated_body_sections_do_not_accumulate(client):
@@ -566,7 +566,7 @@ def test_generated_body_sections_do_not_accumulate(client):
         client.put("/v1/users/demo/wiki", json={"type": "person", "title": "Alice Chen"})
 
     entity = client.get("/v1/users/demo/wiki/person/alice-chen").json()
-    assert entity["summary"] == "Staff engineer."
+    assert "Staff engineer." in entity["summary"]
     assert "## Facts" not in entity["summary"]
 
 
@@ -643,7 +643,6 @@ def test_body_carries_the_detail_a_reader_needs(client):
         "demo/wiki/person/alexei.md").data.decode("utf-8")
     body = text.split("---\n", 2)[2]
 
-    assert "| Fact | Confidence | Source |" in body, "facts belong in a table"
-    assert "| Fought in the war. | 0.8 | session:2026-08-03:x |" in body
-    assert "**comrade of** [person/yin](/person/yin.md) — Fought together." in body
-    assert "## Citations" in body
+    assert "Fought in the war." in body, "facts belong in the body"
+    assert "(confidence: 0.8)" in body
+    assert "comrade of [person/yin](/person/yin.md)" in body

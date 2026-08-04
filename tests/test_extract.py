@@ -39,7 +39,7 @@ class StubLLM:
 
     def complete(self, system: str, user: str, **kw) -> str:
         self.calls += 1
-        self.last_prompt = user
+        self.last_prompt = system + "\n\n" + user
         if isinstance(self.response, Exception):
             raise self.response
         return self.response or "{}"

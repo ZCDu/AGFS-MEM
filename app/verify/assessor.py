@@ -300,7 +300,7 @@ class ConversationAssessor:
         found: dict[str, LinkedEntity] = {}
 
         for e in entries:
-            if e.status != "active":
+            if e.status not in ("stable", "active"):
                 continue
 
             norm_title = _normalize(e.title)

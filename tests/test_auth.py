@@ -25,11 +25,16 @@ from app.auth import parse_token_map, suggest_token
 def build(monkeypatch, **env) -> TestClient:
     monkeypatch.setenv("STORAGE_BACKEND", "disk")
     monkeypatch.setenv("LOCAL_BUCKET_ROOT", tempfile.mkdtemp())
+    # Clear any .env-loaded values before setting test values
+    for k in ("AUTH_MODE", "AUTH_TOKENS", "AUTH_ADMIN_TOKEN", "AUTH_SECRET"):
+        monkeypatch.delenv(k, raising=False)
     for k, v in env.items():
         if v is None:
             monkeypatch.delenv(k, raising=False)
         else:
             monkeypatch.setenv(k, v)
+    # Prevent load_dotenv() from overriding our test env vars
+    monkeypatch.setattr("dotenv.load_dotenv", lambda *a, **kw: None)
     cfg._settings = None
     import app.deps as deps
     deps.get_storage_backend.cache_clear()
@@ -46,8 +51,11 @@ def hdr(token: str) -> dict:
 def test_token_mode_without_tokens_refuses_to_start(monkeypatch):
     """An unauthenticated API must never ship by accident. The failure has to
     happen loudly at startup, not silently at runtime."""
+    # Must explicitly clear AUTH_SECRET too, because load_dotenv() runs
+    # during importlib.reload and re-sets it from .env.
     with pytest.raises(RuntimeError) as exc:
-        build(monkeypatch, AUTH_MODE="token", AUTH_TOKENS=None, AUTH_ADMIN_TOKEN=None)
+        build(monkeypatch, AUTH_MODE="token", AUTH_TOKENS=None,
+              AUTH_ADMIN_TOKEN=None, AUTH_SECRET=None)
     msg = str(exc.value)
     assert "no tokens are configured" in msg
     assert "AUTH_TOKENS=" in msg, "the error must show how to fix it"

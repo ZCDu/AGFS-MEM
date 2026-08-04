@@ -1,0 +1,44 @@
+# Git
+.git
+.gitignore
+
+# Python
+__pycache__
+*.pyc
+*.pyo
+*.egg-info
+.eggs
+dist
+build
+
+# Virtual env
+venv
+.venv
+env
+
+# Test / dev
+.pytest_cache
+.mypy_cache
+.ruff_cache
+local_bucket
+_test
+*.tmp
+
+# IDE
+.vscode
+.idea
+*.swp
+*.swo
+
+# Env (use --env-file at runtime)
+.env.local
+.env.dev
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Docker
+Dockerfile
+docker-compose.yml
+.dockerignore
