@@ -18,10 +18,12 @@ from dream.memory.writeback import DeterministicWritebackBackend
 
 HEADROOM_ENV_KEYS = (
     "DREAM_ENV",
+    "DREAM_OPTIMIZATION_SCOPE_SECRET",
     "HEADROOM_SERVICE_URL",
     "HEADROOM_SERVICE_API_KEY",
     "HEADROOM_SERVICE_TIMEOUT_SECONDS",
     "HEADROOM_COMPRESSION_MODEL",
+    "HEADROOM_CCR_TTL_SECONDS",
 )
 
 
@@ -60,6 +62,10 @@ def test_redis_session_defaults_match_plan(tmp_path: Path) -> None:
     assert redis.url == "redis://127.0.0.1:6379/0"
     assert redis.ttl_seconds == 43_200
     assert redis.history_turns == 10
+    assert redis.context_window_tokens == 128_000
+    assert redis.trigger_ratio == 0.65
+    assert redis.max_messages == 100
+    assert redis.max_session_seconds == 14_400
 
 
 def test_redis_session_settings_load_from_env(
@@ -73,7 +79,11 @@ def test_redis_session_settings_load_from_env(
     env_file.write_text(
         "DREAM_REDIS_URL=redis://redis.internal:6379/2\n"
         "DREAM_REDIS_SESSION_TTL_SECONDS=43200\n"
-        "DREAM_REDIS_HISTORY_TURNS=12\n",
+        "DREAM_REDIS_HISTORY_TURNS=12\n"
+        "DREAM_CONTEXT_WINDOW_TOKENS=64000\n"
+        "DREAM_HEADROOM_TRIGGER_RATIO=0.70\n"
+        "DREAM_HEADROOM_MAX_MESSAGES=80\n"
+        "DREAM_HEADROOM_MAX_SESSION_SECONDS=7200\n",
         encoding="utf-8",
     )
 
@@ -82,6 +92,10 @@ def test_redis_session_settings_load_from_env(
     assert redis.url == "redis://redis.internal:6379/2"
     assert redis.ttl_seconds == 43_200
     assert redis.history_turns == 12
+    assert redis.context_window_tokens == 64_000
+    assert redis.trigger_ratio == 0.70
+    assert redis.max_messages == 80
+    assert redis.max_session_seconds == 7_200
 
 
 @pytest.mark.parametrize(
@@ -99,6 +113,21 @@ def test_redis_session_rejects_non_positive_values(
         load_settings(env_file)
 
 
+@pytest.mark.parametrize("value", ("0.59", "0.71"))
+def test_headroom_trigger_ratio_must_match_plan_range(
+    tmp_path: Path,
+    value: str,
+) -> None:
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        f"DREAM_HEADROOM_TRIGGER_RATIO={value}\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="between 0.60 and 0.70"):
+        load_settings(env_file)
+
+
 def test_headroom_service_defaults_to_development(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -110,8 +139,9 @@ def test_headroom_service_defaults_to_development(
     assert settings.environment == "development"
     assert settings.headroom_service.url == ""
     assert settings.headroom_service.api_key == ""
-    assert settings.headroom_service.timeout_seconds == 30.0
-    assert settings.headroom_service.compression_model == ""
+    assert settings.headroom_service.timeout_seconds == 300.0
+    assert settings.headroom_service.compression_model == "gpt-4o"
+    assert settings.headroom_service.ccr_ttl_seconds == 43_200
 
 
 def test_production_requires_headroom_service_url(
@@ -134,10 +164,12 @@ def test_headroom_service_settings_load_from_env_file(
     env_file = tmp_path / ".env"
     env_file.write_text(
         "DREAM_ENV=production\n"
+        "DREAM_OPTIMIZATION_SCOPE_SECRET=production-secret\n"
         "HEADROOM_SERVICE_URL=http://headroom:8787/\n"
         "HEADROOM_SERVICE_API_KEY=secret\n"
         "HEADROOM_SERVICE_TIMEOUT_SECONDS=12.5\n"
-        "HEADROOM_COMPRESSION_MODEL=gpt-4o\n",
+        "HEADROOM_COMPRESSION_MODEL=gpt-4o\n"
+        "HEADROOM_CCR_TTL_SECONDS=7200\n",
         encoding="utf-8",
     )
 
@@ -148,6 +180,24 @@ def test_headroom_service_settings_load_from_env_file(
     assert settings.headroom_service.api_key == "secret"
     assert settings.headroom_service.timeout_seconds == 12.5
     assert settings.headroom_service.compression_model == "gpt-4o"
+    assert settings.headroom_service.ccr_ttl_seconds == 7_200
+    assert settings.optimization_scope_secret == "production-secret"
+
+
+def test_production_requires_optimization_scope_secret(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _clear_headroom_env(monkeypatch)
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "DREAM_ENV=production\n"
+        "HEADROOM_SERVICE_URL=http://headroom:8787\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="DREAM_OPTIMIZATION_SCOPE_SECRET"):
+        load_settings(env_file)
 
 
 def test_headroom_service_rejects_invalid_environment(

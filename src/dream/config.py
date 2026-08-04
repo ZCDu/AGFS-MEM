@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 import os
 from pathlib import Path
 from typing import Callable
+from urllib.parse import urlparse
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from dream.curators.backend import OpenAICuratorBackend, SemanticCuratorBackend
@@ -32,20 +33,26 @@ class RedisSessionSettings:
     url: str = "redis://127.0.0.1:6379/0"
     ttl_seconds: int = 43_200
     history_turns: int = 10
+    context_window_tokens: int = 128_000
+    trigger_ratio: float = 0.65
+    max_messages: int = 100
+    max_session_seconds: int = 14_400
 
 
 @dataclass(frozen=True)
 class HeadroomServiceSettings:
     url: str = ""
     api_key: str = ""
-    timeout_seconds: float = 30.0
-    compression_model: str = ""
+    timeout_seconds: float = 300.0
+    compression_model: str = "gpt-4o"
+    ccr_ttl_seconds: int = 43_200
 
 
 @dataclass(frozen=True)
 class DreamSettings:
     environment: str = "development"
     home: str = "~/.dream"
+    optimization_scope_secret: str = "development-only-scope-secret"
     review_backend: str = "deterministic"
     review_model: str = ""
     review_base_url: str | None = None
@@ -127,6 +134,23 @@ def _positive_float(value: str, name: str) -> float:
     return parsed
 
 
+def _plan_trigger_ratio(value: str, name: str) -> float:
+    parsed = _positive_float(value, name)
+    if not 0.60 <= parsed <= 0.70:
+        raise ValueError(f"{name} must be between 0.60 and 0.70")
+    return parsed
+
+
+def _http_service_url(value: str, name: str) -> str:
+    if not value:
+        return ""
+    normalized = value.rstrip("/")
+    parsed = urlparse(normalized)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise ValueError(f"{name} must be an absolute HTTP URL")
+    return normalized
+
+
 def _boolean(value: str, name: str) -> bool:
     normalized = value.casefold()
     if normalized in {"true", "1", "yes", "on"}:
@@ -159,16 +183,31 @@ def load_settings(path: Path | None = None) -> DreamSettings:
         raise ValueError("DREAM_ENV must be development or production")
 
     headroom_service = HeadroomServiceSettings(
-        url=value("HEADROOM_SERVICE_URL", "").rstrip("/"),
+        url=_http_service_url(
+            value("HEADROOM_SERVICE_URL", ""),
+            "HEADROOM_SERVICE_URL",
+        ),
         api_key=value("HEADROOM_SERVICE_API_KEY", ""),
         timeout_seconds=_positive_float(
-            value("HEADROOM_SERVICE_TIMEOUT_SECONDS", "30"),
+            value("HEADROOM_SERVICE_TIMEOUT_SECONDS", "300"),
             "HEADROOM_SERVICE_TIMEOUT_SECONDS",
         ),
-        compression_model=value("HEADROOM_COMPRESSION_MODEL", ""),
+        compression_model=value("HEADROOM_COMPRESSION_MODEL", "gpt-4o"),
+        ccr_ttl_seconds=_positive_int(
+            value("HEADROOM_CCR_TTL_SECONDS", "43200"),
+            "HEADROOM_CCR_TTL_SECONDS",
+        ),
     )
     if environment == "production" and not headroom_service.url:
         raise ValueError("HEADROOM_SERVICE_URL is required in production")
+    optimization_scope_secret = value(
+        "DREAM_OPTIMIZATION_SCOPE_SECRET",
+        "development-only-scope-secret",
+    )
+    if environment == "production" and not value(
+        "DREAM_OPTIMIZATION_SCOPE_SECRET"
+    ):
+        raise ValueError("production requires DREAM_OPTIMIZATION_SCOPE_SECRET")
 
     review_backend = value("DREAM_REVIEW_BACKEND", "deterministic").lower()
     if review_backend not in {"deterministic", "openai"}:
@@ -197,6 +236,22 @@ def load_settings(path: Path | None = None) -> DreamSettings:
         history_turns=_positive_int(
             value("DREAM_REDIS_HISTORY_TURNS", "10"),
             "DREAM_REDIS_HISTORY_TURNS",
+        ),
+        context_window_tokens=_positive_int(
+            value("DREAM_CONTEXT_WINDOW_TOKENS", "128000"),
+            "DREAM_CONTEXT_WINDOW_TOKENS",
+        ),
+        trigger_ratio=_plan_trigger_ratio(
+            value("DREAM_HEADROOM_TRIGGER_RATIO", "0.65"),
+            "DREAM_HEADROOM_TRIGGER_RATIO",
+        ),
+        max_messages=_positive_int(
+            value("DREAM_HEADROOM_MAX_MESSAGES", "100"),
+            "DREAM_HEADROOM_MAX_MESSAGES",
+        ),
+        max_session_seconds=_positive_int(
+            value("DREAM_HEADROOM_MAX_SESSION_SECONDS", "14400"),
+            "DREAM_HEADROOM_MAX_SESSION_SECONDS",
         ),
     )
 
@@ -230,6 +285,7 @@ def load_settings(path: Path | None = None) -> DreamSettings:
     return DreamSettings(
         environment=environment,
         home=value("DREAM_HOME", "~/.dream"),
+        optimization_scope_secret=optimization_scope_secret,
         review_backend=review_backend,
         review_model=value("DREAM_REVIEW_MODEL"),
         review_base_url=value("DREAM_REVIEW_BASE_URL") or None,

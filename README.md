@@ -1,5 +1,10 @@
 # DREAM
 
+> `short-term-memory` 分支新增独立的 Redis Session Context 与可替换 Headroom
+> 压缩/CCR 调用边界。完整存储、压缩、读取、恢复和 Agent 接入说明见
+> [DREAM 短期记忆：Redis + Headroom](docs/short-term-memory.md)。本分支没有新增历史会话
+> 窗口、Memory Retrieval Skill、AI 决策卡或用户画像功能。
+
 ## 梦境机制（DREAM）
 
 DREAM 在会话之外定时回顾和蒸馏已经归档的对话，将耗时的总结、归纳和知识提取从实时交互中移出，避免影响当前会话的响应速度。它还会根据来源证据校验情景记忆，通过结构化检查、快照和回滚降低模型自归纳产生语义偏差的风险。
@@ -43,9 +48,12 @@ External Agent
 - **Pydantic**：校验配置、事件、知识候选和内部动作。
 - **OpenAI Python SDK**：调用 Agnes 或其他 OpenAI-compatible 模型。
 - **HTTPX**：访问外部会话源和模型 HTTP 服务。
+- **Redis 7.2 / redis-py 6.4**：保存当前 session 的短期上下文和 summary。
+- **Headroom 0.33**：作为独立 HTTP Proxy 提供自动压缩与官方 CCR 能力。
 - **Pytest + Ruff**：仅用于本地测试和代码检查。
 
-DREAM 当前使用本地文件保存账本、画像、决策卡、快照和报告，不依赖 Redis、Elasticsearch 或向量数据库。
+DREAM 的既有长期模块继续使用本地文件；本分支新增的短期 session 上下文依赖 Redis，
+不引入 Elasticsearch 或向量数据库。
 
 ## 项目结构
 
