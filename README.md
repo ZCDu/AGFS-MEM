@@ -1,6 +1,6 @@
 # short-term-memory
 
-`short-term-memory` 是一个面向大模型与 AI Agent 的独立短期记忆组件。
+`short-term-memory` 是一个面向大模型与 AI Agent 的短期记忆管理模块。
 
 它使用 Redis 保存当前 session 的在线上下文，包括最近消息、summary 和恢复状态；
 使用 journals JSONL 作为完整对话事件日志，保存原始会话记录。
@@ -25,23 +25,23 @@ Wiki、索引或 Daily Memory Job。
 
 ## 架构
 
-下面的 Mermaid 图保持与项目设计 SVG 相同的节点、分支和语义。左侧链路描述一轮对话
+左侧链路描述一轮对话
 结束后的后台预压缩；右侧链路描述下一次用户提问时的上下文读取、模型调用和官方 CCR
 按需召回。
 
 ```mermaid
 flowchart TD
-    A["用户与 Agent 完成一轮对话"] --> B["DREAM 写 Redis 原始消息"]
-    B --> C["DREAM 追加 journals 原文"]
+    A["用户与 Agent 完成一轮对话"] --> B["short-term-memory 写 Redis 原始消息"]
+    B --> C["short-term-memory 追加 journals 原文"]
     C --> D{"PLAN 三类条件任一满足？"}
     D -->|否| E["保留原始短期上下文"]
     D -->|是| F["异步调用 Headroom 自动压缩管道"]
     F --> G["ContentRouter 自动识别内容"]
     G --> H["自动选择 SmartCrusher / TextCrusher / Code / Log / Kompress 等"]
     H --> I["Headroom 管理 CCR cache、marker 和引用"]
-    I --> J["DREAM 原样保存压缩消息到 Redis summary envelope"]
+    I --> J["short-term-memory 原样保存压缩消息到 Redis summary envelope"]
 
-    K["下一次用户提问"] --> L["DREAM 组装：上次压缩上下文 + 最近 N 轮 + 本次输入"]
+    K["下一次用户提问"] --> L["short-term-memory 组装：上次压缩上下文 + 最近 N 轮 + 本次输入"]
     L --> M{"存在 Headroom 上下文或本次输入超预算？"}
     M -->|否| N["Agent 使用普通模型路径"]
     M -->|是| O["Agent 请求经过同一 Headroom Proxy"]
@@ -609,10 +609,4 @@ tests/integration/test_headroom_proxy_ccr_flow.py
 opt-in 测试被跳过不能写成通过；CCR 测试只有在压缩、检索和模型自动续跑全部成功时，
 才能证明官方透明召回链路完成。
 
-## 当前限制
 
-- `short-term-memory` 不生成最终回答；必须由公司 Agent 调用。
-- 公司 Agent 若绕过 Headroom Proxy 直接调用模型，不能使用官方透明 CCR 路径。
-- Redis 之外的持久化 summary snapshot 只有读取接口，默认 runtime 未装配实现。
-- Headroom CCR 缓存有 TTL，且并非每次压缩都会产生 marker，不能替代 journals。
-- 历史会话 UI、跨 session 检索和中长期记忆不属于本项目。
