@@ -1,135 +1,75 @@
 # short-term-memory 设计与集成边界
 
-## 范围
+## 当前架构
 
-该组件实现 Redis Session Context、journals 事件日志、Headroom 后台压缩、五类短期摘要，
-以及公司 Agent 的回答前/回答后 Python SDK 边界。它不包含中长期记忆模块。
-
-## 模块
+本项目是独立 HTTP 记忆服务，不承担最终回答，也不内嵌 Headroom 或 DeepSeek。
 
 ```text
-src/short_term_memory/
-  api/
-    conversation_handler.py
-    runtime.py
-  storage/
-    redis_runtime.py
-    redis_session_context.py
-    journal_store.py
-    vfs_adapter.py
-  compression/
-    headroom_client.py
-    policy.py
-    scope.py
-    summary.py
-    telemetry.py
-  jobs/
-    session_compression_job.py
-  config.py
-  models.py
-  ports.py
+memory-api (4 processes) ──> Redis online state + compression queue
+          │                └─> per-session Journal JSONL originals
+          └─ read response: messages + Headroom Proxy context
+
+compression-worker (8 loops) ── originals only ──> Headroom /v1/compress
+chat caller ── official OpenAI SDK ──> Headroom Proxy ──> DeepSeek official API
 ```
 
-## 在线读取与写入
+业务接口固定为 `POST /v1/memories/write` 和 `POST /v1/memories/read`。详细请求、响应与配置责任见 `memory-api-alignment.md`。
 
-`prepare_turn()`：
+## 写入保证
 
-1. 根据 `user_id + session_id` 检查 Redis。
-2. Redis 过期时，从同一 session 的 journals 恢复最近 N 轮。
-3. 组装 `summary + 有效压缩 messages + 最近 N 轮`。
-4. 把本次用户消息写 Redis 和 journals。
-5. 返回 `PreparedTurn.history`、Headroom Proxy URL 和 HMAC 去标识化 headers。
+每个事件由 `(user_id, session_id, event_id)` 标识。写入顺序是：
 
-`complete_turn()`：
+1. Redis 预留单调 sequence，并校验相同 event ID 的正文摘要。
+2. 在 per-session 跨进程锁内追加 Journal 原文并刷盘。
+3. 幂等提交 Redis 在线原文。
+4. 三个 OR 条件任一满足时，只投递压缩意图，不在线等待 Headroom。
 
-1. 把助手回答写 Redis 和 journals。
-2. 对完整 Redis 短期视图估算 token。
-3. token 比例、消息数、session 时长任一达标时投递后台任务。
-4. 在线调用立即返回，不等待 Headroom 或 SummaryModel。
+相同 ID、相同内容可重试；相同 ID、不同内容返回冲突。Redis 提交失败时 Journal 仍保留原文，调用方可以安全重试。
 
-## 后台压缩
+## 读取与恢复
 
-```text
-Redis compression snapshot
-        ↓
-Headroom /v1/compress
-        ↓
-injected SummaryModel
-        ↓
-session:{id}:summary
-        ↓
-成功后保留最近 N 轮 Redis 原文
-```
+正常读取并发取得 Redis generation envelope 和最近 N 轮原文。Redis 原文缺失时，从相同 session 的 Journal 恢复；需要冷重建且既有 generation 已过期时，在总超时内等待后台 worker 发布新的 envelope，否则返回服务不可用，不把残缺上下文伪装成成功。
 
-Headroom 输出保持 message boundary。组件不指定 Kompress、SmartCrusher 或具体 Router，
-也不实现私有 CCR 缓存/检索协议。官方 Headroom 负责压缩和 CCR；组件负责触发、失败门控、
-摘要生成、Redis 写入和 journals 恢复。
+读取上下文按以下顺序组装：
 
-五类语义字段为：
+1. 五类语义摘要：`current_goal`、`preferences`、`confirmed_facts`、`pending_items`、`attachment_references`。
+2. TTL 内有效的 Headroom 压缩 generation，原样保存和返回。
+3. 最近 N 轮精确原文；与压缩覆盖区间允许重叠，用于保持近期细节。
 
-```text
-current_goal
-preferences
-confirmed_facts
-pending_items
-attachment_references
-```
+## 原文与压缩内容的位置
 
-summary 只属于当前 session 的 Redis 短期缓存，不写 Wiki。完整原文始终保留在 journals。
+- Journal：完整、可审计的精确原文，默认保留 30 天；用于 Redis 过期恢复和 generation 重建。
+- Redis originals：在线原文副本，默认 TTL 12 小时。
+- Redis envelope：语义摘要与 Headroom 返回的压缩 generation，generation 带 CCR 到期时间，默认 12 小时。
+- Headroom CCR：原文恢复载荷、marker、缓存实现和 `headroom_retrieve` 全部由独立 Headroom 服务管理。
 
-## 失败边界
+本项目既不实现 CCR LRU，也不访问 Headroom SQLite。Journal 是记忆服务的数据安全与恢复机制，不替代或干预 Headroom 的官方召回逻辑。
 
-- development：Headroom 不可用、超时或非法响应时允许原始 messages fallback，并记录不含
-  对话正文的 warning/telemetry。
-- production：Headroom 失败时不调用 SummaryModel、不写 summary、不执行 Redis LTRIM，
-  保留原始消息和 journals，并交给注入的异步 RetryQueue。
-- SummaryModel 输出必须通过五类结构和附件引用校验；失败不写 Redis。
+## 为什么不会重复压缩压缩结果
 
-## 历史 session 恢复
+`GenerationPlanner` 的增量输入只来自 sequence 大于 `compressed_through_sequence` 的 Redis 原文；冷重建输入只来自 Journal 的完整 `1..through_sequence` 原文。worker 明确不读取既有 generation、语义摘要或 marker 作为 Headroom 输入。
 
-Redis session 仍存在时只读 Redis。Redis messages/summary 均过期时：
+因此第二、第三轮可以追加新的 generation，也可以从原文重建，但不会把上一轮压缩文本再次压缩。CCR 是否在 TTL 内透明召回成功，由实际 Headroom 与 DeepSeek 工具调用链路决定。
 
-1. 优先读取可选的持久化 summary snapshot；
-2. 恢复 journals 最近 N 轮到 Redis；
-3. 如果还有更早内容且 snapshot 不存在或已失效，异步投递压缩重建；
-4. 不在在线链路读取全量 journals。
+## 进程和故障边界
 
-## Headroom CCR
+- memory-api：Uvicorn 多进程，认证在读取请求体和占用业务容量之前完成；限制请求体、批量数、并发和超时。
+- compression-worker：Redis 持久队列、session lease 和 CAS envelope；SIGTERM 停止领取新任务，宽限期内完成当前任务，强制取消时立即归还 queue lease。
+- Redis：Compose 启用 AOF `everysec` 和命名卷。
+- Journal：同进程 `RLock` 加 POSIX `flock`，支持多个 API 进程共享卷；Windows 和缺少正确 flock 语义的文件系统不支持。
+- readiness：同时检查 Redis 与 Headroom，并受总超时限制。
 
-后台 `/v1/compress` 和实时 Agent 模型请求使用同一组 `dream-v1` HMAC scope headers。
-`PreparedTurn` 将 headers 和 OpenAI-compatible Proxy URL 交给公司 Agent。组件不自行判断
-“哪些原文相关”，不调用自制召回协议；如果当前 Headroom/供应商路径支持透明 CCR，官方
-Proxy 会负责 marker、相关性判断、`headroom_retrieve` 和模型续跑。
+## 安全边界
 
-CCR 缓存受 `HEADROOM_CCR_TTL_SECONDS` 限制，不能替代 journals 的完整、可审计原文。
+- 业务接口使用 Bearer token；production 不允许空 token。
+- Headroom scope 用服务端 HMAC secret 去标识化 user/session，原始 ID 不作为 scope header 发出。
+- `DEEPSEEK_API_KEY` 只存在于聊天调用方并作为模型调用凭据，不发送到 memory write/read。
+- 日志、Prometheus 和负载报告只记录状态、数量和耗时，不记录消息正文、CCR 原文或密钥。
 
-## Python SDK
+## 保留期与清理
 
-```python
-from short_term_memory import build_runtime
+Redis TTL 和 CCR generation TTL 都默认 43,200 秒，Journal 默认 30 天。Redis AOF 负责进程重启后的在线状态；Journal retention job 负责到期清理文件。改变 CCR TTL 时必须同时对齐 Headroom 服务与记忆服务配置。
 
-runtime = build_runtime(
-    home=home,
-    settings=settings,
-    redis_client=redis_client,
-    token_estimator=token_estimator,
-    summary_model=summary_model,
-    executor=executor,
-    retry_queue=retry_queue,
-)
+## 验收
 
-prepared = runtime.prepare_turn(
-    "user-001",
-    "session-001",
-    "本轮问题",
-)
-
-# 公司 Agent 使用 prepared.history 生成回答。
-
-result = runtime.complete_turn(
-    prepared,
-    assistant_content="公司 Agent 的回答",
-)
-```
-
-该 SDK 不创建 Agent、聊天路由或回答模型。
+单元/假服务测试默认不需要外部凭据。真实 Redis、Headroom、DeepSeek 和 100 并发负载测试均要求显式开关；开关打开而依赖不可用时必须失败，未打开时显示 `SKIPPED`。性能方法见 `performance.md`，未执行项和残余风险见 `known-limitations-and-skipped-tests.md`。

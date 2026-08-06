@@ -147,3 +147,49 @@ async def test_timeout_and_concurrent_waiters_do_not_busy_loop() -> None:
 
     assert results == [None, None, None]
     assert 3 <= store.reads < 30
+
+
+@pytest.mark.asyncio
+async def test_total_timeout_interrupts_a_blocked_envelope_read() -> None:
+    class BlockingStore:
+        async def read_envelope(self, user_id, session_id):
+            await asyncio.Event().wait()
+
+    transport = completion(CompletionRedis(), BlockingStore())
+
+    started = asyncio.get_running_loop().time()
+    assert await transport.wait_for(job(), timeout_seconds=0.03) is None
+    assert asyncio.get_running_loop().time() - started < 0.15
+
+
+@pytest.mark.asyncio
+async def test_marker_failure_does_not_stop_bounded_envelope_polling() -> None:
+    class BrokenMarkerRedis(CompletionRedis):
+        async def get(self, key):
+            raise ConnectionError("notification channel failed")
+
+    store = EnvelopeStore()
+    transport = completion(BrokenMarkerRedis(), store)
+    waiting = asyncio.create_task(transport.wait_for(job(), timeout_seconds=0.2))
+    await asyncio.sleep(0.03)
+    store.current = fresh_envelope()
+
+    assert await waiting == store.current
+
+
+@pytest.mark.asyncio
+async def test_external_cancellation_is_not_converted_to_timeout() -> None:
+    class BlockingStore:
+        async def read_envelope(self, user_id, session_id):
+            await asyncio.Event().wait()
+
+    waiting = asyncio.create_task(
+        completion(CompletionRedis(), BlockingStore()).wait_for(
+            job(), timeout_seconds=10
+        )
+    )
+    await asyncio.sleep(0)
+    waiting.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await waiting

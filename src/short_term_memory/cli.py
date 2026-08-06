@@ -4,7 +4,7 @@ import argparse
 import asyncio
 from contextlib import suppress
 import signal
-from typing import Sequence
+from typing import Awaitable, Callable, Sequence
 
 import uvicorn
 
@@ -30,12 +30,19 @@ def api_main(argv: Sequence[str] | None = None) -> None:
     )
 
 
-async def run_worker_process(settings: ShortTermMemorySettings) -> None:
+async def run_worker_process(
+    settings: ShortTermMemorySettings,
+    *,
+    runtime_start: Callable[
+        [ShortTermMemorySettings], Awaitable[ServiceRuntime]
+    ] = ServiceRuntime.start,
+    stop_event: asyncio.Event | None = None,
+) -> None:
     """Run bounded worker loops until cancellation or a termination signal."""
 
-    runtime = await ServiceRuntime.start(settings)
+    runtime = await runtime_start(settings)
     loop = asyncio.get_running_loop()
-    stopping = asyncio.Event()
+    stopping = stop_event or asyncio.Event()
     installed: list[signal.Signals] = []
     for signum in (signal.SIGINT, signal.SIGTERM):
         try:
@@ -44,7 +51,9 @@ async def run_worker_process(settings: ShortTermMemorySettings) -> None:
         except (NotImplementedError, RuntimeError):
             pass
 
-    worker_task = asyncio.create_task(runtime.worker.run_forever())
+    worker_task = asyncio.create_task(
+        runtime.worker.run_forever(stop_event=stopping)
+    )
     signal_task = asyncio.create_task(stopping.wait())
     try:
         done, _ = await asyncio.wait(
@@ -53,20 +62,20 @@ async def run_worker_process(settings: ShortTermMemorySettings) -> None:
         if worker_task in done:
             await worker_task
         else:
-            worker_task.cancel()
-            with suppress(asyncio.CancelledError, TimeoutError):
+            try:
                 async with asyncio.timeout(
                     settings.compression_queue.shutdown_grace_seconds
                 ):
+                    await asyncio.shield(worker_task)
+            except TimeoutError:
+                worker_task.cancel()
+                with suppress(asyncio.CancelledError):
                     await worker_task
     finally:
         signal_task.cancel()
         if not worker_task.done():
             worker_task.cancel()
-        with suppress(asyncio.CancelledError):
-            await signal_task
-        with suppress(asyncio.CancelledError):
-            await worker_task
+        await asyncio.gather(signal_task, worker_task, return_exceptions=True)
         for signum in installed:
             loop.remove_signal_handler(signum)
         await runtime.close()

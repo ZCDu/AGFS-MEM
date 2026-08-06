@@ -77,6 +77,8 @@ class ServiceRuntime:
                     settings.redis_session.url,
                     max_connections=settings.api.redis_pool_size,
                     decode_responses=True,
+                    socket_connect_timeout=settings.api.request_timeout_seconds,
+                    socket_timeout=settings.api.request_timeout_seconds,
                 )
             if http_client is None:
                 http_client = httpx.AsyncClient(
@@ -196,9 +198,18 @@ class ServiceRuntime:
             except Exception:
                 return False
 
-        redis_ok, headroom_ok = await asyncio.gather(
-            redis_ready(), headroom_ready()
+        timeout_seconds = min(
+            5.0,
+            self.settings.api.request_timeout_seconds,
+            self.settings.headroom_service.timeout_seconds,
         )
+        try:
+            async with asyncio.timeout(timeout_seconds):
+                redis_ok, headroom_ok = await asyncio.gather(
+                    redis_ready(), headroom_ready()
+                )
+        except TimeoutError:
+            redis_ok = headroom_ok = False
         return {"redis": redis_ok, "headroom": headroom_ok}
 
     async def close(self) -> None:

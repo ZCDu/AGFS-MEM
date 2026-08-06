@@ -162,6 +162,16 @@ redis.call('ZADD', KEYS[4], ARGV[5], ARGV[3])
 return {'retry'}
 """
 
+RETURN_LEASE_SCRIPT = """
+-- dream:compression:return-lease-v1
+if redis.call('GET', KEYS[2]) ~= ARGV[1] then return {'lost'} end
+redis.call('DEL', KEYS[2])
+redis.call('ZREM', KEYS[3], ARGV[2])
+if not redis.call('GET', KEYS[1]) then return {'lost'} end
+redis.call('ZADD', KEYS[4], ARGV[3], ARGV[2])
+return {'returned'}
+"""
+
 
 class RedisCompressionQueue:
     READY_KEY = "dream:compression:ready"
@@ -278,6 +288,24 @@ class RedisCompressionQueue:
             str(job.attempt),
             str(now_unix_ms + backoff_seconds * 1_000),
             str(self.max_attempts),
+        )
+        return self._text(result[0])
+
+    async def return_lease(
+        self, lease: CompressionJobLease, *, now_unix_ms: int
+    ) -> str:
+        """Return a cancelled owned lease without consuming a retry attempt."""
+
+        result = await self.client.eval(
+            RETURN_LEASE_SCRIPT,
+            4,
+            self._job_key(lease.job.job_id),
+            self._lease_key(lease.job.job_id),
+            self.INFLIGHT_KEY,
+            self.RETRY_KEY,
+            lease.token,
+            self._job_component(lease.job.job_id),
+            str(now_unix_ms),
         )
         return self._text(result[0])
 

@@ -82,33 +82,69 @@ class CompressionWorker:
         if lease is None:
             return CompressionWorkerResult("idle")
         session_token = uuid.uuid4().hex
-        acquired = await self.store.acquire_compression_lease(
-            lease.job.user_id, lease.job.session_id, session_token
-        )
-        if not acquired:
-            return await self._retry(lease, "deferred")
+        acquired = False
         try:
+            acquired = await self.store.acquire_compression_lease(
+                lease.job.user_id, lease.job.session_id, session_token
+            )
+            if not acquired:
+                return await self._retry(lease, "deferred")
             return await self._execute(lease, now)
         except asyncio.CancelledError:
+            await self._return_cancelled_lease(lease, session_token)
+            acquired = False
             raise
         except Exception:
             return await self._retry(lease, "retry")
         finally:
-            await self.store.release_compression_lease(
-                lease.job.user_id, lease.job.session_id, session_token
-            )
+            if acquired:
+                await asyncio.shield(
+                    self.store.release_compression_lease(
+                        lease.job.user_id, lease.job.session_id, session_token
+                    )
+                )
 
-    async def run_forever(self, *, poll_seconds: float = 0.1) -> None:
+    async def run_forever(
+        self,
+        *,
+        stop_event: asyncio.Event | None = None,
+        poll_seconds: float = 0.1,
+    ) -> None:
         if poll_seconds <= 0:
             raise ValueError("poll_seconds must be positive")
+        stopping = stop_event or asyncio.Event()
 
         async def loop() -> None:
-            while True:
+            while not stopping.is_set():
                 result = await self.run_once()
                 if result.state == "idle":
-                    await asyncio.sleep(poll_seconds)
+                    try:
+                        async with asyncio.timeout(poll_seconds):
+                            await stopping.wait()
+                    except TimeoutError:
+                        pass
 
-        await asyncio.gather(*(loop() for _ in range(self.worker_concurrency)))
+        tasks = [asyncio.create_task(loop()) for _ in range(self.worker_concurrency)]
+        try:
+            done, pending = await asyncio.wait(
+                tasks, return_when=asyncio.FIRST_EXCEPTION
+            )
+            error = next(
+                (
+                    task.exception()
+                    for task in done
+                    if not task.cancelled() and task.exception() is not None
+                ),
+                None,
+            )
+            if error is not None:
+                raise error
+            await asyncio.gather(*pending)
+        finally:
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
 
     async def _execute(
         self, lease: CompressionJobLease, now: datetime
@@ -260,6 +296,21 @@ class CompressionWorker:
         if result == "lost":
             return CompressionWorkerResult("lost", lease.job.job_id)
         return CompressionWorkerResult(state, lease.job.job_id)
+
+    async def _return_cancelled_lease(
+        self, lease: CompressionJobLease, session_token: str
+    ) -> None:
+        now = self._now()
+        operations = asyncio.gather(
+            self.queue.return_lease(
+                lease, now_unix_ms=self._unix_ms(now)
+            ),
+            self.store.release_compression_lease(
+                lease.job.user_id, lease.job.session_id, session_token
+            ),
+            return_exceptions=True,
+        )
+        await asyncio.shield(operations)
 
     async def _ack(
         self,

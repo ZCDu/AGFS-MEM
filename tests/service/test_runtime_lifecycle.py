@@ -1,3 +1,4 @@
+import asyncio
 from dataclasses import replace
 from pathlib import Path
 
@@ -135,6 +136,77 @@ async def test_readiness_checks_components_concurrently_and_sanitizes_failures(
 
     assert readiness == {"redis": False, "headroom": False}
     assert "secret" not in repr(readiness)
+    await runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_readiness_total_timeout_bounds_never_returning_components(tmp_path) -> None:
+    class NeverRedis(FakeClosableRedis):
+        async def ping(self):
+            await asyncio.Event().wait()
+
+    class NeverHttp(FakeClosableAsyncClient):
+        async def get(self, url, **kwargs):
+            await asyncio.Event().wait()
+
+    bounded = settings(tmp_path)
+    bounded = replace(
+        bounded,
+        api=replace(bounded.api, request_timeout_seconds=0.03),
+        headroom_service=replace(
+            bounded.headroom_service, timeout_seconds=0.03
+        ),
+    )
+    runtime = await ServiceRuntime.start(
+        bounded, redis=NeverRedis(), headroom_http=NeverHttp()
+    )
+
+    started = asyncio.get_running_loop().time()
+    assert await runtime.readiness() == {"redis": False, "headroom": False}
+    assert asyncio.get_running_loop().time() - started < 0.15
+
+
+@pytest.mark.asyncio
+async def test_readiness_external_cancellation_propagates(tmp_path) -> None:
+    class NeverRedis(FakeClosableRedis):
+        async def ping(self):
+            await asyncio.Event().wait()
+
+    class NeverHttp(FakeClosableAsyncClient):
+        async def get(self, url, **kwargs):
+            await asyncio.Event().wait()
+
+    runtime = await ServiceRuntime.start(
+        settings(tmp_path), redis=NeverRedis(), headroom_http=NeverHttp()
+    )
+    checking = asyncio.create_task(runtime.readiness())
+    await asyncio.sleep(0)
+    checking.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await checking
+
+
+@pytest.mark.asyncio
+async def test_owned_redis_pool_has_connect_and_socket_timeouts(
+    tmp_path, monkeypatch
+) -> None:
+    captured = {}
+    redis = FakeClosableRedis()
+
+    def from_url(url, **kwargs):
+        captured.update(kwargs)
+        return redis
+
+    monkeypatch.setattr(
+        "short_term_memory.service.runtime.redis_async.Redis.from_url", from_url
+    )
+    runtime = await ServiceRuntime.start(
+        settings(tmp_path), headroom_http=FakeClosableAsyncClient()
+    )
+
+    assert 0 < captured["socket_connect_timeout"] <= 10
+    assert 0 < captured["socket_timeout"] <= 10
     await runtime.close()
 
 

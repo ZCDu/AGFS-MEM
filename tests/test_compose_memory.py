@@ -50,3 +50,20 @@ def test_redis_compose_uses_the_same_pinned_redis_image() -> None:
 
     assert standalone["services"]["redis"]["image"] == "redis:7.2.15-bookworm"
     assert memory["services"]["redis"]["image"] == "redis:7.2.15-bookworm"
+
+
+def test_redis_services_enable_aof_everysec_on_named_volumes() -> None:
+    standalone = yaml.safe_load(Path("compose.redis.yml").read_text(encoding="utf-8"))
+    memory = yaml.safe_load(Path("compose.memory.yml").read_text(encoding="utf-8"))
+
+    for document in (standalone, memory):
+        redis = document["services"]["redis"]
+        assert redis["command"] == [
+            "redis-server",
+            "--appendonly",
+            "yes",
+            "--appendfsync",
+            "everysec",
+        ]
+        assert any(volume.endswith(":/data") for volume in redis["volumes"])
+        assert document["volumes"]

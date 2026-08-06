@@ -1,4 +1,8 @@
 import json
+import multiprocessing
+import os
+import sys
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -16,6 +20,50 @@ from short_term_memory.storage.vfs_adapter import VFSAdapter
 
 
 NOW = datetime(2026, 7, 23, 6, 30, tzinfo=timezone.utc)
+
+
+def _append_same_event(root: str, start, results) -> None:
+    store = JournalStore(VFSAdapter(Path(root)))
+    start.wait()
+    result = store.append_event(
+        "multi-user", "multi-session", memory_event(event_id="same-process-event")
+    )
+    results.put(result.appended)
+
+
+def _write_two_part_line(root: str, ready) -> None:
+    store = JournalStore(VFSAdapter(Path(root)))
+    event = memory_event(event_id="two-part")
+    with store._session_lock("half-user", "half-session"):
+        path = (
+            store.vfs.paths("half-user").journals
+            / "2026-08-06-half-session.jsonl"
+        )
+        line = json.dumps(
+            store._encoded_record(
+                JournalMessageEvent(
+                    role=event.role,
+                    content=event.content,
+                    timestamp=event.created_at,
+                    event_id=event.event_id,
+                    sequence=event.sequence,
+                    content_type=event.content_type,
+                    metadata=dict(event.metadata),
+                    sha256=event.sha256,
+                )
+            ),
+            separators=(",", ":"),
+        ) + "\n"
+        with path.open("w", encoding="utf-8") as handle:
+            split = len(line) // 2
+            handle.write(line[:split])
+            handle.flush()
+            os.fsync(handle.fileno())
+            ready.set()
+            time.sleep(0.1)
+            handle.write(line[split:])
+            handle.flush()
+            os.fsync(handle.fileno())
 
 
 def test_message_row_uses_plan_fields_and_session_filename(tmp_path: Path) -> None:
@@ -225,3 +273,43 @@ def test_session_locks_are_released_after_operations(tmp_path: Path) -> None:
         )
 
     assert store.session_lock_count == 0
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="fcntl journals require POSIX")
+def test_independent_processes_append_same_event_idempotently(tmp_path: Path) -> None:
+    context = multiprocessing.get_context("spawn")
+    start = context.Event()
+    results = context.Queue()
+    processes = [
+        context.Process(target=_append_same_event, args=(str(tmp_path), start, results))
+        for _ in range(2)
+    ]
+    for process in processes:
+        process.start()
+    start.set()
+    for process in processes:
+        process.join(timeout=5)
+        assert process.exitcode == 0
+
+    assert sorted(results.get(timeout=1) for _ in processes) == [False, True]
+    store = JournalStore(VFSAdapter(tmp_path))
+    assert len(store.read_session("multi-user", "multi-session")) == 1
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="fcntl journals require POSIX")
+def test_reader_never_observes_half_line_from_another_process(tmp_path: Path) -> None:
+    context = multiprocessing.get_context("spawn")
+    ready = context.Event()
+    writer = context.Process(target=_write_two_part_line, args=(str(tmp_path), ready))
+    writer.start()
+    assert ready.wait(timeout=5)
+
+    records = JournalStore(VFSAdapter(tmp_path)).read_session(
+        "half-user", "half-session"
+    )
+
+    writer.join(timeout=5)
+    assert writer.exitcode == 0
+    assert len(records) == 1
+    assert isinstance(records[0], JournalMessageEvent)
+    assert records[0].event_id == "two-part"

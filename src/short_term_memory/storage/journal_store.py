@@ -3,6 +3,7 @@
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -14,6 +15,11 @@ from pydantic import BaseModel, Field
 from short_term_memory.models import MemoryContentType, MemoryEvent
 from short_term_memory.storage.recent_originals import select_recent_turns
 from short_term_memory.storage.vfs_adapter import VFSAdapter, safe_component
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - supported production is Linux/POSIX.
+    fcntl = None
 
 
 JournalRole = Literal["user", "assistant", "system", "tool", "unknown"]
@@ -87,6 +93,10 @@ def _text_content(value: str | list[dict[str, object]]) -> str:
 
 class JournalStore:
     def __init__(self, vfs: VFSAdapter) -> None:
+        if fcntl is None:
+            raise RuntimeError(
+                "JournalStore requires POSIX fcntl.flock; Windows is unsupported"
+            )
         self.vfs = vfs
         self._locks_guard = RLock()
         self._session_locks: dict[tuple[str, str], _SessionLockEntry] = {}
@@ -341,12 +351,30 @@ class JournalStore:
             entry.users += 1
         try:
             with entry.lock:
-                yield
+                with self._process_session_lock(*key):
+                    yield
         finally:
             with self._locks_guard:
                 entry.users -= 1
                 if entry.users == 0 and self._session_locks.get(key) is entry:
                     self._session_locks.pop(key, None)
+
+    @contextmanager
+    def _process_session_lock(
+        self, user_id: str, session_id: str
+    ) -> Iterator[None]:
+        digest = hashlib.sha256(
+            f"{user_id}\0{session_id}".encode("utf-8")
+        ).hexdigest()
+        lock_directory = self.vfs.paths(user_id).journals / ".locks"
+        lock_directory.mkdir(parents=True, exist_ok=True)
+        lock_path = lock_directory / f"{digest}.lock"
+        with lock_path.open("a+b") as handle:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
     @staticmethod
     def _memory_event(record: JournalMessageEvent) -> MemoryEvent:

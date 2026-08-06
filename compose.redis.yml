@@ -2,6 +2,9 @@ services:
   redis:
     image: redis:7.2.15-bookworm
     restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes", "--appendfsync", "everysec"]
+    volumes:
+      - redis-data:/data
     ports:
       - "${DREAM_REDIS_PORT:-6379}:6379"
     healthcheck:
@@ -9,3 +12,6 @@ services:
       interval: 1s
       timeout: 1s
       retries: 30
+
+volumes:
+  redis-data:

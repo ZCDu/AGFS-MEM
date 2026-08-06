@@ -161,6 +161,17 @@ class QueueRedis:
             target = dead_key if int(attempt) >= int(max_attempts) else retry_key
             self._zset(target)[job_id] = int(due)
             return ["dead" if target == dead_key else "retry"]
+        if "dream:compression:return-lease-v1" in script:
+            job_key, lease_key, inflight_key, retry_key = keys
+            token, job_id, now = values
+            if self.values.get(lease_key) != token:
+                return ["lost"]
+            self.values.pop(lease_key, None)
+            self._zset(inflight_key).pop(job_id, None)
+            if job_key not in self.values:
+                return ["lost"]
+            self._zset(retry_key)[job_id] = int(now)
+            return ["returned"]
         raise AssertionError("unsupported queue script")
 
 
@@ -268,6 +279,21 @@ async def test_expired_inflight_lease_is_reclaimed_after_crash_or_cancellation()
     assert reclaimed.token == "worker-2"
     assert await queue.ack(abandoned) is False
     assert await queue.ack(reclaimed) is True
+
+
+@pytest.mark.asyncio
+async def test_cancelled_worker_returns_owned_lease_for_immediate_reclaim():
+    queue = RedisCompressionQueue(QueueRedis(), capacity=1, lease_seconds=300)
+    job = compression_job()
+    await queue.enqueue(job)
+    abandoned = await queue.lease("worker-1", now_unix_ms=0)
+    assert abandoned is not None
+
+    assert await queue.return_lease(abandoned, now_unix_ms=1) == "returned"
+    reclaimed = await queue.lease("worker-2", now_unix_ms=1)
+
+    assert reclaimed is not None and reclaimed.job == job
+    assert reclaimed.token == "worker-2"
 
 
 @pytest.mark.asyncio

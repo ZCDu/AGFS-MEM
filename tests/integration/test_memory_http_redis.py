@@ -64,10 +64,11 @@ class FailOnceHeadroom:
 
 
 def settings(tmp_path: Path, redis_url: str) -> ShortTermMemorySettings:
-    base = ShortTermMemorySettings(home=str(tmp_path), environment="development")
+    base = ShortTermMemorySettings(home=str(tmp_path), environment="production")
     return replace(
         base,
         redis_session=replace(base.redis_session, url=redis_url),
+        api=replace(base.api, auth_token="redis-integration-token"),
         headroom_service=replace(
             base.headroom_service, url="http://headroom.invalid:8787"
         ),
@@ -141,6 +142,7 @@ async def test_real_redis_http_write_then_read_returns_original_from_redis(
             ) as http:
                 written = await http.post(
                     "/v1/memories/write",
+                    headers={"authorization": "Bearer redis-integration-token"},
                     json={
                         "user_id": user_id,
                         "session_id": session_id,
@@ -158,6 +160,7 @@ async def test_real_redis_http_write_then_read_returns_original_from_redis(
                 )
                 read = await http.post(
                     "/v1/memories/read",
+                    headers={"authorization": "Bearer redis-integration-token"},
                     json={"user_id": user_id, "session_id": session_id},
                 )
 

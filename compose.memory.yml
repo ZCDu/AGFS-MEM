@@ -16,6 +16,9 @@ services:
   redis:
     image: redis:7.2.15-bookworm
     restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes", "--appendfsync", "everysec"]
+    volumes:
+      - redis-data:/data
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 1s
@@ -72,4 +75,5 @@ services:
       - memory-journals:/var/lib/short-term-memory
 
 volumes:
+  redis-data:
   memory-journals:

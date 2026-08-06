@@ -73,22 +73,25 @@ class RedisRebuildCompletion:
     ) -> MemorySummaryEnvelope | None:
         if timeout_seconds <= 0:
             raise ValueError("timeout_seconds must be positive")
-        loop = asyncio.get_running_loop()
-        deadline = loop.time() + timeout_seconds
-        while True:
-            envelope = await self.store.read_envelope(job.user_id, job.session_id)
-            if self._matches(job, envelope):
-                return envelope
+        try:
+            async with asyncio.timeout(timeout_seconds):
+                while True:
+                    envelope = await self.store.read_envelope(
+                        job.user_id, job.session_id
+                    )
+                    if self._matches(job, envelope):
+                        return envelope
 
-            remaining = deadline - loop.time()
-            if remaining <= 0:
-                return None
-
-            # Reading the durable marker is intentional even though the envelope
-            # remains authoritative: it provides the cross-process completion
-            # boundary and closes completion-before-wait races.
-            await self.client.get(self._key(job))
-            await asyncio.sleep(min(self.poll_seconds, remaining))
+                    # The marker is an optimization, while the envelope remains
+                    # authoritative. Notification-channel failure therefore
+                    # cannot prevent bounded envelope polling.
+                    try:
+                        await self.client.get(self._key(job))
+                    except Exception:
+                        pass
+                    await asyncio.sleep(self.poll_seconds)
+        except TimeoutError:
+            return None
 
     def _key(self, job: CompressionJob) -> str:
         scope = self.scope_factory.for_session(job.user_id, job.session_id)

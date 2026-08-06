@@ -62,3 +62,121 @@ def test_worker_cli_runs_async_worker_process(monkeypatch) -> None:
     cli.worker_main([])
 
     assert len(observed) == 1
+
+
+class FakeRuntime:
+    def __init__(self, worker) -> None:
+        self.worker = worker
+        self.closed = False
+
+    async def close(self):
+        self.closed = True
+
+
+@pytest.mark.asyncio
+async def test_sigterm_stop_waits_for_active_work_within_grace() -> None:
+    class Worker:
+        def __init__(self):
+            self.entered = asyncio.Event()
+            self.release = asyncio.Event()
+
+        async def run_forever(self, *, stop_event):
+            self.entered.set()
+            await self.release.wait()
+            assert stop_event.is_set()
+
+    worker = Worker()
+    runtime = FakeRuntime(worker)
+    stop = asyncio.Event()
+    running = asyncio.create_task(
+        cli.run_worker_process(
+            configured_settings(), runtime_start=lambda _settings: _ready(runtime),
+            stop_event=stop,
+        )
+    )
+    await worker.entered.wait()
+    stop.set()
+    await asyncio.sleep(0)
+    assert not running.done()
+    worker.release.set()
+
+    await asyncio.wait_for(running, timeout=0.2)
+    assert runtime.closed is True
+
+
+@pytest.mark.asyncio
+async def test_worker_fatal_error_propagates_and_closes_runtime() -> None:
+    class Worker:
+        async def run_forever(self, *, stop_event):
+            raise RuntimeError("fatal worker")
+
+    runtime = FakeRuntime(Worker())
+    with pytest.raises(RuntimeError, match="fatal worker"):
+        await cli.run_worker_process(
+            configured_settings(), runtime_start=lambda _settings: _ready(runtime)
+        )
+    assert runtime.closed is True
+
+
+@pytest.mark.asyncio
+async def test_shutdown_timeout_cancels_only_after_grace_expires() -> None:
+    class Worker:
+        def __init__(self):
+            self.entered = asyncio.Event()
+            self.cancelled = asyncio.Event()
+
+        async def run_forever(self, *, stop_event):
+            self.entered.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                self.cancelled.set()
+
+    worker = Worker()
+    runtime = FakeRuntime(worker)
+    stop = asyncio.Event()
+    settings = configured_settings()
+    settings = replace(
+        settings,
+        compression_queue=replace(
+            settings.compression_queue, shutdown_grace_seconds=0.05
+        ),
+    )
+    running = asyncio.create_task(
+        cli.run_worker_process(
+            settings,
+            runtime_start=lambda _settings: _ready(runtime),
+            stop_event=stop,
+        )
+    )
+    await worker.entered.wait()
+    stop.set()
+    await asyncio.sleep(0.01)
+    assert worker.cancelled.is_set() is False
+
+    await asyncio.wait_for(running, timeout=0.3)
+    assert worker.cancelled.is_set() is True
+    assert runtime.closed is True
+
+
+@pytest.mark.asyncio
+async def test_pre_stopped_idle_worker_exits_immediately() -> None:
+    class Worker:
+        async def run_forever(self, *, stop_event):
+            assert stop_event.is_set()
+
+    runtime = FakeRuntime(Worker())
+    stop = asyncio.Event()
+    stop.set()
+    await asyncio.wait_for(
+        cli.run_worker_process(
+            configured_settings(), runtime_start=lambda _settings: _ready(runtime),
+            stop_event=stop,
+        ),
+        timeout=0.2,
+    )
+    assert runtime.closed is True
+
+
+async def _ready(value):
+    return value

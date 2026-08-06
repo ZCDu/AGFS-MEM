@@ -46,8 +46,8 @@ def _free_port() -> int:
 
 
 @contextmanager
-def _fake_provider(port: int) -> Iterator[None]:
-    reset_calls()
+def _fake_provider(port: int, expected_original: str) -> Iterator[None]:
+    reset_calls(expected_original=expected_original)
     server = ThreadingHTTPServer(("127.0.0.1", port), FakeOpenAIHandler)
     thread = Thread(target=server.serve_forever, daemon=True)
     thread.start()
@@ -168,7 +168,9 @@ def test_real_proxy_compresses_and_transparently_resolves_ccr() -> None:
     fake_port = _free_port()
     proxy_port = _free_port()
 
-    with _fake_provider(fake_port), _headroom_proxy(
+    original_messages = _tool_output_messages()
+    expected_original = str(original_messages[-1]["content"])
+    with _fake_provider(fake_port, expected_original), _headroom_proxy(
         binary, proxy_port, fake_port
     ) as base_url:
         compression_response = httpx.post(
@@ -176,7 +178,7 @@ def test_real_proxy_compresses_and_transparently_resolves_ccr() -> None:
             headers=_SCOPE_HEADERS,
             json={
                 "model": "gpt-4o",
-                "messages": _tool_output_messages(),
+                "messages": original_messages,
             },
             timeout=300,
         )

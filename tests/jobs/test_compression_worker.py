@@ -521,6 +521,99 @@ async def test_headroom_failure_retries_without_advancing_envelope(worker):
 
 
 @pytest.mark.asyncio
+async def test_run_forever_stops_idle_without_leasing_more_work(worker):
+    worker, _, _ = worker
+    stop = asyncio.Event()
+    stop.set()
+    worker.run_once = AsyncMock()
+
+    await worker.run_forever(stop_event=stop, poll_seconds=0.01)
+
+    worker.run_once.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_run_forever_finishes_active_job_then_stops_before_next_lease(worker):
+    worker, _, _ = worker
+    stop = asyncio.Event()
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    calls = 0
+
+    async def active_once():
+        nonlocal calls
+        calls += 1
+        entered.set()
+        await release.wait()
+        return CompressionWorkerResult("acked", "job")
+
+    worker.run_once = active_once
+    running = asyncio.create_task(
+        worker.run_forever(stop_event=stop, poll_seconds=0.01)
+    )
+    await entered.wait()
+    stop.set()
+    release.set()
+
+    await asyncio.wait_for(running, timeout=0.2)
+    assert calls == 1
+
+
+@pytest.mark.asyncio
+async def test_run_forever_propagates_fatal_worker_error(worker):
+    worker, _, _ = worker
+
+    async def fatal():
+        raise RuntimeError("fatal worker failure")
+
+    worker.run_once = fatal
+
+    with pytest.raises(RuntimeError, match="fatal worker failure"):
+        await worker.run_forever(stop_event=asyncio.Event(), poll_seconds=0.01)
+
+
+@pytest.mark.asyncio
+async def test_forced_cancellation_returns_queue_and_session_leases_immediately(worker):
+    worker, store, _ = worker
+    blocking = BlockingHeadroom()
+    worker.headroom = blocking
+    target = compression_job()
+    await worker.queue.enqueue(target)
+    running = asyncio.create_task(worker.run_once())
+    await blocking.started.wait()
+
+    running.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await running
+
+    reclaimed = await worker.queue.lease(
+        "replacement", now_unix_ms=int(datetime.now(timezone.utc).timestamp() * 1000)
+    )
+    assert reclaimed is not None and reclaimed.job == target
+    assert await store.acquire_compression_lease("u", "s", "replacement") is True
+
+
+@pytest.mark.asyncio
+async def test_cancelling_run_forever_returns_active_loop_lease(worker):
+    worker, _, _ = worker
+    blocking = BlockingHeadroom()
+    worker.headroom = blocking
+    target = compression_job()
+    await worker.queue.enqueue(target)
+    running = asyncio.create_task(worker.run_forever(poll_seconds=0.01))
+    await blocking.started.wait()
+
+    running.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await running
+
+    reclaimed = await worker.queue.lease(
+        "replacement", now_unix_ms=int(datetime.now(timezone.utc).timestamp() * 1000)
+    )
+    assert reclaimed is not None and reclaimed.job == target
+
+
+@pytest.mark.asyncio
 async def test_headroom_failure_uses_fresh_clock_for_retry_deadline(worker):
     worker, _, _ = worker
     t0 = datetime(2026, 8, 6, tzinfo=timezone.utc)
