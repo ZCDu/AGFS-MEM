@@ -35,6 +35,34 @@ class MemoryContentType(str, Enum):
     SKILL = "skill"
 
 
+class FrozenMetadata(dict[str, str]):
+    """A serializable mapping that rejects post-validation mutation."""
+
+    def __setitem__(self, key: str, value: str) -> None:
+        raise TypeError("metadata is immutable")
+
+    def __delitem__(self, key: str) -> None:
+        raise TypeError("metadata is immutable")
+
+    def clear(self) -> None:
+        raise TypeError("metadata is immutable")
+
+    def pop(self, key: str, default: str | None = None) -> str:
+        raise TypeError("metadata is immutable")
+
+    def popitem(self) -> tuple[str, str]:
+        raise TypeError("metadata is immutable")
+
+    def setdefault(self, key: str, default: str | None = None) -> str:
+        raise TypeError("metadata is immutable")
+
+    def update(self, *args: object, **kwargs: str) -> None:
+        raise TypeError("metadata is immutable")
+
+    def __ior__(self, other: object) -> "FrozenMetadata":
+        raise TypeError("metadata is immutable")
+
+
 @dataclass(frozen=True)
 class HeadroomCompressionResult:
     status: HeadroomCompressionStatus
@@ -115,6 +143,11 @@ class MemoryEvent(BaseModel):
     sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     created_at: str = Field(min_length=1)
 
+    @field_validator("metadata")
+    @classmethod
+    def freeze_metadata(cls, value: dict[str, str]) -> FrozenMetadata:
+        return FrozenMetadata(value)
+
 
 class EventReservation(BaseModel):
     """The sequence and state assigned by an atomic idempotency reservation."""
@@ -133,7 +166,7 @@ class CompressionGeneration(BaseModel):
     generation: int = Field(ge=1)
     from_sequence: int = Field(ge=1)
     through_sequence: int = Field(ge=1)
-    messages: list[SessionCompressionMessage]
+    messages: tuple[SessionCompressionMessage, ...]
     tokens_before: int = Field(ge=0)
     tokens_after: int = Field(ge=0)
     created_at: str = Field(min_length=1)
@@ -153,8 +186,8 @@ class MemorySummaryEnvelope(SessionSummaryPayload):
 
     version: int = Field(ge=1)
     compressed_through_sequence: int = Field(ge=0)
-    compression_generations: list[CompressionGeneration] = Field(
-        default_factory=list
+    compression_generations: tuple[CompressionGeneration, ...] = Field(
+        default_factory=tuple
     )
     updated_at: str = Field(min_length=1)
 

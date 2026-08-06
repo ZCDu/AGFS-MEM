@@ -2,8 +2,14 @@ import pytest
 
 from short_term_memory.service.schemas import (
     EffectiveMemoryConfig,
+    HeadroomProxyContext,
+    MemoryReadResponse,
+    MemoryReadState,
     MemoryReadRequest,
+    MemoryWriteResponse,
     MemoryWriteRequest,
+    ReadTiming,
+    WriteTiming,
 )
 
 
@@ -72,4 +78,64 @@ def test_effective_config_never_contains_secrets() -> None:
         "journal_retention_days",
         "trigger_ratio",
         "policy_version",
+    }
+
+
+def test_write_response_dumps_the_approved_nullable_sequence_contract() -> None:
+    response = MemoryWriteResponse(
+        request_id="req-1",
+        accepted=True,
+        sequence_from=None,
+        sequence_through=None,
+        duplicate_event_ids=["event-1"],
+        compression_queued=False,
+        policy_version="v1",
+        timing_ms=WriteTiming(total=42.6, redis=8.1, journal=28.4, queue=1.2),
+    )
+
+    assert response.model_dump(mode="json") == {
+        "request_id": "req-1",
+        "accepted": True,
+        "sequence_from": None,
+        "sequence_through": None,
+        "duplicate_event_ids": ["event-1"],
+        "compression_queued": False,
+        "policy_version": "v1",
+        "timing_ms": {"total": 42.6, "redis": 8.1, "journal": 28.4, "queue": 1.2},
+    }
+
+
+def test_read_response_dumps_the_approved_optional_config_contract() -> None:
+    response = MemoryReadResponse(
+        request_id="req-2",
+        messages=[{"role": "user", "content": "recent original message"}],
+        memory=MemoryReadState(
+            compressed_through_sequence=100,
+            latest_sequence=101,
+            source="redis",
+            compression_segments=1,
+        ),
+        headroom=HeadroomProxyContext(
+            proxy_url="http://headroom:8787/v1",
+            scope_headers={"x-headroom-user-id": "opaque-value"},
+        ),
+        effective_config=None,
+        timing_ms=ReadTiming(total=31.5, redis=12.2, recovery=0.0, assembly=3.1),
+    )
+
+    assert response.model_dump(mode="json") == {
+        "request_id": "req-2",
+        "messages": [{"role": "user", "content": "recent original message"}],
+        "memory": {
+            "compressed_through_sequence": 100,
+            "latest_sequence": 101,
+            "source": "redis",
+            "compression_segments": 1,
+        },
+        "headroom": {
+            "proxy_url": "http://headroom:8787/v1",
+            "scope_headers": {"x-headroom-user-id": "opaque-value"},
+        },
+        "effective_config": None,
+        "timing_ms": {"total": 31.5, "redis": 12.2, "recovery": 0.0, "assembly": 3.1},
     }

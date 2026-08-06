@@ -138,6 +138,17 @@ def _http_service_url(value: str, name: str) -> str:
     return normalized
 
 
+def _required_http_url(value: str, name: str) -> str:
+    return _http_service_url(_non_blank(value, name), name)
+
+
+def _tcp_port(value: str, name: str) -> int:
+    parsed = _positive_int(value, name)
+    if parsed > 65_535:
+        raise ValueError(f"{name} must be between 1 and 65535")
+    return parsed
+
+
 def _non_blank(value: str, name: str) -> str:
     if not value:
         raise ValueError(f"{name} must not be blank")
@@ -225,7 +236,7 @@ def load_settings(path: Path | None = None) -> ShortTermMemorySettings:
 
     api = ApiSettings(
         host=_non_blank(value("MEMORY_API_HOST", "127.0.0.1"), "MEMORY_API_HOST"),
-        port=_positive_int(value("MEMORY_API_PORT", "8080"), "MEMORY_API_PORT"),
+        port=_tcp_port(value("MEMORY_API_PORT", "8080"), "MEMORY_API_PORT"),
         workers=_positive_int(
             value("MEMORY_API_WORKERS", "4"), "MEMORY_API_WORKERS"
         ),
@@ -267,7 +278,7 @@ def load_settings(path: Path | None = None) -> ShortTermMemorySettings:
         ),
     )
     deepseek_public = DeepSeekPublicSettings(
-        api_url=_http_service_url(
+        api_url=_required_http_url(
             value("DEEPSEEK_API_URL", "https://api.deepseek.com"),
             "DEEPSEEK_API_URL",
         ),

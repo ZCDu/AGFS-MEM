@@ -91,6 +91,24 @@ def test_new_memory_settings_parse_validated_environment(
     assert settings.headroom_service.ccr_refresh_seconds == 600
 
 
+def test_deepseek_api_url_must_be_a_non_blank_absolute_http_url(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("DEEPSEEK_API_URL", "")
+
+    with pytest.raises(ValueError, match="DEEPSEEK_API_URL"):
+        load_settings()
+
+
+def test_memory_api_port_must_be_in_the_tcp_port_range(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("MEMORY_API_PORT", "70000")
+
+    with pytest.raises(ValueError, match="MEMORY_API_PORT"):
+        load_settings()
+
+
 def test_process_environment_overrides_dotenv(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

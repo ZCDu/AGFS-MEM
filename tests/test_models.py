@@ -82,3 +82,56 @@ def test_memory_summary_envelope_preserves_semantic_summary_and_generations() ->
     )
 
     assert envelope.current_goal == ["ship the schema"]
+
+
+def test_memory_event_metadata_is_an_immutable_defensive_copy() -> None:
+    metadata = {"language": "python"}
+    event = MemoryEvent(
+        sequence=1,
+        event_id="event-1",
+        role="user",
+        content_type="code",
+        content="print('ok')",
+        metadata=metadata,
+        sha256="a" * 64,
+        created_at="2026-08-06T00:00:00+00:00",
+    )
+
+    metadata["language"] = "rust"
+
+    assert event.metadata == {"language": "python"}
+    with pytest.raises(TypeError):
+        event.metadata["language"] = "go"
+
+
+def test_compression_generation_messages_are_immutable() -> None:
+    generation = CompressionGeneration(
+        generation=1,
+        from_sequence=1,
+        through_sequence=1,
+        messages=[SessionCompressionMessage(role="system", content="opaque")],
+        tokens_before=10,
+        tokens_after=4,
+        created_at="2026-08-06T00:00:00+00:00",
+        ccr_expires_at="2026-08-06T12:00:00+00:00",
+    )
+
+    with pytest.raises(AttributeError):
+        generation.messages.append(SessionCompressionMessage(role="user"))
+
+
+def test_memory_summary_envelope_generations_are_immutable() -> None:
+    envelope = MemorySummaryEnvelope(
+        version=1,
+        compressed_through_sequence=0,
+        compression_generations=[],
+        current_goal=[],
+        preferences=[],
+        confirmed_facts=[],
+        pending_items=[],
+        attachment_references=[],
+        updated_at="2026-08-06T00:00:00+00:00",
+    )
+
+    with pytest.raises(AttributeError):
+        envelope.compression_generations.append(object())
