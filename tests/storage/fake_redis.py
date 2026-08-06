@@ -82,3 +82,102 @@ class FakeRedis:
             self.values.pop(key, None)
             self.ttls.pop(key, None)
         return deleted
+
+
+class AsyncFakeRedis:
+    """Small async Redis double for atomic-memory-store behavior tests."""
+
+    def __init__(self) -> None:
+        import asyncio
+
+        self.lists: dict[str, list[str]] = {}
+        self.values: dict[str, str] = {}
+        self.hashes: dict[str, dict[str, str]] = {}
+        self.ttls: dict[str, int] = {}
+        self._lock = asyncio.Lock()
+
+    async def eval(self, script: str, numkeys: int, *args: str) -> list[str]:
+        keys = args[:numkeys]
+        values = args[numkeys:]
+        async with self._lock:
+            if "dream:reserve-event" in script:
+                sequence_key, event_key = keys
+                digest, event_ttl, sequence_ttl = values
+                record = self.hashes.get(event_key)
+                if record is not None:
+                    if record["digest"] != digest:
+                        return ["conflict", "0"]
+                    return [record["status"], record["sequence"]]
+                sequence = int(self.values.get(sequence_key, "0")) + 1
+                self.values[sequence_key] = str(sequence)
+                self.hashes[event_key] = {
+                    "digest": digest,
+                    "status": "pending",
+                    "sequence": str(sequence),
+                }
+                self.ttls[event_key] = int(event_ttl)
+                self.ttls[sequence_key] = int(sequence_ttl)
+                return ["reserved", str(sequence)]
+            if "dream:commit-event" in script:
+                sequence_key, messages_key, summary_key, event_key = keys
+                event_json, sequence, ttl = values
+                record = self.hashes.get(event_key)
+                if record is None:
+                    return ["missing"]
+                if record["sequence"] != sequence:
+                    return ["sequence_conflict"]
+                if record["status"] == "committed":
+                    return ["duplicate"]
+                self.lists.setdefault(messages_key, []).append(event_json)
+                record["status"] = "committed"
+                for key in (messages_key, summary_key, event_key, sequence_key):
+                    if key in self.lists or key in self.values or key in self.hashes:
+                        self.ttls[key] = int(ttl)
+                return ["committed"]
+            if "dream:compare-and-set-envelope" in script:
+                summary_key = keys[0]
+                expected_version, serialized, ttl = values
+                current = self.values.get(summary_key)
+                if current is not None:
+                    import json
+
+                    if str(json.loads(current)["version"]) != expected_version:
+                        return ["0"]
+                elif expected_version != "0":
+                    return ["0"]
+                self.values[summary_key] = serialized
+                self.ttls[summary_key] = int(ttl)
+                return ["1"]
+            if "dream:release-compression-lease" in script:
+                key = keys[0]
+                if self.values.get(key) != values[0]:
+                    return ["0"]
+                self.values.pop(key, None)
+                self.ttls.pop(key, None)
+                return ["1"]
+        raise AssertionError("unsupported Lua script")
+
+    async def lrange(self, key: str, start: int, end: int) -> list[str]:
+        values = self.lists.get(key, [])
+        start = max(0, len(values) + start) if start < 0 else start
+        end = len(values) - 1 if end == -1 else end
+        return values[start : end + 1]
+
+    async def get(self, key: str) -> str | None:
+        return self.values.get(key)
+
+    async def set(
+        self,
+        key: str,
+        value: str,
+        *,
+        nx: bool = False,
+        px: int | None = None,
+    ) -> bool | None:
+        async with self._lock:
+            if nx and (key in self.values or key in self.lists or key in self.hashes):
+                return None
+            self.values[key] = value
+            if px is not None:
+                self.ttls[key] = px // 1000
+            return True
