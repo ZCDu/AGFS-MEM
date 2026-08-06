@@ -30,6 +30,13 @@ class AsyncMemoryStore(Protocol):
         self, user_id: str, session_id: str
     ) -> MemorySummaryEnvelope | None: ...
 
+    async def restore_originals(
+        self,
+        user_id: str,
+        session_id: str,
+        originals: tuple[MemoryEvent, ...],
+    ) -> bool: ...
+
 
 class TokenEstimator(Protocol):
     def estimate(self, messages: tuple[dict[str, Any], ...]) -> int: ...

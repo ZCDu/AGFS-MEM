@@ -58,8 +58,16 @@ class QueueRedis:
                         old["expected_version"] > new["expected_version"]
                         or (
                             old["expected_version"] == new["expected_version"]
-                            and old["requested_through_sequence"]
-                            >= new["requested_through_sequence"]
+                            and (
+                                old["requested_through_sequence"]
+                                > new["requested_through_sequence"]
+                                or (
+                                    old["requested_through_sequence"]
+                                    == new["requested_through_sequence"]
+                                    and old.get("rebuild", False)
+                                    and not new.get("rebuild", False)
+                                )
+                            )
                         )
                     )
                     if old_wins:
@@ -148,6 +156,25 @@ def compression_job(*, job_id="job-10-0", through_sequence=10, expected_version=
         job_id=job_id, user_id="u", session_id=session_id,
         expected_version=expected_version, requested_through_sequence=through_sequence,
     )
+
+
+@pytest.mark.asyncio
+async def test_rebuild_intent_survives_queue_round_trip_and_wins_same_coverage():
+    redis = QueueRedis()
+    queue = RedisCompressionQueue(redis, capacity=1)
+    active = compression_job(job_id="active", session_id="active")
+    normal = compression_job(job_id="normal", session_id="pending")
+    rebuild = normal.model_copy(update={"job_id": "rebuild", "rebuild": True})
+    await queue.enqueue(active)
+    assert await queue.enqueue(normal) == "pending"
+    assert await queue.enqueue(rebuild) == "pending"
+
+    active_lease = await queue.lease("active-worker", now_unix_ms=0)
+    assert active_lease is not None
+    assert await queue.ack(active_lease)
+    lease = await queue.lease("worker", now_unix_ms=1)
+
+    assert lease is not None and lease.job.rebuild is True
 
 
 @pytest.mark.asyncio

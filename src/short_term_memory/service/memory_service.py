@@ -8,6 +8,7 @@ from typing import Any, Callable
 from uuid import uuid5, NAMESPACE_URL
 
 import anyio
+from redis.exceptions import RedisError
 
 from short_term_memory.compression.generations import GenerationAssembler
 from short_term_memory.compression.policy import HeadroomPolicy
@@ -37,6 +38,10 @@ class RetryableWriteError(RuntimeError):
         super().__init__(f"Redis commit failed for event_id {event_id!r}; retry safely")
         self.event_id = event_id
         self.committed_event_ids = committed_event_ids
+
+
+class MemoryReadUnavailableError(RuntimeError):
+    """Neither Redis nor the durable journal can provide a safe read context."""
 
 
 class MemoryService:
@@ -85,13 +90,19 @@ class MemoryService:
         sequences: list[int] = []
         duplicate_event_ids: list[str] = []
         committed_event_ids: list[str] = []
+        committed_new_event = False
 
         for input_event in request.events:
             digest = sha256(input_event.content.encode("utf-8")).hexdigest()
             redis_started = time.perf_counter()
-            reservation = await self.store.reserve_event(
-                request.user_id, request.session_id, input_event.event_id, digest
-            )
+            try:
+                reservation = await self.store.reserve_event(
+                    request.user_id, request.session_id, input_event.event_id, digest
+                )
+            except self._retryable_redis_errors as error:
+                raise RetryableWriteError(
+                    input_event.event_id, tuple(committed_event_ids)
+                ) from error
             redis_seconds += time.perf_counter() - redis_started
             sequences.append(reservation.sequence)
 
@@ -111,7 +122,7 @@ class MemoryService:
             )
             journal_started = time.perf_counter()
             try:
-                await anyio.to_thread.run_sync(
+                append_result = await anyio.to_thread.run_sync(
                     self.journals.append_event,
                     request.user_id,
                     request.session_id,
@@ -120,13 +131,23 @@ class MemoryService:
             except JournalConflictError as error:
                 raise EventConflictError(str(error)) from error
             journal_seconds += time.perf_counter() - journal_started
+            if not append_result.appended:
+                canonical = await anyio.to_thread.run_sync(
+                    self.journals.find_event,
+                    request.user_id,
+                    request.session_id,
+                    input_event.event_id,
+                )
+                if canonical is None:
+                    raise ValueError("idempotent journal append has no canonical event")
+                event = canonical
 
             redis_started = time.perf_counter()
             try:
                 committed = await self.store.commit_event(
                     request.user_id, request.session_id, event
                 )
-            except Exception as error:
+            except self._retryable_redis_errors as error:
                 raise RetryableWriteError(
                     input_event.event_id, tuple(committed_event_ids)
                 ) from error
@@ -135,16 +156,24 @@ class MemoryService:
                 duplicate_event_ids.append(input_event.event_id)
             else:
                 committed_event_ids.append(input_event.event_id)
+                committed_new_event = True
 
-        originals = await self.store.read_originals_after(
-            request.user_id, request.session_id, 0
-        )
-        envelope = await self.store.read_envelope(request.user_id, request.session_id)
-        should_compress = self.policy.should_compress(
-            estimated_tokens=self._estimate_tokens(originals),
-            message_count=len(originals),
-            session_seconds=request.session_seconds,
-        )
+        originals: tuple[MemoryEvent, ...] = ()
+        should_compress = False
+        if committed_new_event:
+            redis_started = time.perf_counter()
+            originals, envelope = await asyncio.gather(
+                self.store.read_originals_after(request.user_id, request.session_id, 0),
+                self.store.read_envelope(request.user_id, request.session_id),
+            )
+            redis_seconds += time.perf_counter() - redis_started
+            should_compress = self.policy.should_compress(
+                estimated_tokens=self._estimate_tokens(originals),
+                message_count=len(originals),
+                session_seconds=request.session_seconds,
+            )
+        else:
+            envelope = None
         if should_compress and originals:
             queue_started = time.perf_counter()
             await self.compression_queue.enqueue(
@@ -182,45 +211,75 @@ class MemoryService:
         started = time.perf_counter()
         redis_started = time.perf_counter()
         history_turns = request.history_turns or self.settings.redis_session.history_turns
-        envelope, originals = await asyncio.gather(
+        envelope_result, originals_result = await asyncio.gather(
             self.store.read_envelope(request.user_id, request.session_id),
             self.store.read_recent_originals(
                 request.user_id, request.session_id, history_turns
             ),
+            return_exceptions=True,
         )
         redis_seconds = time.perf_counter() - redis_started
+        envelope = (
+            None if isinstance(envelope_result, Exception) else envelope_result
+        )
+        originals = (
+            () if isinstance(originals_result, Exception) else originals_result
+        )
+        redis_failed = isinstance(envelope_result, Exception) or isinstance(
+            originals_result, Exception
+        )
         recovery_seconds = 0.0
         source = "redis"
 
         if not originals:
             recovery_started = time.perf_counter()
             originals = await anyio.to_thread.run_sync(
-                self._recent_journal_originals,
+                self.journals.read_recent_originals,
                 request.user_id,
                 request.session_id,
                 history_turns,
             )
             if originals:
-                await self._restore_originals(
+                restored = await self.store.restore_originals(
                     request.user_id, request.session_id, originals
                 )
+                if not restored:
+                    refreshed_envelope, refreshed_originals = await asyncio.gather(
+                        self.store.read_envelope(request.user_id, request.session_id),
+                        self.store.read_recent_originals(
+                            request.user_id, request.session_id, history_turns
+                        ),
+                        return_exceptions=True,
+                    )
+                    if not isinstance(refreshed_envelope, Exception):
+                        envelope = refreshed_envelope
+                    if not isinstance(refreshed_originals, Exception) and refreshed_originals:
+                        originals = refreshed_originals
             recovery_seconds = time.perf_counter() - recovery_started
-            source = "journal_rebuild"
+            if originals:
+                source = "journal_rebuild"
+            elif redis_failed:
+                raise MemoryReadUnavailableError(
+                    "Redis read failed and journal has no recoverable originals"
+                )
 
         now = self._now()
         latest_sequence = max((event.sequence for event in originals), default=0)
-        if self._requires_rebuild(envelope, now):
-            if latest_sequence:
+        if latest_sequence and (envelope is None or self._requires_rebuild(envelope, now)):
+            through_sequence = max(
+                latest_sequence,
+                envelope.compressed_through_sequence if envelope is not None else 0,
+            )
+            if through_sequence:
                 await self.compression_queue.enqueue(
                     self._compression_job(
                         request.user_id,
                         request.session_id,
                         envelope,
-                        latest_sequence,
+                        through_sequence,
                         rebuild=True,
                     )
                 )
-            source = "journal_rebuild"
 
         assembly_started = time.perf_counter()
         messages = self.assembler.build_read_messages(envelope, originals, now)
@@ -238,7 +297,9 @@ class MemoryService:
                 latest_sequence=latest_sequence,
                 source=source,
                 compression_segments=(
-                    len(envelope.compression_generations) if envelope is not None else 0
+                    len(self.assembler._fresh_generations(envelope, now))
+                    if envelope is not None
+                    else 0
                 ),
             ),
             headroom=HeadroomProxyContext(
@@ -253,30 +314,6 @@ class MemoryService:
                 assembly=assembly_seconds * 1_000,
             ),
         )
-
-    def _recent_journal_originals(
-        self, user_id: str, session_id: str, history_turns: int
-    ) -> tuple[MemoryEvent, ...]:
-        originals = self.journals.read_original_range(
-            user_id, session_id, 1, 2**63 - 1
-        )
-        return originals[-history_turns:]
-
-    async def _restore_originals(
-        self, user_id: str, session_id: str, originals: tuple[MemoryEvent, ...]
-    ) -> None:
-        """Replay journal originals without changing their journal records."""
-
-        restore = getattr(self.store, "restore_originals", None)
-        if restore is not None:
-            await restore(user_id, session_id, originals)
-            return
-        for original in originals:
-            reservation = await self.store.reserve_event(
-                user_id, session_id, original.event_id, original.sha256
-            )
-            recovered = original.model_copy(update={"sequence": reservation.sequence})
-            await self.store.commit_event(user_id, session_id, recovered)
 
     def _compression_job(
         self,
@@ -295,6 +332,7 @@ class MemoryService:
             session_id=session_id,
             expected_version=expected_version,
             requested_through_sequence=through_sequence,
+            rebuild=rebuild,
         )
 
     def _effective_config(self) -> EffectiveMemoryConfig:
@@ -345,3 +383,5 @@ class MemoryService:
     @staticmethod
     def _milliseconds(started: float) -> float:
         return (time.perf_counter() - started) * 1_000
+
+    _retryable_redis_errors = (RedisError, OSError, TimeoutError, ConnectionError)

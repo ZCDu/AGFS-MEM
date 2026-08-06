@@ -25,6 +25,7 @@ class CompressionJob(BaseModel):
     expected_version: int = Field(ge=0)
     requested_through_sequence: int = Field(ge=1)
     attempt: int = Field(ge=0, default=0)
+    rebuild: bool = False
 
 
 @dataclass(frozen=True)
@@ -54,8 +55,10 @@ if previous and previous ~= ARGV[2] then
     local old = cjson.decode(previous_payload)
     local new = cjson.decode(ARGV[1])
     local old_wins = old.expected_version > new.expected_version
-      or (old.expected_version == new.expected_version
-        and old.requested_through_sequence >= new.requested_through_sequence)
+      or (old.expected_version == new.expected_version and (
+        old.requested_through_sequence > new.requested_through_sequence
+        or (old.requested_through_sequence == new.requested_through_sequence
+          and (old.rebuild == true) and (new.rebuild ~= true))))
     if old_wins then
       redis.call('DEL', KEYS[1])
       return {'coalesced'}

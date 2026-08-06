@@ -136,6 +136,34 @@ class AsyncFakeRedis:
                     if key in self.lists or key in self.values or key in self.hashes:
                         self.ttls[key] = int(ttl)
                 return ["committed"]
+            if "dream:restore-originals-v1" in script:
+                import json
+
+                sequence_key, messages_key = keys
+                originals = json.loads(values[0])
+                event_prefix, ttl, maximum = values[1:]
+                for event in originals:
+                    record = self.hashes.get(f"{event_prefix}{event['event_id']}")
+                    if record is not None and (
+                        record["digest"] != event["sha256"]
+                        or record["sequence"] != str(event["sequence"])
+                    ):
+                        return ["conflict"]
+                if self.lists.get(messages_key) or int(self.values.get(sequence_key, "0")) > int(maximum):
+                    return ["not_restored"]
+                for event in originals:
+                    event_key = f"{event_prefix}{event['event_id']}"
+                    self.hashes[event_key] = {
+                        "digest": event["sha256"],
+                        "status": "committed",
+                        "sequence": str(event["sequence"]),
+                    }
+                    self.ttls[event_key] = int(ttl)
+                    self.lists.setdefault(messages_key, []).append(json.dumps(event, separators=(",", ":")))
+                self.values[sequence_key] = str(maximum)
+                self.ttls[sequence_key] = int(ttl)
+                self.ttls[messages_key] = int(ttl)
+                return ["restored"]
             if "dream:compare-and-set-envelope" in script:
                 summary_key = keys[0]
                 expected_version, serialized, ttl = values

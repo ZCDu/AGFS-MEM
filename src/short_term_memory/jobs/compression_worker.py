@@ -155,6 +155,10 @@ class CompressionWorker:
     async def _candidate(
         self, job, envelope: MemorySummaryEnvelope | None, now: datetime
     ) -> CompressionCandidate | None:
+        if job.rebuild:
+            return await self.planner.plan_rebuild(
+                job.user_id, job.session_id, job.requested_through_sequence
+            )
         rebuild_through = max(
             job.requested_through_sequence,
             envelope.compressed_through_sequence if envelope is not None else 0,

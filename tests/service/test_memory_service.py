@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import pytest
 
@@ -7,7 +8,18 @@ from short_term_memory.compression.policy import HeadroomPolicy
 from short_term_memory.compression.scope import OptimizationScopeFactory
 from short_term_memory.config import ShortTermMemorySettings
 from short_term_memory.models import CompressionGeneration, EventReservation
-from short_term_memory.service.memory_service import MemoryService, RetryableWriteError
+from short_term_memory.service.memory_service import (
+    MemoryReadUnavailableError,
+    MemoryService,
+    RetryableWriteError,
+)
+from short_term_memory.storage.async_redis_memory_store import (
+    AsyncRedisMemoryStore,
+    EventConflictError,
+)
+from short_term_memory.storage.journal_store import JournalAppendResult, JournalStore
+from short_term_memory.storage.vfs_adapter import VFSAdapter
+from tests.storage.fake_redis import AsyncFakeRedis
 from tests.factories import envelope, memory_event, read_request, write_request
 
 
@@ -18,6 +30,9 @@ class RecordingStore:
         self.envelope = None
         self.reservations = {}
         self.fail_next_commit = False
+        self.commit_error = None
+        self.fail_envelope_read = False
+        self.fail_original_read = False
 
     async def reserve_event(self, user_id, session_id, event_id, digest):
         self.calls.append("reserve")
@@ -32,22 +47,38 @@ class RecordingStore:
         if self.fail_next_commit:
             self.fail_next_commit = False
             raise OSError("redis unavailable")
+        if self.commit_error is not None:
+            raise self.commit_error
         if event not in self.events:
             self.events.append(event)
+            self.reservations[event.event_id] = EventReservation(
+                sequence=event.sequence, state="committed"
+            )
             return "committed"
         return "duplicate"
 
     async def read_envelope(self, user_id, session_id):
+        if self.fail_envelope_read:
+            raise OSError("redis unavailable")
         return self.envelope
 
     async def read_recent_originals(self, user_id, session_id, history_turns):
-        return tuple(self.events[-history_turns:])
+        if self.fail_original_read:
+            raise OSError("redis unavailable")
+        events = tuple(self.events[-(history_turns * 2):])
+        return events[1:] if events and events[0].role.value == "assistant" else events
 
     async def read_originals_after(self, user_id, session_id, sequence):
         return tuple(event for event in self.events if event.sequence > sequence)
 
     def seed_envelope(self, value):
         self.envelope = value
+
+    async def restore_originals(self, user_id, session_id, originals):
+        if self.events:
+            return False
+        self.events = list(originals)
+        return True
 
 
 class RecordingJournals:
@@ -59,16 +90,17 @@ class RecordingJournals:
         self.calls.append("journal_fsync")
         if not any(existing.event_id == event.event_id for existing in self.events):
             self.events.append(event)
+            return JournalAppendResult(appended=True, path=Path("journal"))
+        return JournalAppendResult(appended=False, path=Path("journal"))
 
     def append_count(self, event_id):
         return sum(event.event_id == event_id for event in self.events)
 
-    def read_original_range(self, user_id, session_id, from_sequence, through_sequence):
-        return tuple(
-            event
-            for event in self.events
-            if from_sequence <= event.sequence <= through_sequence
-        )
+    def find_event(self, user_id, session_id, event_id):
+        return next((event for event in self.events if event.event_id == event_id), None)
+
+    def read_recent_originals(self, user_id, session_id, history_turns):
+        return tuple(self.events[-(history_turns * 2):])
 
 
 class RecordingQueue:
@@ -180,3 +212,190 @@ async def test_read_omits_effective_config_when_not_requested(service):
     response = await service.read(request, "req-2")
 
     assert response.effective_config is None
+
+
+@pytest.mark.asyncio
+async def test_retry_commits_the_canonical_journal_event_despite_a_new_clock(
+    tmp_path,
+):
+    store = AsyncRedisMemoryStore(AsyncFakeRedis())
+    journals = JournalStore(VFSAdapter(tmp_path))
+    service_at_t1 = MemoryService(
+        store=store, journals=journals, assembler=GenerationAssembler(max_segments=8),
+        compression_queue=RecordingQueue([]), policy=RecordingPolicy([]),
+        scope_factory=OptimizationScopeFactory("secret"), settings=ShortTermMemorySettings(),
+        headroom_proxy_url="http://headroom:8787/v1", token_estimator=lambda events: len(events),
+        clock=lambda: datetime(2026, 8, 6, tzinfo=timezone.utc),
+    )
+    original_commit = store.commit_event
+    failed = True
+
+    async def fail_once(user_id, session_id, event):
+        nonlocal failed
+        if failed:
+            failed = False
+            raise OSError("redis down")
+        return await original_commit(user_id, session_id, event)
+
+    store.commit_event = fail_once
+    with pytest.raises(RetryableWriteError):
+        await service_at_t1.write(write_request(), "first")
+
+    service_at_t2 = MemoryService(
+        store=store, journals=journals, assembler=GenerationAssembler(max_segments=8),
+        compression_queue=RecordingQueue([]), policy=RecordingPolicy([]),
+        scope_factory=OptimizationScopeFactory("secret"), settings=ShortTermMemorySettings(),
+        headroom_proxy_url="http://headroom:8787/v1", token_estimator=lambda events: len(events),
+        clock=lambda: datetime(2026, 8, 7, tzinfo=timezone.utc),
+    )
+    await service_at_t2.write(write_request(), "retry")
+
+    canonical = journals.find_event("u", "s", "event-1")
+    assert canonical is not None
+    assert (await store.read_recent_originals("u", "s", 1)) == (canonical,)
+    assert canonical.created_at == "2026-08-06T00:00:00+00:00"
+
+
+@pytest.mark.asyncio
+async def test_batch_commit_failure_reports_prior_committed_ids_in_input_order(service):
+    second = write_request("event-2", "second").events[0]
+    request = write_request().model_copy(update={"events": [write_request().events[0], second]})
+    service.store.commit_error = OSError("redis unavailable")
+    original_commit = service.store.commit_event
+    calls = 0
+
+    async def fail_second(*args):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise OSError("redis unavailable")
+        return await original_commit(*args)
+
+    service.store.commit_error = None
+    service.store.commit_event = fail_second
+    with pytest.raises(RetryableWriteError) as raised:
+        await service.write(request, "req-1")
+
+    assert raised.value.committed_event_ids == ("event-1",)
+    assert [event.event_id for event in service.store.events] == ["event-1"]
+
+
+@pytest.mark.asyncio
+async def test_write_preserves_commit_digest_conflicts(service):
+    service.store.commit_error = EventConflictError("digest conflict")
+
+    with pytest.raises(EventConflictError, match="digest conflict"):
+        await service.write(write_request(), "req-1")
+
+
+@pytest.mark.asyncio
+async def test_duplicate_only_write_skips_policy_and_enqueue(service):
+    await service.write(write_request(), "first")
+    service.store.calls.clear()
+
+    response = await service.write(write_request(), "retry")
+
+    assert response.duplicate_event_ids == ["event-1"]
+    assert response.compression_queued is False
+    assert service.store.calls == ["reserve"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("queue_state", ["ready", "pending", "idempotent", "coalesced"])
+async def test_all_durable_queue_states_are_accepted(service, queue_state):
+    async def enqueue(job):
+        service.compression_queue.jobs.append(job)
+        return queue_state
+
+    service.compression_queue.enqueue = enqueue
+    response = await service.write(write_request(), "req-1")
+
+    assert response.compression_queued is True
+
+
+@pytest.mark.asyncio
+async def test_envelope_missing_with_redis_originals_enqueues_rebuild(service):
+    service.store.events.append(memory_event(sequence=10))
+
+    response = await service.read(read_request(), "req-1")
+
+    assert response.memory.source == "redis"
+    assert service.compression_queue.jobs[-1].rebuild is True
+    assert service.compression_queue.jobs[-1].requested_through_sequence == 10
+
+
+@pytest.mark.asyncio
+async def test_expired_generation_degrades_to_originals_but_keeps_redis_source(service):
+    now = datetime(2026, 8, 6, tzinfo=timezone.utc)
+    expired = CompressionGeneration(
+        generation=1, from_sequence=1, through_sequence=1,
+        messages=({"role": "system", "content": "EXPIRED"},), tokens_before=2,
+        tokens_after=1, created_at=(now - timedelta(hours=2)).isoformat(),
+        ccr_expires_at=(now - timedelta(hours=1)).isoformat(),
+    )
+    service.store.seed_envelope(envelope(through=1, generations=[expired]))
+    service.store.events.append(memory_event())
+
+    response = await service.read(read_request(), "req-1")
+
+    assert response.memory.source == "redis"
+    assert response.memory.compression_segments == 0
+    assert all("EXPIRED" not in str(message.content) for message in response.messages)
+    assert service.compression_queue.jobs[-1].rebuild is True
+
+
+@pytest.mark.asyncio
+async def test_redis_read_failure_recovers_from_journal_without_aborting(service):
+    recovered = memory_event(sequence=1, event_id="journal", content="journal")
+    service.journals.events.append(recovered)
+    service.store.fail_envelope_read = True
+    service.store.fail_original_read = True
+
+    response = await service.read(read_request(), "req-1")
+
+    assert response.memory.source == "journal_rebuild"
+    assert response.messages[-1].content == "journal"
+
+
+@pytest.mark.asyncio
+async def test_redis_read_failure_with_empty_journal_is_explicit(service):
+    service.store.fail_envelope_read = True
+    service.store.fail_original_read = True
+
+    with pytest.raises(MemoryReadUnavailableError):
+        await service.read(read_request(), "req-1")
+
+
+@pytest.mark.asyncio
+async def test_real_store_and_journal_recovery_preserve_tail_sequences(tmp_path):
+    store = AsyncRedisMemoryStore(AsyncFakeRedis())
+    journals = JournalStore(VFSAdapter(tmp_path))
+    originals = tuple(
+        memory_event(sequence=sequence, event_id=f"event-{sequence}")
+        for sequence in range(91, 101)
+    )
+    for event in originals:
+        journals.append_event("u", "s", event)
+    service = MemoryService(
+        store=store, journals=journals, assembler=GenerationAssembler(max_segments=8),
+        compression_queue=RecordingQueue([]), policy=RecordingPolicy([]),
+        scope_factory=OptimizationScopeFactory("secret"), settings=ShortTermMemorySettings(),
+        headroom_proxy_url="http://headroom:8787/v1", token_estimator=lambda events: len(events),
+        clock=lambda: datetime(2026, 8, 6, tzinfo=timezone.utc),
+    )
+
+    response = await service.read(read_request().model_copy(update={"history_turns": 5}), "req-1")
+    next_reservation = await store.reserve_event("u", "s", "event-101", "a" * 64)
+
+    assert response.memory.source == "journal_rebuild"
+    assert [event.sequence for event in await store.read_recent_originals("u", "s", 5)] == list(range(91, 101))
+    assert next_reservation.sequence == 101
+
+
+@pytest.mark.asyncio
+async def test_empty_redis_and_empty_journal_is_an_empty_redis_source(service):
+    response = await service.read(read_request(), "req-1")
+
+    assert response.memory.source == "redis"
+    assert response.memory.latest_sequence == 0
+    assert response.messages == []

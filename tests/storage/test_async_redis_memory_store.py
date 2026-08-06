@@ -2,7 +2,7 @@ from hashlib import sha256
 
 import pytest
 
-from short_term_memory.models import MemoryEvent
+from short_term_memory.models import JournalRole, MemoryEvent
 from short_term_memory.storage.async_redis_memory_store import (
     AsyncRedisMemoryStore,
     EventConflictError,
@@ -148,6 +148,73 @@ async def test_duplicate_rechecks_reservation_digest_and_sequence(
         await memory_store.commit_event(
             "u", "s", event.model_copy(update={"sequence": 2})
         )
+
+
+@pytest.mark.asyncio
+async def test_restore_originals_preserves_sequences_and_advances_next_reservation(
+    memory_store: AsyncRedisMemoryStore,
+) -> None:
+    originals = tuple(
+        memory_event(sequence=sequence, event_id=f"event-{sequence}")
+        for sequence in range(91, 101)
+    )
+
+    assert await memory_store.restore_originals("u", "s", originals) is True
+    assert await memory_store.read_recent_originals("u", "s", 5) == originals
+    next_reservation = await memory_store.reserve_event("u", "s", "event-101", "a" * 64)
+
+    assert next_reservation.sequence == 101
+
+
+@pytest.mark.asyncio
+async def test_restore_originals_never_overwrites_newer_redis_state(
+    memory_store: AsyncRedisMemoryStore,
+) -> None:
+    existing = memory_event(sequence=101, event_id="existing")
+    assert await memory_store.restore_originals("u", "s", (existing,))
+
+    assert not await memory_store.restore_originals(
+        "u", "s", (memory_event(sequence=91, event_id="journal-event"),)
+    )
+    assert await memory_store.read_recent_originals("u", "s", 1) == (existing,)
+
+
+@pytest.mark.asyncio
+async def test_restore_originals_conflict_leaves_no_partial_state(
+    memory_store: AsyncRedisMemoryStore,
+) -> None:
+    existing = memory_event(sequence=1, event_id="same", content="redis")
+    await memory_store.reserve_event("u", "s", existing.event_id, existing.sha256)
+    await memory_store.commit_event("u", "s", existing)
+
+    with pytest.raises(EventConflictError):
+        await memory_store.restore_originals(
+            "u",
+            "s",
+            (
+                memory_event(sequence=1, event_id="same", content="journal"),
+                memory_event(sequence=2, event_id="later"),
+            ),
+        )
+    assert await memory_store.read_recent_originals("u", "s", 1) == (existing,)
+
+
+@pytest.mark.asyncio
+async def test_read_recent_originals_interprets_limit_as_turns(
+    memory_store: AsyncRedisMemoryStore,
+) -> None:
+    events = (
+        memory_event(sequence=1, event_id="one", content="one"),
+        memory_event(sequence=2, event_id="two", content="two").model_copy(
+            update={"role": JournalRole.ASSISTANT}
+        ),
+        memory_event(sequence=3, event_id="three", content="three"),
+    )
+    for event in events:
+        await memory_store.reserve_event("u", "s", event.event_id, event.sha256)
+        await memory_store.commit_event("u", "s", event)
+
+    assert await memory_store.read_recent_originals("u", "s", 1) == events[2:]
 
 
 @pytest.mark.asyncio

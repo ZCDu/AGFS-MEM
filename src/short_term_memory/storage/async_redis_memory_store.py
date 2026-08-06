@@ -1,5 +1,6 @@
 """Atomic async Redis persistence for original memory events and summaries."""
 
+import json
 from typing import Any, Literal, Protocol
 
 from short_term_memory.models import EventReservation, MemoryEvent, MemorySummaryEnvelope
@@ -48,6 +49,35 @@ redis.call('EXPIRE', KEYS[3], ARGV[4])
 redis.call('EXPIRE', KEYS[4], ARGV[4])
 redis.call('EXPIRE', KEYS[1], ARGV[4])
 return {'committed'}
+"""
+
+RESTORE_ORIGINALS_SCRIPT = """
+-- dream:restore-originals-v1
+local originals = cjson.decode(ARGV[1])
+local event_prefix = ARGV[2]
+local ttl = ARGV[3]
+local maximum = tonumber(ARGV[4])
+for _, event in ipairs(originals) do
+  local key = event_prefix .. event.event_id
+  local digest = redis.call('HGET', key, 'digest')
+  if digest and (digest ~= event.sha256
+      or redis.call('HGET', key, 'sequence') ~= tostring(event.sequence)) then
+    return {'conflict'}
+  end
+end
+if redis.call('LLEN', KEYS[2]) > 0 then return {'not_restored'} end
+local counter = tonumber(redis.call('GET', KEYS[1]) or '0')
+if counter > maximum then return {'not_restored'} end
+for _, event in ipairs(originals) do
+  local key = event_prefix .. event.event_id
+  redis.call('HSET', key, 'digest', event.sha256, 'status', 'committed',
+    'sequence', tostring(event.sequence))
+  redis.call('EXPIRE', key, ttl)
+  redis.call('RPUSH', KEYS[2], cjson.encode(event))
+end
+redis.call('SET', KEYS[1], tostring(maximum), 'EX', ttl)
+redis.call('EXPIRE', KEYS[2], ttl)
+return {'restored'}
 """
 
 CAS_ENVELOPE_SCRIPT = """
@@ -123,13 +153,55 @@ class AsyncRedisMemoryStore:
             raise EventConflictError("event digest does not match its reservation")
         raise ValueError("event sequence does not match its reservation")
 
+    async def restore_originals(
+        self,
+        user_id: str,
+        session_id: str,
+        originals: tuple[MemoryEvent, ...],
+    ) -> bool:
+        """Atomically restore a bounded journal tail without renumbering it."""
+
+        if not originals:
+            return False
+        ordered = tuple(sorted(originals, key=lambda event: event.sequence))
+        if ordered != originals or len({event.event_id for event in originals}) != len(originals):
+            raise ValueError("originals must have ordered unique event IDs")
+        if len({event.sequence for event in originals}) != len(originals):
+            raise ValueError("originals must have unique sequences")
+        keys = self._keys(user_id, session_id)
+        result = await self.client.eval(
+            RESTORE_ORIGINALS_SCRIPT,
+            2,
+            keys.sequence,
+            keys.messages,
+            json.dumps(
+                [event.model_dump(mode="json") for event in originals],
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ),
+            f"{keys.sequence.rsplit(':sequence', 1)[0]}:event:",
+            str(self.ttl_seconds),
+            str(originals[-1].sequence),
+        )
+        state = self._result(result)[0]
+        if state == "restored":
+            return True
+        if state == "not_restored":
+            return False
+        if state == "conflict":
+            raise EventConflictError("journal originals conflict with Redis reservation")
+        raise ValueError("unexpected restore result")
+
     async def read_recent_originals(
         self, user_id: str, session_id: str, history_turns: int
     ) -> tuple[MemoryEvent, ...]:
         if history_turns < 1:
             raise ValueError("history_turns must be positive")
         keys = self._keys(user_id, session_id)
-        return self._events(await self.client.lrange(keys.messages, -history_turns, -1))
+        events = self._events(
+            await self.client.lrange(keys.messages, -(history_turns * 2), -1)
+        )
+        return events[1:] if events and events[0].role.value == "assistant" else events
 
     async def read_originals_after(
         self, user_id: str, session_id: str, sequence: int

@@ -133,6 +133,21 @@ async def test_worker_stores_generation_only_after_headroom_success(worker):
 
 
 @pytest.mark.asyncio
+async def test_explicit_rebuild_job_uses_journal_candidate_when_envelope_is_missing(worker):
+    worker, store, _ = worker
+    await worker.queue.enqueue(
+        compression_job(through_sequence=10).model_copy(update={"rebuild": True})
+    )
+
+    result = await worker.run_once()
+    persisted = await store.read_envelope("u", "s")
+
+    assert result.state == "acked"
+    assert persisted is not None
+    assert persisted.compressed_through_sequence == 10
+
+
+@pytest.mark.asyncio
 async def test_stale_worker_is_acked_without_overwrite(worker):
     worker, store, _ = worker
     assert await store.compare_and_set_envelope("u", "s", 0, envelope(version=1))

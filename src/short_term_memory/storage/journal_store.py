@@ -169,6 +169,51 @@ class JournalStore:
                 if from_sequence <= event.sequence <= through_sequence
             )
 
+    def read_recent_originals(
+        self, user_id: str, session_id: str, history_turns: int
+    ) -> tuple[MemoryEvent, ...]:
+        """Read at most two original events per turn, newest first on disk."""
+
+        if history_turns < 1:
+            raise ValueError("history_turns must be positive")
+        with self._session_lock(user_id, session_id):
+            session = safe_component(session_id, "session_id")
+            directory = self.vfs.paths(user_id).journals
+            limit = history_turns * 2
+            selected: list[MemoryEvent] = []
+            for path in sorted(directory.glob(f"*-{session}.jsonl"), reverse=True):
+                with path.open("r", encoding="utf-8") as handle:
+                    lines = handle.readlines()
+                for index in range(len(lines) - 1, -1, -1):
+                    line = lines[index]
+                    if not line.strip():
+                        raise json.JSONDecodeError("blank journal line", line, 0)
+                    try:
+                        raw = json.loads(line)
+                    except json.JSONDecodeError:
+                        if index == len(lines) - 1 and not line.endswith("\n"):
+                            continue
+                        raise
+                    if raw.get("type") == "message":
+                        record = JournalMessageEvent.model_validate(raw)
+                        if record.sequence is not None:
+                            selected.append(self._memory_event(record))
+                            if len(selected) >= limit:
+                                events = tuple(reversed(selected))
+                                return (
+                                    events[1:]
+                                    if events and events[0].role.value == "assistant"
+                                    else events
+                                )
+                    elif raw.get("type") != "file":
+                        raise ValueError(f"unknown journal event type in {path.name}")
+            events = tuple(reversed(selected))
+            return (
+                events[1:]
+                if events and events[0].role.value == "assistant"
+                else events
+            )
+
     def read_session(self, user_id: str, session_id: str) -> tuple[JournalRecord, ...]:
         with self._session_lock(user_id, session_id):
             return tuple(

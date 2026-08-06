@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 
 from tests.factories import memory_event
+from short_term_memory.models import JournalRole
 from short_term_memory.storage.journal_store import (
     JournalConflictError,
     JournalFileEvent,
@@ -143,6 +144,23 @@ def test_read_original_range_selects_only_requested_sequences(tmp_path: Path) ->
     assert store.read_original_range("u", "s", 2, 2) == (
         memory_event(sequence=2, event_id="event-2"),
     )
+
+
+def test_read_recent_originals_uses_turns_and_never_starts_with_assistant(
+    tmp_path: Path,
+) -> None:
+    store = JournalStore(VFSAdapter(tmp_path))
+    events = (
+        memory_event(sequence=1, event_id="one", content="one"),
+        memory_event(sequence=2, event_id="two", content="two").model_copy(
+            update={"role": JournalRole.ASSISTANT}
+        ),
+        memory_event(sequence=3, event_id="three", content="three"),
+    )
+    for event in events:
+        store.append_event("u", "s", event)
+
+    assert store.read_recent_originals("u", "s", 1) == events[2:]
 
 
 def test_incomplete_final_json_line_is_ignored_as_crash_residue(tmp_path: Path) -> None:
