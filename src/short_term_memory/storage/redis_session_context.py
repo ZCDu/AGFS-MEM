@@ -133,7 +133,12 @@ class RedisSessionContext:
         self, user_id: str, session_id: str
     ) -> CompressionSnapshot:
         return CompressionSnapshot(
-            messages=self.compression_history(user_id, session_id),
+            messages=tuple(
+                self._decode_message(value)
+                for value in self.client.lrange(
+                    self._message_key(user_id, session_id), 0, -1
+                )
+            ),
             processed_message_count=int(
                 self.client.llen(self._message_key(user_id, session_id))
             ),

@@ -547,10 +547,37 @@ def test_compression_snapshot_counts_only_redis_messages(tmp_path: Path) -> None
 
     assert snapshot.processed_message_count == 2
     assert snapshot.messages == (
-        {"role": "system", "content": "summary"},
         {"role": "user", "content": "one"},
         {"role": "assistant", "content": "two"},
     )
+
+
+def test_legacy_compression_snapshot_never_includes_summary_messages(
+    tmp_path: Path,
+) -> None:
+    _, _, context = _context(tmp_path)
+    document = {
+        "user_id": "u",
+        "session_id": "s",
+        "coverage": {"processed_message_count": 0},
+        "current_goal": [],
+        "preferences": [],
+        "confirmed_facts": [],
+        "pending_items": [],
+        "attachment_references": [],
+        "compression_context": {
+            "messages": [{"role": "system", "content": "OLD_HEADROOM_MARKER"}],
+            "tokens_before": 10,
+            "tokens_after": 2,
+        },
+        "updated_at": "2026-08-06T00:00:00+00:00",
+    }
+    context.set_summary("u", "s", json.dumps(document))
+    context.append_message("u", "s", {"role": "user", "content": "new original"})
+
+    snapshot = context.compression_snapshot("u", "s")
+
+    assert snapshot.messages == ({"role": "user", "content": "new original"},)
 
 
 def test_headroom_job_can_trim_redis_to_recent_messages(tmp_path: Path) -> None:
