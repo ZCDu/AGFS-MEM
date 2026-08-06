@@ -85,7 +85,7 @@ class FakeRedis:
 
 
 class AsyncFakeRedis:
-    """Small async Redis double for atomic-memory-store behavior tests."""
+    """Async Redis double with manual expiration; it does not advance real time."""
 
     def __init__(self) -> None:
         import asyncio
@@ -120,12 +120,14 @@ class AsyncFakeRedis:
                 return ["reserved", str(sequence)]
             if "dream:commit-event" in script:
                 sequence_key, messages_key, summary_key, event_key = keys
-                event_json, sequence, ttl = values
+                event_json, sequence, digest, ttl = values
                 record = self.hashes.get(event_key)
                 if record is None:
                     return ["missing"]
                 if record["sequence"] != sequence:
                     return ["sequence_conflict"]
+                if record["digest"] != digest:
+                    return ["digest_conflict"]
                 if record["status"] == "committed":
                     return ["duplicate"]
                 self.lists.setdefault(messages_key, []).append(event_json)
@@ -181,3 +183,13 @@ class AsyncFakeRedis:
             if px is not None:
                 self.ttls[key] = px // 1000
             return True
+
+    def expire_now(self, key: str) -> bool:
+        """Explicitly expire one key for a test without advancing a fake clock."""
+
+        exists = key in self.lists or key in self.values or key in self.hashes
+        self.lists.pop(key, None)
+        self.values.pop(key, None)
+        self.hashes.pop(key, None)
+        self.ttls.pop(key, None)
+        return exists

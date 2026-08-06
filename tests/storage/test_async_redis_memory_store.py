@@ -37,8 +37,9 @@ async def test_reserve_retry_and_conflict(memory_store: AsyncRedisMemoryStore) -
 async def test_commit_makes_event_visible_once(
     memory_store: AsyncRedisMemoryStore,
 ) -> None:
-    reservation = await memory_store.reserve_event("u", "s", "e", "a" * 64)
-    event = memory_event(sequence=reservation.sequence, event_id="e")
+    event = memory_event(event_id="e")
+    reservation = await memory_store.reserve_event("u", "s", "e", event.sha256)
+    event = event.model_copy(update={"sequence": reservation.sequence})
 
     assert await memory_store.commit_event("u", "s", event) == "committed"
     assert await memory_store.commit_event("u", "s", event) == "duplicate"
@@ -76,11 +77,21 @@ async def test_reservation_commit_and_summary_refresh_consistent_ttls(
     await memory_store.compare_and_set_envelope("u", "s", 0, envelope())
     await memory_store.commit_event("u", "s", event)
 
-    assert set(redis.ttls.values()) == {43_200}
+    prefix = "dream:session:u:s"
+    expected = {
+        f"{prefix}:sequence",
+        f"{prefix}:messages",
+        f"{prefix}:summary",
+        f"{prefix}:event:event",
+    }
+    assert redis.ttls == {
+        key: 43_200 for key in expected
+    }
 
 
 @pytest.mark.asyncio
 async def test_compression_lease_is_exclusive_and_token_scoped(
+    redis: AsyncFakeRedis,
     memory_store: AsyncRedisMemoryStore,
 ) -> None:
     assert await memory_store.acquire_compression_lease("u", "s", "one")
@@ -88,6 +99,55 @@ async def test_compression_lease_is_exclusive_and_token_scoped(
     assert not await memory_store.release_compression_lease("u", "s", "two")
     assert await memory_store.release_compression_lease("u", "s", "one")
     assert await memory_store.acquire_compression_lease("u", "s", "two")
+    redis.expire_now("dream:session:u:s:compression-lock")
+    assert await memory_store.acquire_compression_lease("u", "s", "three")
+
+
+@pytest.mark.asyncio
+async def test_commit_rejects_different_digest_for_reserved_event(
+    memory_store: AsyncRedisMemoryStore,
+) -> None:
+    event = memory_event(sequence=1, event_id="event", content="original")
+    conflicting_event = memory_event(sequence=1, event_id="event", content="changed")
+    await memory_store.reserve_event("u", "s", event.event_id, event.sha256)
+
+    with pytest.raises(EventConflictError, match="digest"):
+        await memory_store.commit_event("u", "s", conflicting_event)
+
+    assert await memory_store.read_recent_originals("u", "s", 10) == ()
+
+
+@pytest.mark.asyncio
+async def test_commit_rejects_wrong_sequence_for_reserved_event(
+    memory_store: AsyncRedisMemoryStore,
+) -> None:
+    event = memory_event(sequence=1, event_id="event")
+    await memory_store.reserve_event("u", "s", event.event_id, event.sha256)
+
+    with pytest.raises(ValueError, match="sequence"):
+        await memory_store.commit_event(
+            "u", "s", event.model_copy(update={"sequence": 2})
+        )
+
+    assert await memory_store.read_recent_originals("u", "s", 10) == ()
+
+
+@pytest.mark.asyncio
+async def test_duplicate_rechecks_reservation_digest_and_sequence(
+    memory_store: AsyncRedisMemoryStore,
+) -> None:
+    event = memory_event(sequence=1, event_id="event")
+    await memory_store.reserve_event("u", "s", event.event_id, event.sha256)
+    assert await memory_store.commit_event("u", "s", event) == "committed"
+
+    with pytest.raises(EventConflictError, match="digest"):
+        await memory_store.commit_event(
+            "u", "s", memory_event(sequence=1, event_id="event", content="changed")
+        )
+    with pytest.raises(ValueError, match="sequence"):
+        await memory_store.commit_event(
+            "u", "s", event.model_copy(update={"sequence": 2})
+        )
 
 
 @pytest.mark.asyncio

@@ -39,13 +39,14 @@ COMMIT_EVENT_SCRIPT = """
 local status = redis.call('HGET', KEYS[4], 'status')
 if not status then return {'missing'} end
 if redis.call('HGET', KEYS[4], 'sequence') ~= ARGV[2] then return {'sequence_conflict'} end
+if redis.call('HGET', KEYS[4], 'digest') ~= ARGV[3] then return {'digest_conflict'} end
 if status == 'committed' then return {'duplicate'} end
 redis.call('RPUSH', KEYS[2], ARGV[1])
 redis.call('HSET', KEYS[4], 'status', 'committed')
-redis.call('EXPIRE', KEYS[2], ARGV[3])
-redis.call('EXPIRE', KEYS[3], ARGV[3])
-redis.call('EXPIRE', KEYS[4], ARGV[3])
-redis.call('EXPIRE', KEYS[1], ARGV[3])
+redis.call('EXPIRE', KEYS[2], ARGV[4])
+redis.call('EXPIRE', KEYS[3], ARGV[4])
+redis.call('EXPIRE', KEYS[4], ARGV[4])
+redis.call('EXPIRE', KEYS[1], ARGV[4])
 return {'committed'}
 """
 
@@ -110,6 +111,7 @@ class AsyncRedisMemoryStore:
             keys.event,
             event.model_dump_json(),
             str(event.sequence),
+            event.sha256,
             str(self.ttl_seconds),
         )
         status = self._result(result)[0]
@@ -117,6 +119,8 @@ class AsyncRedisMemoryStore:
             return status
         if status == "missing":
             raise ValueError("event must be reserved before it is committed")
+        if status == "digest_conflict":
+            raise EventConflictError("event digest does not match its reservation")
         raise ValueError("event sequence does not match its reservation")
 
     async def read_recent_originals(
