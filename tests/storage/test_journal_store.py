@@ -2,7 +2,11 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 
+import pytest
+
+from tests.factories import memory_event
 from short_term_memory.storage.journal_store import (
+    JournalConflictError,
     JournalFileEvent,
     JournalMessageEvent,
     JournalStore,
@@ -93,3 +97,60 @@ def test_session_read_sorts_daily_files_and_does_not_persist_scope_ids(
     for path in VFSAdapter(tmp_path).paths("user-1").journals.glob("*.jsonl"):
         assert "user_id" not in path.read_text(encoding="utf-8")
         assert "session_id" not in path.read_text(encoding="utf-8")
+
+
+def test_append_event_is_byte_preserving_and_idempotent(tmp_path: Path) -> None:
+    store = JournalStore(VFSAdapter(tmp_path))
+    event = memory_event(sequence=7, event_id="same", content="a\n中文\n")
+
+    first = store.append_event("u", "s", event)
+    second = store.append_event("u", "s", event)
+
+    assert first.appended is True
+    assert second.appended is False
+    assert store.find_event("u", "s", "same") == event
+    assert store.read_original_range("u", "s", 7, 7)[0].content == "a\n中文\n"
+    assert json.loads(first.path.read_text(encoding="utf-8")) == {
+        "type": "message",
+        "role": "user",
+        "content": "a\n中文\n",
+        "timestamp": event.created_at,
+        "event_id": "same",
+        "sequence": 7,
+        "content_type": "conversation",
+        "metadata": {},
+        "sha256": event.sha256,
+    }
+
+
+def test_same_event_id_with_different_digest_is_conflict(tmp_path: Path) -> None:
+    store = JournalStore(VFSAdapter(tmp_path))
+    store.append_event("u", "s", memory_event(event_id="same", content="one"))
+
+    with pytest.raises(JournalConflictError):
+        store.append_event("u", "s", memory_event(event_id="same", content="two"))
+
+
+def test_read_original_range_selects_only_requested_sequences(tmp_path: Path) -> None:
+    store = JournalStore(VFSAdapter(tmp_path))
+    for sequence in (1, 2, 3):
+        store.append_event(
+            "u",
+            "s",
+            memory_event(sequence=sequence, event_id=f"event-{sequence}"),
+        )
+
+    assert store.read_original_range("u", "s", 2, 2) == (
+        memory_event(sequence=2, event_id="event-2"),
+    )
+
+
+def test_incomplete_final_json_line_is_ignored_as_crash_residue(tmp_path: Path) -> None:
+    store = JournalStore(VFSAdapter(tmp_path))
+    event = memory_event(event_id="durable")
+    result = store.append_event("u", "s", event)
+    with result.path.open("a", encoding="utf-8") as handle:
+        handle.write('{"type":"message"')
+
+    assert store.find_event("u", "s", "durable") == event
+    assert store.read_original_range("u", "s", 1, 1) == (event,)
