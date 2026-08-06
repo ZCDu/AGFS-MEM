@@ -5,6 +5,7 @@ from short_term_memory.models import (
     MemoryContentType,
     MemoryEvent,
     MemorySummaryEnvelope,
+    SessionAttachmentReference,
     SessionCompressionContext,
     SessionCompressionMessage,
     SessionSummaryCoverage,
@@ -81,7 +82,7 @@ def test_memory_summary_envelope_preserves_semantic_summary_and_generations() ->
         updated_at="2026-08-06T00:00:00+00:00",
     )
 
-    assert envelope.current_goal == ["ship the schema"]
+    assert envelope.current_goal == ("ship the schema",)
 
 
 def test_memory_event_metadata_is_an_immutable_defensive_copy() -> None:
@@ -135,3 +136,86 @@ def test_memory_summary_envelope_generations_are_immutable() -> None:
 
     with pytest.raises(AttributeError):
         envelope.compression_generations.append(object())
+
+
+def test_memory_event_deep_copy_preserves_immutable_metadata() -> None:
+    event = MemoryEvent(
+        sequence=1,
+        event_id="event-1",
+        role="user",
+        content_type="conversation",
+        content="original",
+        metadata={"source": "test"},
+        sha256="a" * 64,
+        created_at="2026-08-06T00:00:00+00:00",
+    )
+
+    copied = event.model_copy(deep=True)
+
+    assert copied == event
+    with pytest.raises(TypeError):
+        copied.metadata["source"] = "changed"
+
+
+def test_compression_generation_deeply_freezes_opaque_messages_and_round_trips() -> None:
+    opaque_content = {"blocks": [{"anchors": ["opaque"]}]}
+    generation = CompressionGeneration(
+        generation=1,
+        from_sequence=1,
+        through_sequence=1,
+        messages=[SessionCompressionMessage(role="system", content=opaque_content)],
+        tokens_before=10,
+        tokens_after=4,
+        created_at="2026-08-06T00:00:00+00:00",
+        ccr_expires_at="2026-08-06T12:00:00+00:00",
+    )
+
+    opaque_content["blocks"][0]["anchors"].append("changed")
+
+    with pytest.raises(ValueError):
+        generation.messages[0].role = "user"
+    with pytest.raises(AttributeError):
+        generation.messages[0].content["blocks"][0]["anchors"].append("changed")
+    dumped = generation.model_dump(mode="json")
+    assert dumped["messages"] == [
+        {"role": "system", "content": {"blocks": [{"anchors": ["opaque"]}]}}
+    ]
+    assert CompressionGeneration.model_validate(dumped) == generation
+
+
+def test_memory_summary_envelope_freezes_all_semantic_collections_and_round_trips() -> None:
+    envelope = MemorySummaryEnvelope(
+        version=1,
+        compressed_through_sequence=0,
+        compression_generations=[],
+        current_goal=["ship"],
+        preferences=["brief"],
+        confirmed_facts=["fact"],
+        pending_items=["review"],
+        attachment_references=[
+            SessionAttachmentReference(placeholder="[a]", raw_ref="raw/a")
+        ],
+        updated_at="2026-08-06T00:00:00+00:00",
+    )
+
+    for values in (
+        envelope.current_goal,
+        envelope.preferences,
+        envelope.confirmed_facts,
+        envelope.pending_items,
+        envelope.attachment_references,
+    ):
+        with pytest.raises(AttributeError):
+            values.append("changed")
+        with pytest.raises(TypeError):
+            values[0] = "changed"
+
+    dumped = envelope.model_dump(mode="json")
+    assert dumped["current_goal"] == ["ship"]
+    assert dumped["preferences"] == ["brief"]
+    assert dumped["confirmed_facts"] == ["fact"]
+    assert dumped["pending_items"] == ["review"]
+    assert dumped["attachment_references"] == [
+        {"placeholder": "[a]", "raw_ref": "raw/a", "source_ref": None}
+    ]
+    assert MemorySummaryEnvelope.model_validate(dumped) == envelope

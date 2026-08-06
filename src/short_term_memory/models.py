@@ -62,6 +62,62 @@ class FrozenMetadata(dict[str, str]):
     def __ior__(self, other: object) -> "FrozenMetadata":
         raise TypeError("metadata is immutable")
 
+    def __copy__(self) -> "FrozenMetadata":
+        return type(self)(self)
+
+    def __deepcopy__(self, memo: dict[int, object]) -> "FrozenMetadata":
+        copied = type(self)(self)
+        memo[id(self)] = copied
+        return copied
+
+
+class FrozenOpaqueMapping(dict[object, Any]):
+    """A serializable frozen mapping for opaque Headroom message values."""
+
+    def __setitem__(self, key: object, value: Any) -> None:
+        raise TypeError("opaque content is immutable")
+
+    def __delitem__(self, key: object) -> None:
+        raise TypeError("opaque content is immutable")
+
+    def clear(self) -> None:
+        raise TypeError("opaque content is immutable")
+
+    def pop(self, key: object, default: Any = None) -> Any:
+        raise TypeError("opaque content is immutable")
+
+    def popitem(self) -> tuple[object, Any]:
+        raise TypeError("opaque content is immutable")
+
+    def setdefault(self, key: object, default: Any = None) -> Any:
+        raise TypeError("opaque content is immutable")
+
+    def update(self, *args: object, **kwargs: Any) -> None:
+        raise TypeError("opaque content is immutable")
+
+    def __ior__(self, other: object) -> "FrozenOpaqueMapping":
+        raise TypeError("opaque content is immutable")
+
+    def __copy__(self) -> "FrozenOpaqueMapping":
+        return type(self)(self)
+
+    def __deepcopy__(self, memo: dict[int, object]) -> "FrozenOpaqueMapping":
+        copied = type(self)({key: _freeze_opaque(value) for key, value in self.items()})
+        memo[id(self)] = copied
+        return copied
+
+
+def _freeze_opaque(value: Any) -> Any:
+    """Take an immutable snapshot without interpreting Headroom protocol data."""
+
+    if isinstance(value, dict):
+        return FrozenOpaqueMapping(
+            {key: _freeze_opaque(nested) for key, nested in value.items()}
+        )
+    if isinstance(value, (list, tuple)):
+        return tuple(_freeze_opaque(nested) for nested in value)
+    return value
+
 
 @dataclass(frozen=True)
 class HeadroomCompressionResult:
@@ -77,7 +133,7 @@ class HeadroomCompressionResult:
 
 
 class SessionAttachmentReference(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", frozen=True)
 
     placeholder: str = Field(min_length=1)
     raw_ref: str = Field(min_length=1)
@@ -123,10 +179,17 @@ class SessionSummaryCoverage(BaseModel):
 
 
 class SessionCompressionMessage(BaseModel):
-    model_config = ConfigDict(extra="allow")
+    model_config = ConfigDict(extra="allow", frozen=True)
 
     role: str = Field(min_length=1)
     content: Any = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def freeze_opaque_values(cls, values: Any) -> Any:
+        if not isinstance(values, dict):
+            return values
+        return {key: _freeze_opaque(value) for key, value in values.items()}
 
 
 class MemoryEvent(BaseModel):
@@ -184,12 +247,27 @@ class MemorySummaryEnvelope(SessionSummaryPayload):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
+    current_goal: tuple[str, ...]
+    preferences: tuple[str, ...]
+    confirmed_facts: tuple[str, ...]
+    pending_items: tuple[str, ...]
+    attachment_references: tuple[SessionAttachmentReference, ...]
     version: int = Field(ge=1)
     compressed_through_sequence: int = Field(ge=0)
     compression_generations: tuple[CompressionGeneration, ...] = Field(
         default_factory=tuple
     )
     updated_at: str = Field(min_length=1)
+
+    @field_validator(
+        "current_goal",
+        "preferences",
+        "confirmed_facts",
+        "pending_items",
+    )
+    @classmethod
+    def freeze_summary_items(cls, values: tuple[str, ...]) -> tuple[str, ...]:
+        return tuple(values)
 
 
 class SessionCompressionContext(BaseModel):
