@@ -107,6 +107,33 @@ def auth_headers(**extra: str) -> dict[str, str]:
     return {"authorization": "Bearer test-token", **extra}
 
 
+def business_scope(headers: list[tuple[bytes, bytes]]) -> dict[str, object]:
+    return {
+        "type": "http",
+        "asgi": {"version": "3.0"},
+        "http_version": "1.1",
+        "method": "POST",
+        "scheme": "http",
+        "path": "/v1/memories/write",
+        "raw_path": b"/v1/memories/write",
+        "query_string": b"",
+        "root_path": "",
+        "headers": headers,
+        "client": ("127.0.0.1", 12345),
+        "server": ("test", 80),
+    }
+
+
+async def call_asgi(app, scope, receive):
+    sent: list[dict[str, object]] = []
+
+    async def send(message):
+        sent.append(message)
+
+    await app(scope, receive, send)
+    return sent
+
+
 @pytest.mark.asyncio
 async def test_only_two_business_routes_exist_and_openapi_documents_auth() -> None:
     app = app_for(RecordingMemoryService())
@@ -177,11 +204,189 @@ async def test_missing_and_wrong_auth_return_identical_sanitized_401() -> None:
     assert "private-wrong-token" not in wrong.text
 
 
+@pytest.mark.asyncio
+async def test_unauthenticated_slow_body_is_rejected_without_receive_or_capacity() -> (
+    None
+):
+    service = RecordingMemoryService()
+    app = app_for(service, concurrency=1)
+    body_reads = 0
+    never_second_chunk = asyncio.Event()
+
+    async def slow_receive():
+        nonlocal body_reads
+        body_reads += 1
+        if body_reads == 1:
+            return {"type": "http.request", "body": b"{", "more_body": True}
+        await never_second_chunk.wait()
+        raise AssertionError("unreachable")
+
+    sent = await asyncio.wait_for(
+        call_asgi(
+            app,
+            business_scope([(b"content-type", b"application/json")]),
+            slow_receive,
+        ),
+        timeout=0.2,
+    )
+
+    assert body_reads == 0
+    assert sent[0]["status"] == 401
+    assert (b"www-authenticate", b"Bearer") in sent[0]["headers"]
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        legal = await client.post(
+            "/v1/memories/write", headers=auth_headers(), json=write_payload()
+        )
+    assert legal.status_code == 200
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "authorization",
+    [None, "Bearer wrong-token"],
+)
+async def test_unauthenticated_malformed_json_is_401_not_validation(
+    authorization: str | None,
+) -> None:
+    headers = {"content-type": "application/json"}
+    if authorization is not None:
+        headers["authorization"] = authorization
+    app = app_for(RecordingMemoryService())
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        response = await client.post(
+            "/v1/memories/write", headers=headers, content=b"not-json"
+        )
+
+    assert response.status_code == 401
+    assert response.json()["error"] == "unauthorized"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("authorization", [None, "Bearer wrong-OVERSIZED-SECRET"])
+async def test_unauthenticated_oversized_content_length_is_401_not_413(
+    authorization: str | None,
+) -> None:
+    headers = {"content-type": "application/json"}
+    if authorization is not None:
+        headers["authorization"] = authorization
+    app = app_for(RecordingMemoryService(), max_body_bytes=8)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        response = await client.post(
+            "/v1/memories/write", headers=headers, content=b"OVERSIZED-SECRET"
+        )
+
+    assert response.status_code == 401
+    assert response.json()["error"] == "unauthorized"
+    assert "OVERSIZED-SECRET" not in response.text
+
+
+@pytest.mark.asyncio
+async def test_unauthenticated_oversized_stream_is_401_without_consuming_stream() -> (
+    None
+):
+    yielded = False
+
+    async def private_stream():
+        nonlocal yielded
+        yielded = True
+        yield b"STREAM-SECRET-TOO-LARGE"
+
+    app = app_for(RecordingMemoryService(), max_body_bytes=8)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        response = await client.post(
+            "/v1/memories/write",
+            headers={"content-type": "application/json"},
+            content=private_stream(),
+        )
+
+    assert response.status_code == 401
+    assert yielded is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "authorization_headers",
+    [
+        [
+            (b"authorization", b"Bearer test-token"),
+            (b"authorization", b"Bearer test-token"),
+        ],
+        [(b"authorization", b"Bearer \xff")],
+    ],
+)
+async def test_duplicate_or_non_ascii_authorization_is_robustly_rejected(
+    authorization_headers: list[tuple[bytes, bytes]],
+) -> None:
+    app = app_for(RecordingMemoryService())
+    received = False
+
+    async def receive():
+        nonlocal received
+        received = True
+        return {"type": "http.request", "body": b"{}", "more_body": False}
+
+    sent = await call_asgi(app, business_scope(authorization_headers), receive)
+
+    assert received is False
+    assert sent[0]["status"] == 401
+
+
+@pytest.mark.asyncio
+async def test_preparse_401_has_request_id_metric_and_no_token_leak() -> None:
+    metrics = ApiMetrics()
+    app = create_app(
+        lambda: RecordingMemoryService(), settings=settings(), metrics=metrics
+    )
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        response = await client.post(
+            "/v1/memories/write",
+            headers={
+                "authorization": "Bearer WRONG-TOKEN-SECRET",
+                "x-request-id": "safe-request-401",
+                "content-type": "application/json",
+            },
+            content=b"not-read",
+        )
+        rendered = (await client.get("/metrics")).text
+
+    assert response.status_code == 401
+    assert response.headers["x-request-id"] == "safe-request-401"
+    assert response.json() == {
+        "error": "unauthorized",
+        "request_id": "safe-request-401",
+    }
+    assert 'status_class="4xx"' in rendered
+    assert "WRONG-TOKEN-SECRET" not in rendered
+
+
 def test_app_construction_enforces_auth_environment_policy() -> None:
     with pytest.raises(ValueError, match="MEMORY_API_AUTH_TOKEN"):
         app_for(RecordingMemoryService(), token="", environment="production")
 
     app_for(RecordingMemoryService(), token="", environment="development")
+
+
+@pytest.mark.asyncio
+async def test_development_blank_token_consistently_disables_preparse_auth() -> None:
+    service = RecordingMemoryService()
+    app = app_for(service, token="", environment="development")
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        response = await client.post("/v1/memories/write", json=write_payload())
+
+    assert response.status_code == 200
+    assert [call[0] for call in service.calls] == ["write"]
 
 
 @pytest.mark.asyncio

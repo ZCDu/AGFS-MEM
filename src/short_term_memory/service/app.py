@@ -61,11 +61,13 @@ class HttpControlMiddleware:
         max_body_bytes: int,
         concurrency_limit: int,
         metrics: ApiMetrics,
+        authenticator: BearerTokenAuthenticator,
     ) -> None:
         self.app = app
         self.max_body_bytes = max_body_bytes
         self.capacity = anyio.CapacityLimiter(concurrency_limit)
         self.metrics = metrics
+        self.authenticator = authenticator
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http":
@@ -99,6 +101,19 @@ class HttpControlMiddleware:
             try:
                 controlled_receive = receive
                 if path in _BUSINESS_PATHS:
+                    try:
+                        self.authenticator.verify(self._authorization(scope))
+                    except AuthenticationError:
+                        response_status = status.HTTP_401_UNAUTHORIZED
+                        await self._send_error(
+                            send,
+                            response_status,
+                            "unauthorized",
+                            request_id,
+                            extra_headers=((b"www-authenticate", b"Bearer"),),
+                        )
+                        return
+
                     try:
                         self.capacity.acquire_nowait()
                         acquired = True
@@ -173,6 +188,19 @@ class HttpControlMiddleware:
                 with suppress(ValueError):
                     return int(value)
                 return -1
+        return None
+
+    @staticmethod
+    def _authorization(scope: Scope) -> str | None:
+        values = [
+            value
+            for name, value in scope.get("headers", [])
+            if name.lower() == b"authorization"
+        ]
+        if len(values) != 1:
+            return None
+        with suppress(UnicodeDecodeError):
+            return values[0].decode("ascii")
         return None
 
     @staticmethod
@@ -257,6 +285,7 @@ def create_app(
         max_body_bytes=effective_settings.api.max_body_bytes,
         concurrency_limit=effective_settings.api.concurrency_limit,
         metrics=api_metrics,
+        authenticator=authenticator,
     )
 
     bearer_scheme = HTTPBearer(auto_error=False, scheme_name="HTTPBearer")
