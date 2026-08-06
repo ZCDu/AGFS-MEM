@@ -16,6 +16,7 @@ from short_term_memory.compression.scope import OptimizationScopeFactory
 from short_term_memory.config import ShortTermMemorySettings
 from short_term_memory.jobs.redis_compression_queue import CompressionJob
 from short_term_memory.models import MemoryEvent, MemorySummaryEnvelope
+from short_term_memory.ports import RebuildCompletionWaiter
 from short_term_memory.service.schemas import (
     EffectiveMemoryConfig,
     HeadroomProxyContext,
@@ -61,11 +62,15 @@ class MemoryService:
         headroom_proxy_url: str,
         clock: Callable[[], datetime] | None = None,
         policy_version: str = "v1",
+        rebuild_waiter: RebuildCompletionWaiter | None = None,
+        cold_rebuild_timeout_seconds: float | None = None,
     ) -> None:
         if not headroom_proxy_url:
             raise ValueError("headroom_proxy_url must not be blank")
         if not policy_version:
             raise ValueError("policy_version must not be blank")
+        if cold_rebuild_timeout_seconds is not None and cold_rebuild_timeout_seconds <= 0:
+            raise ValueError("cold_rebuild_timeout_seconds must be positive")
         self.store = store
         self.journals = journals
         self.assembler = assembler
@@ -77,6 +82,10 @@ class MemoryService:
         self.headroom_proxy_url = headroom_proxy_url.rstrip("/")
         self.clock = clock or (lambda: datetime.now(timezone.utc))
         self.policy_version = policy_version
+        self.rebuild_waiter = rebuild_waiter
+        self.cold_rebuild_timeout_seconds = (
+            cold_rebuild_timeout_seconds or settings.api.request_timeout_seconds
+        )
 
     async def write(
         self, request: MemoryWriteRequest, request_id: str
@@ -219,12 +228,10 @@ class MemoryService:
             return_exceptions=True,
         )
         redis_seconds = time.perf_counter() - redis_started
-        envelope = (
-            None if isinstance(envelope_result, Exception) else envelope_result
-        )
-        originals = (
-            () if isinstance(originals_result, Exception) else originals_result
-        )
+        self._raise_non_infrastructure(envelope_result)
+        self._raise_non_infrastructure(originals_result)
+        envelope = None if isinstance(envelope_result, Exception) else envelope_result
+        originals = () if isinstance(originals_result, Exception) else originals_result
         redis_failed = isinstance(envelope_result, Exception) or isinstance(
             originals_result, Exception
         )
@@ -240,9 +247,13 @@ class MemoryService:
                 history_turns,
             )
             if originals:
-                restored = await self.store.restore_originals(
-                    request.user_id, request.session_id, originals
-                )
+                try:
+                    restored = await self.store.restore_originals(
+                        request.user_id, request.session_id, originals
+                    )
+                except self._retryable_redis_errors:
+                    restored = True
+                    envelope = None
                 if not restored:
                     refreshed_envelope, refreshed_originals = await asyncio.gather(
                         self.store.read_envelope(request.user_id, request.session_id),
@@ -251,6 +262,8 @@ class MemoryService:
                         ),
                         return_exceptions=True,
                     )
+                    self._raise_non_infrastructure(refreshed_envelope)
+                    self._raise_non_infrastructure(refreshed_originals)
                     if not isinstance(refreshed_envelope, Exception):
                         envelope = refreshed_envelope
                     if not isinstance(refreshed_originals, Exception) and refreshed_originals:
@@ -264,22 +277,40 @@ class MemoryService:
                 )
 
         now = self._now()
-        latest_sequence = max((event.sequence for event in originals), default=0)
+        latest_sequence = max(
+            max((event.sequence for event in originals), default=0),
+            envelope.compressed_through_sequence if envelope is not None else 0,
+        )
+        expired = self._has_expired_generation(envelope, now)
         if latest_sequence and (envelope is None or self._requires_rebuild(envelope, now)):
             through_sequence = max(
                 latest_sequence,
                 envelope.compressed_through_sequence if envelope is not None else 0,
             )
             if through_sequence:
-                await self.compression_queue.enqueue(
-                    self._compression_job(
-                        request.user_id,
-                        request.session_id,
-                        envelope,
-                        through_sequence,
-                        rebuild=True,
-                    )
+                job = self._compression_job(
+                    request.user_id,
+                    request.session_id,
+                    envelope,
+                    through_sequence,
+                    rebuild=True,
                 )
+                try:
+                    await self.compression_queue.enqueue(
+                        job
+                    )
+                except self._retryable_redis_errors as error:
+                    if expired:
+                        raise MemoryReadUnavailableError(
+                            "cold rebuild enqueue is unavailable"
+                        ) from error
+                    if source != "journal_rebuild":
+                        raise
+                if expired:
+                    cold_started = time.perf_counter()
+                    envelope = await self._wait_for_cold_rebuild(job)
+                    recovery_seconds += time.perf_counter() - cold_started
+                    source = "journal_rebuild"
 
         assembly_started = time.perf_counter()
         messages = self.assembler.build_read_messages(envelope, originals, now)
@@ -367,6 +398,45 @@ class MemoryService:
             for generation in envelope.compression_generations
         )
 
+    def _has_expired_generation(
+        self, envelope: MemorySummaryEnvelope | None, now: datetime
+    ) -> bool:
+        return bool(
+            envelope is not None
+            and any(
+                self._aware_datetime(generation.ccr_expires_at) <= now
+                for generation in envelope.compression_generations
+            )
+        )
+
+    async def _wait_for_cold_rebuild(
+        self, job: CompressionJob
+    ) -> MemorySummaryEnvelope:
+        if self.rebuild_waiter is None:
+            raise MemoryReadUnavailableError("cold rebuild worker is unavailable")
+        try:
+            async with asyncio.timeout(self.cold_rebuild_timeout_seconds):
+                rebuilt = await self.rebuild_waiter.wait_for(
+                    job, self.cold_rebuild_timeout_seconds
+                )
+        except (TimeoutError, *self._retryable_redis_errors) as error:
+            raise MemoryReadUnavailableError("cold rebuild is unavailable") from error
+        now = self._now()
+        if (
+            rebuilt is None
+            or rebuilt.version <= job.expected_version
+            or rebuilt.compressed_through_sequence < job.requested_through_sequence
+            or self._has_expired_generation(rebuilt, now)
+            or not any(
+                generation.from_sequence <= 1
+                and generation.through_sequence >= job.requested_through_sequence
+                and self._aware_datetime(generation.ccr_expires_at) > now
+                for generation in rebuilt.compression_generations
+            )
+        ):
+            raise MemoryReadUnavailableError("cold rebuild did not produce fresh context")
+        return rebuilt
+
     def _now(self) -> datetime:
         value = self.clock()
         if value.tzinfo is None or value.utcoffset() is None:
@@ -385,3 +455,9 @@ class MemoryService:
         return (time.perf_counter() - started) * 1_000
 
     _retryable_redis_errors = (RedisError, OSError, TimeoutError, ConnectionError)
+
+    def _raise_non_infrastructure(self, result: object) -> None:
+        if isinstance(result, Exception) and not isinstance(
+            result, self._retryable_redis_errors
+        ):
+            raise result

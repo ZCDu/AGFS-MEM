@@ -11,6 +11,14 @@ from short_term_memory.models import (
 )
 
 
+class RebuildCompletionWaiter(Protocol):
+    """Worker-service completion boundary for cold CCR rebuilds."""
+
+    async def wait_for(
+        self, job: Any, timeout_seconds: float
+    ) -> MemorySummaryEnvelope | None: ...
+
+
 class AsyncMemoryStore(Protocol):
     """Async storage boundary for sequence-aware memory events."""
 

@@ -101,8 +101,8 @@ class AsyncFakeRedis:
         values = args[numkeys:]
         async with self._lock:
             if "dream:reserve-event" in script:
-                sequence_key, event_key = keys
-                digest, event_ttl, sequence_ttl = values
+                sequence_key, event_key, pending_key = keys
+                digest, event_ttl = values
                 record = self.hashes.get(event_key)
                 if record is not None:
                     if record["digest"] != digest:
@@ -115,12 +115,14 @@ class AsyncFakeRedis:
                     "status": "pending",
                     "sequence": str(sequence),
                 }
+                self.lists.setdefault(pending_key, []).append(event_key)
                 self.ttls[event_key] = int(event_ttl)
-                self.ttls[sequence_key] = int(sequence_ttl)
+                self.ttls[pending_key] = int(event_ttl)
+                self.ttls[sequence_key] = int(event_ttl)
                 return ["reserved", str(sequence)]
             if "dream:commit-event" in script:
-                sequence_key, messages_key, summary_key, event_key = keys
-                event_json, sequence, digest, ttl = values
+                sequence_key, messages_key, summary_key, event_key, pending_key = keys
+                event_json, sequence, digest, ttl, _ = values
                 record = self.hashes.get(event_key)
                 if record is None:
                     return ["missing"]
@@ -132,6 +134,10 @@ class AsyncFakeRedis:
                     return ["duplicate"]
                 self.lists.setdefault(messages_key, []).append(event_json)
                 record["status"] = "committed"
+                self.lists[pending_key] = [item for item in self.lists.get(pending_key, []) if item != event_key]
+                if not self.lists[pending_key]:
+                    self.lists.pop(pending_key, None)
+                    self.ttls.pop(pending_key, None)
                 for key in (messages_key, summary_key, event_key, sequence_key):
                     if key in self.lists or key in self.values or key in self.hashes:
                         self.ttls[key] = int(ttl)
@@ -139,7 +145,7 @@ class AsyncFakeRedis:
             if "dream:restore-originals-v1" in script:
                 import json
 
-                sequence_key, messages_key = keys
+                sequence_key, messages_key, pending_key = keys
                 originals = json.loads(values[0])
                 event_prefix, ttl, maximum = values[1:]
                 for event in originals:
@@ -149,7 +155,7 @@ class AsyncFakeRedis:
                         or record["sequence"] != str(event["sequence"])
                     ):
                         return ["conflict"]
-                if self.lists.get(messages_key) or int(self.values.get(sequence_key, "0")) > int(maximum):
+                if self.lists.get(messages_key) or sequence_key in self.values or self.lists.get(pending_key):
                     return ["not_restored"]
                 for event in originals:
                     event_key = f"{event_prefix}{event['event_id']}"

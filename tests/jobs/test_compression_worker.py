@@ -10,7 +10,12 @@ import pytest_asyncio
 from short_term_memory.compression.async_headroom_client import AsyncHeadroomClient
 from short_term_memory.compression.generations import GenerationPlanner
 from short_term_memory.compression.scope import OptimizationScopeFactory
-from short_term_memory.jobs.compression_worker import CompressionWorker, EmptySummaryModel
+from short_term_memory.jobs.compression_worker import (
+    CompressionWorkerResult,
+    CompressionWorker,
+    EmptySummaryModel,
+    InProcessRebuildWaiter,
+)
 from short_term_memory.jobs.redis_compression_queue import CompressionJob, RedisCompressionQueue
 from short_term_memory.models import (
     HeadroomCompressionResult,
@@ -145,6 +150,111 @@ async def test_explicit_rebuild_job_uses_journal_candidate_when_envelope_is_miss
     assert result.state == "acked"
     assert persisted is not None
     assert persisted.compressed_through_sequence == 10
+
+
+@pytest.mark.asyncio
+async def test_in_process_waiter_completes_a_durable_rebuild_through_worker_boundary(worker):
+    worker, _, _ = worker
+    job = compression_job(through_sequence=10).model_copy(update={"rebuild": True})
+    await worker.queue.enqueue(job)
+
+    envelope = await InProcessRebuildWaiter(worker).wait_for(job, timeout_seconds=1)
+
+    assert envelope is not None
+    assert envelope.compressed_through_sequence == 10
+    assert envelope.compression_generations[0].messages[0].content == "marker"
+
+
+@pytest.mark.asyncio
+async def test_in_process_waiter_continues_past_an_unrelated_queue_head():
+    class Store:
+        async def read_envelope(self, user_id, session_id):
+            return envelope(version=2, through=10)
+
+    class Worker:
+        def __init__(self):
+            self.store = Store()
+            self.results = iter((
+                CompressionWorkerResult("acked", job_id="other"),
+                CompressionWorkerResult("acked", job_id="target"),
+            ))
+
+        async def run_once(self):
+            return next(self.results)
+
+    job = compression_job(through_sequence=10).model_copy(update={"job_id": "target"})
+
+    result = await InProcessRebuildWaiter(Worker()).wait_for(job, timeout_seconds=1)
+
+    assert result is not None and result.version == 2
+
+
+@pytest.mark.asyncio
+async def test_waiter_accepts_fresh_target_session_envelope_after_target_job_is_coalesced(worker):
+    worker, _, _ = worker
+    worker.queue.capacity = 1
+    active = CompressionJob(
+        job_id="active", user_id="other", session_id="other",
+        expected_version=0, requested_through_sequence=1,
+    )
+    stronger = CompressionJob(
+        job_id="stronger", user_id="u", session_id="s",
+        expected_version=0, requested_through_sequence=10, rebuild=True,
+    )
+    target = CompressionJob(
+        job_id="target", user_id="u", session_id="s",
+        expected_version=0, requested_through_sequence=5, rebuild=True,
+    )
+    await worker.queue.enqueue(active)
+    await worker.queue.enqueue(stronger)
+    assert await worker.queue.enqueue(target) == "coalesced"
+    active_lease = await worker.queue.lease("other-worker", now_unix_ms=0)
+    assert active_lease is not None
+    assert await worker.queue.ack(active_lease)
+
+    envelope = await InProcessRebuildWaiter(worker).wait_for(target, timeout_seconds=0.05)
+
+    assert envelope is not None
+    assert envelope.version == 1
+    assert envelope.compressed_through_sequence == 10
+
+
+@pytest.mark.asyncio
+async def test_waiter_accepts_concurrent_fresh_envelope_when_target_finishes_stale():
+    class Store:
+        async def read_envelope(self, user_id, session_id):
+            return envelope(version=2, through=10)
+
+    class Worker:
+        store = Store()
+
+        async def run_once(self):
+            return CompressionWorkerResult("stale", job_id="target")
+
+    job = compression_job(through_sequence=10).model_copy(update={"job_id": "target"})
+
+    result = await InProcessRebuildWaiter(Worker()).wait_for(job, timeout_seconds=1)
+
+    assert result is not None and result.version == 2
+
+
+@pytest.mark.asyncio
+async def test_waiter_returns_already_fresh_target_session_when_queue_is_idle():
+    class Store:
+        async def read_envelope(self, user_id, session_id):
+            return envelope(version=2, through=10)
+
+    class Worker:
+        store = Store()
+
+        async def run_once(self):
+            return CompressionWorkerResult("idle")
+
+    target = compression_job(through_sequence=10).model_copy(update={"job_id": "target"})
+
+    result = await InProcessRebuildWaiter(Worker()).wait_for(target, timeout_seconds=0.05)
+
+    assert result is not None and result.version == 2
 
 
 @pytest.mark.asyncio

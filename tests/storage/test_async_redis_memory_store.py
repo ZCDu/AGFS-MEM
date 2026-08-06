@@ -160,10 +160,26 @@ async def test_restore_originals_preserves_sequences_and_advances_next_reservati
     )
 
     assert await memory_store.restore_originals("u", "s", originals) is True
-    assert await memory_store.read_recent_originals("u", "s", 5) == originals
+    assert await memory_store.read_recent_originals("u", "s", 10) == originals
     next_reservation = await memory_store.reserve_event("u", "s", "event-101", "a" * 64)
 
     assert next_reservation.sequence == 101
+
+
+@pytest.mark.asyncio
+async def test_restore_refuses_any_live_sequence_counter_or_reservation(
+    memory_store: AsyncRedisMemoryStore,
+) -> None:
+    first = await memory_store.reserve_event("u", "s", "live", "a" * 64)
+    originals = tuple(
+        memory_event(sequence=sequence, event_id=f"event-{sequence}")
+        for sequence in range(91, 101)
+    )
+
+    assert first.sequence == 1
+    assert not await memory_store.restore_originals("u", "s", originals)
+    assert (await memory_store.reserve_event("u", "s", "next", "b" * 64)).sequence == 2
+    assert await memory_store.read_recent_originals("u", "s", 5) == ()
 
 
 @pytest.mark.asyncio
@@ -215,6 +231,20 @@ async def test_read_recent_originals_interprets_limit_as_turns(
         await memory_store.commit_event("u", "s", event)
 
     assert await memory_store.read_recent_originals("u", "s", 1) == events[2:]
+
+
+@pytest.mark.asyncio
+async def test_recent_originals_are_sequence_ordered_even_if_committed_out_of_order(
+    redis: AsyncFakeRedis,
+    memory_store: AsyncRedisMemoryStore,
+) -> None:
+    later = memory_event(sequence=2, event_id="later", content="later")
+    first = memory_event(sequence=1, event_id="first", content="first")
+    redis.lists["dream:session:u:s:messages"] = [
+        later.model_dump_json(), first.model_dump_json()
+    ]
+
+    assert await memory_store.read_recent_originals("u", "s", 2) == (first, later)
 
 
 @pytest.mark.asyncio

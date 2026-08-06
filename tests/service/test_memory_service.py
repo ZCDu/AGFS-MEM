@@ -59,6 +59,8 @@ class RecordingStore:
 
     async def read_envelope(self, user_id, session_id):
         if self.fail_envelope_read:
+            if isinstance(self.fail_envelope_read, Exception):
+                raise self.fail_envelope_read
             raise OSError("redis unavailable")
         return self.envelope
 
@@ -107,11 +109,27 @@ class RecordingQueue:
     def __init__(self, calls):
         self.calls = calls
         self.jobs = []
+        self.error = None
 
     async def enqueue(self, job):
+        if self.error is not None:
+            raise self.error
         self.calls.append("enqueue")
         self.jobs.append(job)
         return "ready"
+
+
+class RecordingRebuildWaiter:
+    def __init__(self, envelope=None, error=None):
+        self.envelope = envelope
+        self.error = error
+        self.jobs = []
+
+    async def wait_for(self, job, timeout_seconds):
+        self.jobs.append((job, timeout_seconds))
+        if self.error is not None:
+            raise self.error
+        return self.envelope
 
 
 class RecordingPolicy(HeadroomPolicy):
@@ -336,12 +354,65 @@ async def test_expired_generation_degrades_to_originals_but_keeps_redis_source(s
     service.store.seed_envelope(envelope(through=1, generations=[expired]))
     service.store.events.append(memory_event())
 
+    fresh = CompressionGeneration(
+        generation=2, from_sequence=1, through_sequence=1,
+        messages=({"role": "system", "content": "FRESH"},), tokens_before=2,
+        tokens_after=1, created_at=now.isoformat(),
+        ccr_expires_at=(now + timedelta(hours=1)).isoformat(),
+    )
+    service.rebuild_waiter = RecordingRebuildWaiter(
+        envelope(version=2, through=1, generations=[fresh])
+    )
+
     response = await service.read(read_request(), "req-1")
 
-    assert response.memory.source == "redis"
-    assert response.memory.compression_segments == 0
+    assert response.memory.source == "journal_rebuild"
+    assert response.memory.compression_segments == 1
     assert all("EXPIRED" not in str(message.content) for message in response.messages)
     assert service.compression_queue.jobs[-1].rebuild is True
+    assert service.rebuild_waiter.jobs[-1][0].rebuild is True
+    assert response.timing_ms.recovery > 0
+
+
+@pytest.mark.asyncio
+async def test_expired_generation_times_out_without_exposing_expired_opaque(service):
+    now = datetime(2026, 8, 6, tzinfo=timezone.utc)
+    expired = CompressionGeneration(
+        generation=1, from_sequence=1, through_sequence=1,
+        messages=({"role": "system", "content": "EXPIRED"},), tokens_before=2,
+        tokens_after=1, created_at=(now - timedelta(hours=2)).isoformat(),
+        ccr_expires_at=(now - timedelta(hours=1)).isoformat(),
+    )
+    service.store.seed_envelope(envelope(through=1, generations=[expired]))
+    service.store.events.append(memory_event())
+    service.rebuild_waiter = RecordingRebuildWaiter(error=TimeoutError("timed out"))
+
+    with pytest.raises(MemoryReadUnavailableError, match="cold rebuild"):
+        await service.read(read_request(), "req-1")
+
+
+@pytest.mark.asyncio
+async def test_expired_generation_rejects_waiter_result_without_new_coverage(service):
+    now = datetime(2026, 8, 6, tzinfo=timezone.utc)
+    expired = CompressionGeneration(
+        generation=1, from_sequence=1, through_sequence=1,
+        messages=({"role": "system", "content": "EXPIRED"},), tokens_before=2,
+        tokens_after=1, created_at=(now - timedelta(hours=2)).isoformat(),
+        ccr_expires_at=(now - timedelta(hours=1)).isoformat(),
+    )
+    service.store.seed_envelope(envelope(version=1, through=1, generations=[expired]))
+    service.store.events.append(memory_event())
+    fresh_but_stale_version = CompressionGeneration(
+        generation=2, from_sequence=1, through_sequence=1,
+        messages=({"role": "system", "content": "FRESH"},), tokens_before=2,
+        tokens_after=1, created_at=now.isoformat(), ccr_expires_at=(now + timedelta(hours=1)).isoformat(),
+    )
+    service.rebuild_waiter = RecordingRebuildWaiter(
+        envelope(version=1, through=1, generations=[fresh_but_stale_version])
+    )
+
+    with pytest.raises(MemoryReadUnavailableError, match="fresh context"):
+        await service.read(read_request(), "req-1")
 
 
 @pytest.mark.asyncio
@@ -358,11 +429,38 @@ async def test_redis_read_failure_recovers_from_journal_without_aborting(service
 
 
 @pytest.mark.asyncio
+async def test_journal_read_survives_redis_restore_and_queue_infrastructure_failures(service):
+    recovered = memory_event(sequence=1, event_id="journal", content="journal")
+    service.journals.events.append(recovered)
+    service.store.fail_envelope_read = True
+    service.store.fail_original_read = True
+
+    async def unavailable_restore(*args):
+        raise OSError("redis restore unavailable")
+
+    service.store.restore_originals = unavailable_restore
+    service.compression_queue.error = OSError("queue unavailable")
+
+    response = await service.read(read_request(), "req-1")
+
+    assert response.memory.source == "journal_rebuild"
+    assert response.messages[-1].content == "journal"
+
+
+@pytest.mark.asyncio
 async def test_redis_read_failure_with_empty_journal_is_explicit(service):
     service.store.fail_envelope_read = True
     service.store.fail_original_read = True
 
     with pytest.raises(MemoryReadUnavailableError):
+        await service.read(read_request(), "req-1")
+
+
+@pytest.mark.asyncio
+async def test_read_propagates_non_infrastructure_redis_corruption(service):
+    service.store.fail_envelope_read = ValueError("corrupt envelope")
+
+    with pytest.raises(ValueError, match="corrupt envelope"):
         await service.read(read_request(), "req-1")
 
 

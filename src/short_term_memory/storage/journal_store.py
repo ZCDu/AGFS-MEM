@@ -11,6 +11,7 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 from short_term_memory.models import MemoryContentType, MemoryEvent
+from short_term_memory.storage.recent_originals import select_recent_turns
 from short_term_memory.storage.vfs_adapter import VFSAdapter, safe_component
 
 
@@ -172,47 +173,56 @@ class JournalStore:
     def read_recent_originals(
         self, user_id: str, session_id: str, history_turns: int
     ) -> tuple[MemoryEvent, ...]:
-        """Read at most two original events per turn, newest first on disk."""
+        """Read recent complete user turns from reverse-buffered journal files."""
 
         if history_turns < 1:
             raise ValueError("history_turns must be positive")
         with self._session_lock(user_id, session_id):
+            originals: list[MemoryEvent] = []
             session = safe_component(session_id, "session_id")
             directory = self.vfs.paths(user_id).journals
-            limit = history_turns * 2
-            selected: list[MemoryEvent] = []
             for path in sorted(directory.glob(f"*-{session}.jsonl"), reverse=True):
-                with path.open("r", encoding="utf-8") as handle:
-                    lines = handle.readlines()
-                for index in range(len(lines) - 1, -1, -1):
-                    line = lines[index]
+                first_line = True
+                for line in self._reverse_lines(path):
                     if not line.strip():
                         raise json.JSONDecodeError("blank journal line", line, 0)
                     try:
                         raw = json.loads(line)
                     except json.JSONDecodeError:
-                        if index == len(lines) - 1 and not line.endswith("\n"):
+                        if first_line and not line.endswith("\n"):
+                            first_line = False
                             continue
                         raise
+                    first_line = False
                     if raw.get("type") == "message":
                         record = JournalMessageEvent.model_validate(raw)
                         if record.sequence is not None:
-                            selected.append(self._memory_event(record))
-                            if len(selected) >= limit:
-                                events = tuple(reversed(selected))
-                                return (
-                                    events[1:]
-                                    if events and events[0].role.value == "assistant"
-                                    else events
-                                )
+                            originals.append(self._memory_event(record))
                     elif raw.get("type") != "file":
                         raise ValueError(f"unknown journal event type in {path.name}")
-            events = tuple(reversed(selected))
-            return (
-                events[1:]
-                if events and events[0].role.value == "assistant"
-                else events
-            )
+            return select_recent_turns(originals, history_turns)
+
+    @staticmethod
+    def _reverse_lines(path: Path, block_size: int = 8_192):
+        """Yield UTF-8 journal lines backwards using a fixed-size read buffer."""
+
+        with path.open("rb") as handle:
+            handle.seek(0, os.SEEK_END)
+            offset = handle.tell()
+            carry = b""
+            while offset:
+                size = min(block_size, offset)
+                offset -= size
+                handle.seek(offset)
+                parts = (handle.read(size) + carry).splitlines(keepends=True)
+                if offset:
+                    carry = parts.pop(0) if parts else b""
+                else:
+                    carry = b""
+                for line in reversed(parts):
+                    yield line.decode("utf-8")
+            if carry:
+                yield carry.decode("utf-8")
 
     def read_session(self, user_id: str, session_id: str) -> tuple[JournalRecord, ...]:
         with self._session_lock(user_id, session_id):

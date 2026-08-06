@@ -4,6 +4,7 @@ import json
 from typing import Any, Literal, Protocol
 
 from short_term_memory.models import EventReservation, MemoryEvent, MemorySummaryEnvelope
+from short_term_memory.storage.recent_originals import select_recent_turns
 from short_term_memory.storage.vfs_adapter import safe_component
 
 
@@ -30,8 +31,10 @@ if digest then
 end
 local sequence = redis.call('INCR', KEYS[1])
 redis.call('HSET', KEYS[2], 'digest', ARGV[1], 'status', 'pending', 'sequence', sequence)
+redis.call('SADD', KEYS[3], ARGV[3])
 redis.call('EXPIRE', KEYS[2], ARGV[2])
-redis.call('EXPIRE', KEYS[1], ARGV[3])
+redis.call('EXPIRE', KEYS[3], ARGV[2])
+redis.call('EXPIRE', KEYS[1], ARGV[2])
 return {'reserved', tostring(sequence)}
 """
 
@@ -44,6 +47,8 @@ if redis.call('HGET', KEYS[4], 'digest') ~= ARGV[3] then return {'digest_conflic
 if status == 'committed' then return {'duplicate'} end
 redis.call('RPUSH', KEYS[2], ARGV[1])
 redis.call('HSET', KEYS[4], 'status', 'committed')
+redis.call('SREM', KEYS[5], ARGV[5])
+if redis.call('SCARD', KEYS[5]) == 0 then redis.call('DEL', KEYS[5]) end
 redis.call('EXPIRE', KEYS[2], ARGV[4])
 redis.call('EXPIRE', KEYS[3], ARGV[4])
 redis.call('EXPIRE', KEYS[4], ARGV[4])
@@ -66,8 +71,9 @@ for _, event in ipairs(originals) do
   end
 end
 if redis.call('LLEN', KEYS[2]) > 0 then return {'not_restored'} end
-local counter = tonumber(redis.call('GET', KEYS[1]) or '0')
-if counter > maximum then return {'not_restored'} end
+if redis.call('EXISTS', KEYS[1]) == 1 or redis.call('SCARD', KEYS[3]) > 0 then
+  return {'not_restored'}
+end
 for _, event in ipairs(originals) do
   local key = event_prefix .. event.event_id
   redis.call('HSET', key, 'digest', event.sha256, 'status', 'committed',
@@ -116,11 +122,11 @@ class AsyncRedisMemoryStore:
         keys = self._keys(user_id, session_id, event_id)
         result = await self.client.eval(
             RESERVE_EVENT_SCRIPT,
-            2,
+            3,
             keys.sequence,
             keys.event,
+            keys.pending_reservations,
             digest,
-            str(self.ttl_seconds),
             str(self.ttl_seconds),
         )
         state, sequence = self._result(result)
@@ -134,15 +140,17 @@ class AsyncRedisMemoryStore:
         keys = self._keys(user_id, session_id, event.event_id)
         result = await self.client.eval(
             COMMIT_EVENT_SCRIPT,
-            4,
+            5,
             keys.sequence,
             keys.messages,
             keys.summary,
             keys.event,
+            keys.pending_reservations,
             event.model_dump_json(),
             str(event.sequence),
             event.sha256,
             str(self.ttl_seconds),
+            event.event_id,
         )
         status = self._result(result)[0]
         if status in {"committed", "duplicate"}:
@@ -171,9 +179,10 @@ class AsyncRedisMemoryStore:
         keys = self._keys(user_id, session_id)
         result = await self.client.eval(
             RESTORE_ORIGINALS_SCRIPT,
-            2,
+            3,
             keys.sequence,
             keys.messages,
+            keys.pending_reservations,
             json.dumps(
                 [event.model_dump(mode="json") for event in originals],
                 ensure_ascii=False,
@@ -198,10 +207,9 @@ class AsyncRedisMemoryStore:
         if history_turns < 1:
             raise ValueError("history_turns must be positive")
         keys = self._keys(user_id, session_id)
-        events = self._events(
-            await self.client.lrange(keys.messages, -(history_turns * 2), -1)
+        return select_recent_turns(
+            self._events(await self.client.lrange(keys.messages, 0, -1)), history_turns
         )
-        return events[1:] if events and events[0].role.value == "assistant" else events
 
     async def read_originals_after(
         self, user_id: str, session_id: str, sequence: int
@@ -298,6 +306,7 @@ class AsyncRedisMemoryStore:
                 else ""
             ),
             compression_lock=f"{prefix}:compression-lock",
+            pending_reservations=f"{prefix}:pending-reservations",
         )
 
 
@@ -310,9 +319,11 @@ class _Keys:
         summary: str,
         event: str,
         compression_lock: str,
+        pending_reservations: str,
     ) -> None:
         self.sequence = sequence
         self.messages = messages
         self.summary = summary
         self.event = event
         self.compression_lock = compression_lock
+        self.pending_reservations = pending_reservations

@@ -41,7 +41,20 @@ class QueueRedis:
             payload, job_id, session_key, capacity = values
             existing = self.values.get(job_key)
             if existing is not None:
-                return ["idempotent" if existing == payload else "conflict"]
+                if existing == payload:
+                    return ["idempotent"]
+                old, incoming = json.loads(existing), json.loads(payload)
+                if (
+                    old["job_id"] == incoming["job_id"]
+                    and old["user_id"] == incoming["user_id"]
+                    and old["session_id"] == incoming["session_id"]
+                    and old["expected_version"] >= incoming["expected_version"]
+                    and old["requested_through_sequence"]
+                    >= incoming["requested_through_sequence"]
+                    and (old.get("rebuild", False) or not incoming.get("rebuild", False))
+                ):
+                    return ["idempotent"]
+                return ["conflict"]
             self.values[job_key] = payload
             if len(self._ready(ready_key)) < int(capacity):
                 self._ready(ready_key).append(job_id)
@@ -54,25 +67,25 @@ class QueueRedis:
                 previous_payload = self.values.get(previous_key)
                 if previous_payload is not None:
                     old, new = json.loads(previous_payload), json.loads(payload)
-                    old_wins = (
-                        old["expected_version"] > new["expected_version"]
-                        or (
-                            old["expected_version"] == new["expected_version"]
-                            and (
-                                old["requested_through_sequence"]
-                                > new["requested_through_sequence"]
-                                or (
-                                    old["requested_through_sequence"]
-                                    == new["requested_through_sequence"]
-                                    and old.get("rebuild", False)
-                                    and not new.get("rebuild", False)
-                                )
-                            )
-                        )
+                    expected_version = max(
+                        old["expected_version"], new["expected_version"]
                     )
-                    if old_wins:
+                    through_sequence = max(
+                        old["requested_through_sequence"],
+                        new["requested_through_sequence"],
+                    )
+                    rebuild = old.get("rebuild", False) or new.get("rebuild", False)
+                    if (
+                        expected_version == old["expected_version"]
+                        and through_sequence == old["requested_through_sequence"]
+                        and rebuild == old.get("rebuild", False)
+                    ):
                         self.values.pop(job_key, None)
                         return ["coalesced"]
+                    new["expected_version"] = expected_version
+                    new["requested_through_sequence"] = through_sequence
+                    new["rebuild"] = rebuild
+                    self.values[job_key] = json.dumps(new, separators=(",", ":"))
                 self.values.pop(previous_key, None)
             self.values[pointer] = job_id
             self._set(pending_key).add(session_key)
@@ -175,6 +188,70 @@ async def test_rebuild_intent_survives_queue_round_trip_and_wins_same_coverage()
     lease = await queue.lease("worker", now_unix_ms=1)
 
     assert lease is not None and lease.job.rebuild is True
+
+
+@pytest.mark.asyncio
+async def test_pending_merge_keeps_larger_normal_coverage_and_rebuild_intent():
+    redis = QueueRedis()
+    queue = RedisCompressionQueue(redis, capacity=1)
+    await queue.enqueue(compression_job(job_id="active", session_id="active"))
+    rebuild = compression_job(job_id="rebuild", session_id="pending").model_copy(
+        update={"rebuild": True}
+    )
+    larger_normal = compression_job(
+        job_id="normal", session_id="pending", through_sequence=20
+    )
+    await queue.enqueue(rebuild)
+    assert await queue.enqueue(larger_normal) == "pending"
+    active = await queue.lease("active", now_unix_ms=0)
+    assert active is not None
+    await queue.ack(active)
+
+    lease = await queue.lease("worker", now_unix_ms=1)
+
+    assert lease is not None
+    assert lease.job.requested_through_sequence == 20
+    assert lease.job.rebuild is True
+
+
+@pytest.mark.asyncio
+async def test_pending_merge_keeps_rebuild_when_higher_version_normal_arrives():
+    redis = QueueRedis()
+    queue = RedisCompressionQueue(redis, capacity=1)
+    await queue.enqueue(compression_job(job_id="active", session_id="active"))
+    rebuild = compression_job(
+        job_id="rebuild", session_id="pending", through_sequence=100
+    ).model_copy(update={"rebuild": True})
+    newer_normal = compression_job(
+        job_id="newer", session_id="pending", expected_version=1, through_sequence=10
+    )
+    await queue.enqueue(rebuild)
+    assert await queue.enqueue(newer_normal) == "pending"
+    active = await queue.lease("active", now_unix_ms=0)
+    assert active is not None
+    await queue.ack(active)
+
+    lease = await queue.lease("worker", now_unix_ms=1)
+
+    assert lease is not None
+    assert lease.job.expected_version == 1
+    assert lease.job.requested_through_sequence == 100
+    assert lease.job.rebuild is True
+
+
+@pytest.mark.asyncio
+async def test_original_retry_of_a_merged_pending_job_is_idempotent_not_conflict():
+    redis = QueueRedis()
+    queue = RedisCompressionQueue(redis, capacity=1)
+    await queue.enqueue(compression_job(job_id="active", session_id="active"))
+    rebuild = compression_job(job_id="rebuild", session_id="pending").model_copy(
+        update={"rebuild": True}
+    )
+    normal = compression_job(job_id="normal", session_id="pending", through_sequence=20)
+    await queue.enqueue(rebuild)
+    await queue.enqueue(normal)
+
+    assert await queue.enqueue(normal) == "idempotent"
 
 
 @pytest.mark.asyncio

@@ -38,6 +38,7 @@ class EmptySummaryModel:
 @dataclass(frozen=True)
 class CompressionWorkerResult:
     state: str
+    job_id: str | None = None
 
 
 class CompressionWorker:
@@ -248,10 +249,57 @@ class CompressionWorker:
         retry_now = self._now()
         result = await self.queue.retry(lease, now_unix_ms=self._unix_ms(retry_now))
         if result == "dead":
-            return CompressionWorkerResult("dead")
+            return CompressionWorkerResult("dead", lease.job.job_id)
         if result == "lost":
-            return CompressionWorkerResult("lost")
-        return CompressionWorkerResult(state)
+            return CompressionWorkerResult("lost", lease.job.job_id)
+        return CompressionWorkerResult(state, lease.job.job_id)
 
     async def _ack(self, lease: CompressionJobLease, state: str) -> CompressionWorkerResult:
-        return CompressionWorkerResult(state if await self.queue.ack(lease) else "lost")
+        return CompressionWorkerResult(
+            state if await self.queue.ack(lease) else "lost", lease.job.job_id
+        )
+
+
+class InProcessRebuildWaiter:
+    """Explicit worker-service boundary for a bounded cold-rebuild wait."""
+
+    def __init__(self, worker: CompressionWorker) -> None:
+        self.worker = worker
+        self._locks: dict[tuple[str, str], asyncio.Lock] = {}
+
+    async def wait_for(self, job, timeout_seconds: float) -> MemorySummaryEnvelope | None:
+        if timeout_seconds <= 0:
+            raise ValueError("timeout_seconds must be positive")
+        lock = self._locks.setdefault((job.user_id, job.session_id), asyncio.Lock())
+        async with lock:
+            async with asyncio.timeout(timeout_seconds):
+                while True:
+                    envelope = await self.worker.store.read_envelope(
+                        job.user_id, job.session_id
+                    )
+                    if self._matches(job, envelope):
+                        return envelope
+                    result = await self.worker.run_once()
+                    if result.state == "acked":
+                        envelope = await self.worker.store.read_envelope(
+                            job.user_id, job.session_id
+                        )
+                        if self._matches(job, envelope):
+                            return envelope
+                    if result.job_id == job.job_id:
+                        envelope = await self.worker.store.read_envelope(
+                            job.user_id, job.session_id
+                        )
+                        if self._matches(job, envelope):
+                            return envelope
+                        return None
+                    if result.state == "idle":
+                        await asyncio.sleep(0.01)
+
+    @staticmethod
+    def _matches(job, envelope: MemorySummaryEnvelope | None) -> bool:
+        return bool(
+            envelope is not None
+            and envelope.version > job.expected_version
+            and envelope.compressed_through_sequence >= job.requested_through_sequence
+        )

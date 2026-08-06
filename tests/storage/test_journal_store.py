@@ -163,6 +163,18 @@ def test_read_recent_originals_uses_turns_and_never_starts_with_assistant(
     assert store.read_recent_originals("u", "s", 1) == events[2:]
 
 
+def test_recent_originals_are_sorted_by_sequence_after_out_of_order_appends(
+    tmp_path: Path,
+) -> None:
+    store = JournalStore(VFSAdapter(tmp_path))
+    later = memory_event(sequence=2, event_id="later", content="later")
+    first = memory_event(sequence=1, event_id="first", content="first")
+    store.append_event("u", "s", later)
+    store.append_event("u", "s", first)
+
+    assert store.read_recent_originals("u", "s", 2) == (first, later)
+
+
 def test_incomplete_final_json_line_is_ignored_as_crash_residue(tmp_path: Path) -> None:
     store = JournalStore(VFSAdapter(tmp_path))
     event = memory_event(event_id="durable")

@@ -39,6 +39,15 @@ ENQUEUE_SCRIPT = """
 local existing = redis.call('GET', KEYS[1])
 if existing then
   if existing == ARGV[1] then return {'idempotent'} end
+  local old = cjson.decode(existing)
+  local incoming = cjson.decode(ARGV[1])
+  if old.job_id == incoming.job_id and old.user_id == incoming.user_id
+    and old.session_id == incoming.session_id
+    and old.expected_version >= incoming.expected_version
+    and old.requested_through_sequence >= incoming.requested_through_sequence
+    and ((old.rebuild == true) or (incoming.rebuild ~= true)) then
+    return {'idempotent'}
+  end
   return {'conflict'}
 end
 redis.call('SET', KEYS[1], ARGV[1])
@@ -54,15 +63,20 @@ if previous and previous ~= ARGV[2] then
   if previous_payload then
     local old = cjson.decode(previous_payload)
     local new = cjson.decode(ARGV[1])
-    local old_wins = old.expected_version > new.expected_version
-      or (old.expected_version == new.expected_version and (
-        old.requested_through_sequence > new.requested_through_sequence
-        or (old.requested_through_sequence == new.requested_through_sequence
-          and (old.rebuild == true) and (new.rebuild ~= true))))
-    if old_wins then
+    local expected_version = math.max(old.expected_version, new.expected_version)
+    local through_sequence = math.max(
+      old.requested_through_sequence, new.requested_through_sequence)
+    local rebuild = (old.rebuild == true) or (new.rebuild == true)
+    if expected_version == old.expected_version
+      and through_sequence == old.requested_through_sequence
+      and rebuild == (old.rebuild == true) then
       redis.call('DEL', KEYS[1])
       return {'coalesced'}
     end
+    new.expected_version = expected_version
+    new.requested_through_sequence = through_sequence
+    new.rebuild = rebuild
+    redis.call('SET', KEYS[1], cjson.encode(new))
   end
   redis.call('DEL', KEYS[6] .. previous)
 end
