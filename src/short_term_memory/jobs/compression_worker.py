@@ -113,16 +113,13 @@ class CompressionWorker:
         envelope = await self.store.read_envelope(job.user_id, job.session_id)
         current_version = envelope.version if envelope is not None else 0
         if current_version != job.expected_version:
-            await self.queue.ack(lease)
-            return CompressionWorkerResult("stale")
+            return await self._ack(lease, "stale")
 
         candidate = await self._candidate(job, envelope, now)
         if candidate is None or candidate.expected_version != job.expected_version:
-            await self.queue.ack(lease)
-            return CompressionWorkerResult("stale")
+            return await self._ack(lease, "stale")
         if not candidate.originals:
-            await self.queue.ack(lease)
-            return CompressionWorkerResult("acked")
+            return await self._ack(lease, "acked")
 
         # Headroom input is constructed exclusively from the selected journal
         # originals.  No summary envelope or prior generation is ever included.
@@ -150,8 +147,7 @@ class CompressionWorker:
         written = await self.store.compare_and_set_envelope(
             job.user_id, job.session_id, job.expected_version, next_envelope
         )
-        await self.queue.ack(lease)
-        return CompressionWorkerResult("acked" if written else "stale")
+        return await self._ack(lease, "acked" if written else "stale")
 
     async def _candidate(
         self, job, envelope: MemorySummaryEnvelope | None, now: datetime
@@ -243,4 +239,11 @@ class CompressionWorker:
         self, lease: CompressionJobLease, now: datetime, state: str
     ) -> CompressionWorkerResult:
         result = await self.queue.retry(lease, now_unix_ms=self._unix_ms(now))
-        return CompressionWorkerResult("dead" if result == "dead" else state)
+        if result == "dead":
+            return CompressionWorkerResult("dead")
+        if result == "lost":
+            return CompressionWorkerResult("lost")
+        return CompressionWorkerResult(state)
+
+    async def _ack(self, lease: CompressionJobLease, state: str) -> CompressionWorkerResult:
+        return CompressionWorkerResult(state if await self.queue.ack(lease) else "lost")

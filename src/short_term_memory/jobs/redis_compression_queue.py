@@ -1,17 +1,21 @@
-"""Durable Redis queue for deferred Headroom compression jobs."""
+"""Durable Redis state machine for deferred Headroom compression jobs."""
 
 from dataclasses import dataclass
 from typing import Any, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from short_term_memory.storage.vfs_adapter import safe_component
+
 
 class AsyncRedisQueueClient(Protocol):
     async def eval(self, script: str, numkeys: int, *args: str) -> Any: ...
 
+    async def zcard(self, key: str) -> int: ...
+
 
 class CompressionJob(BaseModel):
-    """The persistent payload; it contains no conversation content."""
+    """Persistent compression intent. Conversation content never enters a job."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -30,58 +34,117 @@ class CompressionJobLease:
 
 
 ENQUEUE_SCRIPT = """
--- dream:compression:enqueue
-redis.call('SET', KEYS[1], ARGV[1])
-if redis.call('LLEN', KEYS[2]) >= tonumber(ARGV[4]) then
-  redis.call('SADD', KEYS[3], ARGV[3])
-  return {'pending'}
+-- dream:compression:enqueue-v2
+local existing = redis.call('GET', KEYS[1])
+if existing then
+  if existing == ARGV[1] then return {'idempotent'} end
+  return {'conflict'}
 end
-redis.call('RPUSH', KEYS[2], ARGV[2])
-return {'ready'}
+redis.call('SET', KEYS[1], ARGV[1])
+if redis.call('LLEN', KEYS[2]) < tonumber(ARGV[4]) then
+  redis.call('RPUSH', KEYS[2], ARGV[2])
+  redis.call('SADD', KEYS[3], ARGV[2])
+  return {'ready'}
+end
+local pointer = KEYS[5] .. ARGV[3]
+local previous = redis.call('GET', pointer)
+if previous and previous ~= ARGV[2] then
+  redis.call('DEL', 'dream:compression:job:' .. previous)
+end
+redis.call('SET', pointer, ARGV[2])
+redis.call('SADD', KEYS[4], ARGV[3])
+return {'pending'}
 """
 
 LEASE_SCRIPT = """
--- dream:compression:lease
-local due = redis.call('ZRANGEBYSCORE', KEYS[2], '-inf', ARGV[1])
-for _, job_id in ipairs(due) do
-  if redis.call('ZREM', KEYS[2], job_id) == 1 then
-    redis.call('RPUSH', KEYS[1], job_id)
+-- dream:compression:lease-v2
+local function publish(job_id)
+  if redis.call('SISMEMBER', KEYS[2], job_id) == 1 then return end
+  if redis.call('ZSCORE', KEYS[3], job_id) then return end
+  if redis.call('ZSCORE', KEYS[4], job_id) then return end
+  redis.call('RPUSH', KEYS[1], job_id)
+  redis.call('SADD', KEYS[2], job_id)
+end
+for _, job_id in ipairs(redis.call('ZRANGEBYSCORE', KEYS[3], '-inf', ARGV[1])) do
+  if redis.call('ZREM', KEYS[3], job_id) == 1 then
+    redis.call('DEL', KEYS[7] .. job_id)
+    if redis.call('GET', KEYS[8] .. job_id) then
+      publish(job_id)
+    else
+      redis.call('ZADD', KEYS[6], ARGV[1], job_id)
+    end
   end
 end
-local job_id = redis.call('LPOP', KEYS[1])
-if not job_id then return {''} end
-redis.call('SET', KEYS[3] .. job_id, ARGV[2], 'PX', ARGV[3])
-return {job_id}
+for _, job_id in ipairs(redis.call('ZRANGEBYSCORE', KEYS[4], '-inf', ARGV[1])) do
+  if redis.call('ZREM', KEYS[4], job_id) == 1 then publish(job_id) end
+end
+while redis.call('LLEN', KEYS[1]) < tonumber(ARGV[4]) do
+  local session = redis.call('SPOP', KEYS[9])
+  if not session then break end
+  local pointer = KEYS[10] .. session
+  local job_id = redis.call('GET', pointer)
+  redis.call('DEL', pointer)
+  if job_id then
+    if redis.call('GET', KEYS[8] .. job_id) then
+      publish(job_id)
+    else
+      redis.call('ZADD', KEYS[6], ARGV[1], job_id)
+    end
+  end
+end
+while true do
+  local job_id = redis.call('LPOP', KEYS[1])
+  if not job_id then return {'', ''} end
+  redis.call('SREM', KEYS[2], job_id)
+  local payload = redis.call('GET', KEYS[8] .. job_id)
+  if not payload then
+    redis.call('ZADD', KEYS[6], ARGV[1], job_id)
+  else
+    local lease_key = KEYS[7] .. job_id
+    if redis.call('SET', lease_key, ARGV[2], 'NX', 'PX', ARGV[3]) then
+      redis.call('ZADD', KEYS[3], tonumber(ARGV[1]) + tonumber(ARGV[3]), job_id)
+      return {job_id, payload}
+    end
+    publish(job_id)
+    return {'', ''}
+  end
+end
 """
 
 ACK_SCRIPT = """
--- dream:compression:ack
+-- dream:compression:ack-v2
 if redis.call('GET', KEYS[2]) ~= ARGV[1] then return {'0'} end
 redis.call('DEL', KEYS[1], KEYS[2])
+redis.call('ZREM', KEYS[3], ARGV[2])
 return {'1'}
 """
 
 RETRY_SCRIPT = """
--- dream:compression:retry
+-- dream:compression:retry-v2
 if redis.call('GET', KEYS[2]) ~= ARGV[1] then return {'lost'} end
 redis.call('DEL', KEYS[2])
+redis.call('ZREM', KEYS[3], ARGV[3])
 redis.call('SET', KEYS[1], ARGV[2])
 if tonumber(ARGV[4]) >= tonumber(ARGV[6]) then
-  redis.call('ZADD', KEYS[4], ARGV[5], ARGV[3])
+  redis.call('ZADD', KEYS[5], ARGV[5], ARGV[3])
   return {'dead'}
 end
-redis.call('ZADD', KEYS[3], ARGV[5], ARGV[3])
+redis.call('ZADD', KEYS[4], ARGV[5], ARGV[3])
 return {'retry'}
 """
 
 
 class RedisCompressionQueue:
     READY_KEY = "dream:compression:ready"
+    READY_MEMBERS_KEY = "dream:compression:ready-members"
+    INFLIGHT_KEY = "dream:compression:inflight"
     RETRY_KEY = "dream:compression:retry"
     PENDING_KEY = "dream:compression:pending"
     DEAD_KEY = "dream:compression:dead"
+    CORRUPT_KEY = "dream:compression:corrupt"
     JOB_PREFIX = "dream:compression:job:"
     LEASE_PREFIX = "dream:compression:lease:"
+    PENDING_PREFIX = "dream:compression:pending-job:"
 
     def __init__(
         self,
@@ -103,18 +166,27 @@ class RedisCompressionQueue:
         self.max_backoff_seconds = max_backoff_seconds
 
     async def enqueue(self, job: CompressionJob) -> str:
+        job_key = self._job_key(job.job_id)
         result = await self.client.eval(
             ENQUEUE_SCRIPT,
-            3,
-            self._job_key(job.job_id),
+            8,
+            job_key,
             self.READY_KEY,
+            self.READY_MEMBERS_KEY,
             self.PENDING_KEY,
+            self.PENDING_PREFIX,
+            self.INFLIGHT_KEY,
+            self.RETRY_KEY,
+            self.DEAD_KEY,
             job.model_dump_json(),
-            job.job_id,
+            self._job_component(job.job_id),
             self._session_key(job),
             str(self.capacity),
         )
-        return self._text(result[0])
+        state = self._text(result[0])
+        if state == "conflict":
+            raise ValueError("job_id conflicts with a durable payload")
+        return state
 
     async def lease(
         self, worker_token: str, *, now_unix_ms: int
@@ -123,33 +195,39 @@ class RedisCompressionQueue:
             raise ValueError("worker_token must not be blank")
         result = await self.client.eval(
             LEASE_SCRIPT,
-            3,
+            10,
             self.READY_KEY,
+            self.READY_MEMBERS_KEY,
+            self.INFLIGHT_KEY,
             self.RETRY_KEY,
+            self.DEAD_KEY,
+            self.CORRUPT_KEY,
             self.LEASE_PREFIX,
+            self.JOB_PREFIX,
+            self.PENDING_KEY,
+            self.PENDING_PREFIX,
             str(now_unix_ms),
             worker_token,
             str(self.lease_seconds * 1000),
+            str(self.capacity),
         )
-        job_id = self._text(result[0])
+        job_id, payload = (self._text(value) for value in result[:2])
         if not job_id:
             return None
-        # Job payload was written before the ID became ready; a missing payload is
-        # treated as an invalid durable record rather than inventing work.
-        payload = await self._get(self._job_key(job_id))
-        if payload is None:
-            return None
-        return CompressionJobLease(
-            job=CompressionJob.model_validate_json(self._text(payload)), token=worker_token
-        )
+        job = CompressionJob.model_validate_json(payload)
+        if self._job_component(job.job_id) != job_id:
+            raise ValueError("durable compression job ID is invalid")
+        return CompressionJobLease(job=job, token=worker_token)
 
     async def ack(self, lease: CompressionJobLease) -> bool:
         result = await self.client.eval(
             ACK_SCRIPT,
-            2,
+            3,
             self._job_key(lease.job.job_id),
             self._lease_key(lease.job.job_id),
+            self.INFLIGHT_KEY,
             lease.token,
+            self._job_component(lease.job.job_id),
         )
         return self._text(result[0]) == "1"
 
@@ -159,40 +237,56 @@ class RedisCompressionQueue:
             self.max_backoff_seconds,
             self.initial_backoff_seconds * (2 ** (job.attempt - 1)),
         )
-        due = now_unix_ms + backoff_seconds * 1_000
         result = await self.client.eval(
             RETRY_SCRIPT,
-            4,
+            5,
             self._job_key(job.job_id),
             self._lease_key(job.job_id),
+            self.INFLIGHT_KEY,
             self.RETRY_KEY,
             self.DEAD_KEY,
             lease.token,
             job.model_dump_json(),
-            job.job_id,
+            self._job_component(job.job_id),
             str(job.attempt),
-            str(due),
+            str(now_unix_ms + backoff_seconds * 1_000),
             str(self.max_attempts),
         )
         return self._text(result[0])
 
-    async def _get(self, key: str) -> Any | None:
-        get = getattr(self.client, "get", None)
-        if get is None:
-            raise TypeError("Redis queue client must implement get")
-        return await get(key)
+    async def dead_letter_count(self) -> int:
+        return int(await self.client.zcard(self.DEAD_KEY))
+
+    async def corrupt_job_count(self) -> int:
+        return int(await self.client.zcard(self.CORRUPT_KEY))
 
     @classmethod
     def _job_key(cls, job_id: str) -> str:
-        return f"{cls.JOB_PREFIX}{job_id}"
+        return f"{cls.JOB_PREFIX}{cls._job_component(job_id)}"
 
     @classmethod
     def _lease_key(cls, job_id: str) -> str:
-        return f"{cls.LEASE_PREFIX}{job_id}"
+        return f"{cls.LEASE_PREFIX}{cls._job_component(job_id)}"
 
     @staticmethod
-    def _session_key(job: CompressionJob) -> str:
-        return f"{job.user_id}:{job.session_id}"
+    def _job_component(job_id: str) -> str:
+        safe_component(job_id, "job_id")
+        if ":" in job_id:
+            raise ValueError("job_id must not contain ':'")
+        return job_id
+
+    @classmethod
+    def _session_key(cls, job: CompressionJob) -> str:
+        user = cls._component(job.user_id, "user_id")
+        session = cls._component(job.session_id, "session_id")
+        return f"{len(user)}:{user}:{len(session)}:{session}"
+
+    @staticmethod
+    def _component(value: str, label: str) -> str:
+        safe_component(value, label)
+        if ":" in value:
+            raise ValueError(f"{label} must not contain ':'")
+        return value
 
     @staticmethod
     def _text(value: Any) -> str:
