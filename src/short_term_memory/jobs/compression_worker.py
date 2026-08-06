@@ -1,10 +1,11 @@
 """Durable original-only Headroom compression worker."""
 
 import asyncio
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 import uuid
-from typing import Callable
+from typing import AsyncIterator, Callable
 
 import anyio
 
@@ -263,38 +264,65 @@ class CompressionWorker:
 class InProcessRebuildWaiter:
     """Explicit worker-service boundary for a bounded cold-rebuild wait."""
 
-    def __init__(self, worker: CompressionWorker) -> None:
+    def __init__(
+        self, worker: CompressionWorker, *, poll_seconds: float = 0.01
+    ) -> None:
+        if poll_seconds <= 0:
+            raise ValueError("poll_seconds must be positive")
         self.worker = worker
-        self._locks: dict[tuple[str, str], asyncio.Lock] = {}
+        self.poll_seconds = poll_seconds
+        self._locks: dict[tuple[str, str], _WaitLock] = {}
+        self._worker_slots = asyncio.Semaphore(
+            max(1, getattr(worker, "worker_concurrency", 1))
+        )
+
+    @property
+    def session_lock_count(self) -> int:
+        return len(self._locks)
 
     async def wait_for(self, job, timeout_seconds: float) -> MemorySummaryEnvelope | None:
         if timeout_seconds <= 0:
             raise ValueError("timeout_seconds must be positive")
-        lock = self._locks.setdefault((job.user_id, job.session_id), asyncio.Lock())
-        async with lock:
-            async with asyncio.timeout(timeout_seconds):
+        async with asyncio.timeout(timeout_seconds):
+            async with self._session_lock(job.user_id, job.session_id):
                 while True:
                     envelope = await self.worker.store.read_envelope(
                         job.user_id, job.session_id
                     )
                     if self._matches(job, envelope):
                         return envelope
-                    result = await self.worker.run_once()
-                    if result.state == "acked":
-                        envelope = await self.worker.store.read_envelope(
-                            job.user_id, job.session_id
-                        )
-                        if self._matches(job, envelope):
-                            return envelope
-                    if result.job_id == job.job_id:
-                        envelope = await self.worker.store.read_envelope(
-                            job.user_id, job.session_id
-                        )
-                        if self._matches(job, envelope):
-                            return envelope
+                    async with self._worker_slots:
+                        result = await self.worker.run_once()
+                    envelope = await self.worker.store.read_envelope(
+                        job.user_id, job.session_id
+                    )
+                    if self._matches(job, envelope):
+                        return envelope
+                    if result.job_id == job.job_id and result.state in {
+                        "acked",
+                        "dead",
+                        "stale",
+                    }:
                         return None
-                    if result.state == "idle":
-                        await asyncio.sleep(0.01)
+                    await asyncio.sleep(self.poll_seconds)
+
+    @asynccontextmanager
+    async def _session_lock(
+        self, user_id: str, session_id: str
+    ) -> AsyncIterator[None]:
+        key = (user_id, session_id)
+        entry = self._locks.get(key)
+        if entry is None:
+            entry = _WaitLock(asyncio.Lock())
+            self._locks[key] = entry
+        entry.users += 1
+        try:
+            async with entry.lock:
+                yield
+        finally:
+            entry.users -= 1
+            if entry.users == 0 and self._locks.get(key) is entry:
+                self._locks.pop(key, None)
 
     @staticmethod
     def _matches(job, envelope: MemorySummaryEnvelope | None) -> bool:
@@ -303,3 +331,9 @@ class InProcessRebuildWaiter:
             and envelope.version > job.expected_version
             and envelope.compressed_through_sequence >= job.requested_through_sequence
         )
+
+
+@dataclass
+class _WaitLock:
+    lock: asyncio.Lock
+    users: int = 0

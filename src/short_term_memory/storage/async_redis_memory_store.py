@@ -128,6 +128,7 @@ class AsyncRedisMemoryStore:
             keys.pending_reservations,
             digest,
             str(self.ttl_seconds),
+            event_id,
         )
         state, sequence = self._result(result)
         if state == "conflict":

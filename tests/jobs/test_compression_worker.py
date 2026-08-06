@@ -60,6 +60,17 @@ class FailingHeadroom:
         )
 
 
+class FailOnceHeadroom:
+    def __init__(self):
+        self.calls = 0
+
+    async def compress(self, *args, **kwargs):
+        self.calls += 1
+        if self.calls == 1:
+            return await FailingHeadroom().compress(*args, **kwargs)
+        return await DelayedSuccessfulHeadroom().compress(*args, **kwargs)
+
+
 class BlockingHeadroom:
     def __init__(self):
         self.started = asyncio.Event()
@@ -255,6 +266,151 @@ async def test_waiter_returns_already_fresh_target_session_when_queue_is_idle():
     result = await InProcessRebuildWaiter(Worker()).wait_for(target, timeout_seconds=0.05)
 
     assert result is not None and result.version == 2
+
+
+@pytest.mark.asyncio
+async def test_waiter_follows_durable_retry_until_transient_headroom_failure_recovers(worker):
+    worker, _, _ = worker
+    job = compression_job().model_copy(update={"rebuild": True})
+    worker.headroom = FailOnceHeadroom()
+    instants = iter(
+        datetime(2026, 8, 6, 0, 0, second, tzinfo=timezone.utc)
+        for second in range(0, 30, 2)
+    )
+    worker.clock = lambda: next(instants)
+    await worker.queue.enqueue(job)
+
+    rebuilt = await InProcessRebuildWaiter(worker).wait_for(job, timeout_seconds=1)
+
+    assert rebuilt is not None and rebuilt.compressed_through_sequence == 10
+    assert worker.headroom.calls == 2
+
+
+@pytest.mark.asyncio
+async def test_waiter_follows_deferred_lease_until_rebuild_succeeds(worker):
+    worker, _, _ = worker
+    job = compression_job().model_copy(update={"rebuild": True})
+    acquire = worker.store.acquire_compression_lease
+    calls = 0
+
+    async def defer_once(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return False if calls == 1 else await acquire(*args, **kwargs)
+
+    worker.store.acquire_compression_lease = defer_once
+    instants = iter(
+        datetime(2026, 8, 6, 0, 0, second, tzinfo=timezone.utc)
+        for second in range(0, 30, 2)
+    )
+    worker.clock = lambda: next(instants)
+    await worker.queue.enqueue(job)
+
+    rebuilt = await InProcessRebuildWaiter(worker).wait_for(job, timeout_seconds=1)
+
+    assert rebuilt is not None and rebuilt.compressed_through_sequence == 10
+    assert calls == 2
+
+
+@pytest.mark.asyncio
+async def test_waiter_keeps_polling_after_lost_until_another_worker_publishes():
+    class Store:
+        current = None
+
+        async def read_envelope(self, user_id, session_id):
+            return self.current
+
+    class Worker:
+        worker_concurrency = 1
+
+        def __init__(self):
+            self.store = Store()
+            self.calls = 0
+
+        async def run_once(self):
+            self.calls += 1
+            if self.calls == 2:
+                self.store.current = envelope(version=1, through=10)
+            return CompressionWorkerResult("lost", job_id="target")
+
+    worker = Worker()
+    job = compression_job().model_copy(update={"job_id": "target"})
+
+    rebuilt = await InProcessRebuildWaiter(worker, poll_seconds=0.01).wait_for(
+        job, timeout_seconds=0.1
+    )
+
+    assert rebuilt is not None
+    assert worker.calls == 2
+
+
+@pytest.mark.asyncio
+async def test_waiter_transient_states_do_not_busy_spin():
+    class Store:
+        async def read_envelope(self, user_id, session_id):
+            return None
+
+    class Worker:
+        worker_concurrency = 1
+        store = Store()
+
+        def __init__(self):
+            self.calls = 0
+
+        async def run_once(self):
+            self.calls += 1
+            return CompressionWorkerResult("lost", job_id="target")
+
+    worker = Worker()
+    with pytest.raises(TimeoutError):
+        await InProcessRebuildWaiter(worker, poll_seconds=0.01).wait_for(
+            compression_job().model_copy(update={"job_id": "target"}),
+            timeout_seconds=0.035,
+        )
+
+    assert worker.calls <= 4
+
+
+@pytest.mark.asyncio
+async def test_waiter_limits_shared_worker_concurrency_and_releases_session_locks():
+    class Store:
+        async def read_envelope(self, user_id, session_id):
+            return None
+
+    class Worker:
+        worker_concurrency = 2
+        store = Store()
+
+        def __init__(self):
+            self.active = 0
+            self.peak = 0
+
+        async def run_once(self):
+            self.active += 1
+            self.peak = max(self.peak, self.active)
+            try:
+                await asyncio.sleep(0.01)
+                return CompressionWorkerResult("lost", job_id=None)
+            finally:
+                self.active -= 1
+
+    worker = Worker()
+    waiter = InProcessRebuildWaiter(worker)
+    jobs = tuple(
+        compression_job().model_copy(
+            update={"job_id": f"job-{index}", "session_id": f"session-{index}"}
+        )
+        for index in range(8)
+    )
+
+    results = await asyncio.gather(
+        *(waiter.wait_for(job, timeout_seconds=0.04) for job in jobs),
+        return_exceptions=True,
+    )
+
+    assert all(isinstance(result, TimeoutError) for result in results)
+    assert worker.peak == worker.worker_concurrency
+    assert waiter.session_lock_count == 0
 
 
 @pytest.mark.asyncio

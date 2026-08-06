@@ -212,3 +212,16 @@ def test_sequence_event_preserves_original_offset_timestamp(tmp_path: Path) -> N
     assert json.loads(result.path.read_text(encoding="utf-8"))["timestamp"] == event.created_at
     assert store.find_event("u", "s", "offset") == event
     assert store.read_original_range("u", "s", 1, 1) == (event,)
+
+
+def test_session_locks_are_released_after_operations(tmp_path: Path) -> None:
+    store = JournalStore(VFSAdapter(tmp_path))
+
+    for index in range(100):
+        store.append_event(
+            "u",
+            f"session-{index}",
+            memory_event(event_id=f"event-{index}"),
+        )
+
+    assert store.session_lock_count == 0

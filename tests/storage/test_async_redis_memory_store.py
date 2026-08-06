@@ -34,6 +34,25 @@ async def test_reserve_retry_and_conflict(memory_store: AsyncRedisMemoryStore) -
 
 
 @pytest.mark.asyncio
+async def test_reservation_tracks_event_id_in_pending_set_until_commit(
+    redis: AsyncFakeRedis,
+    memory_store: AsyncRedisMemoryStore,
+) -> None:
+    event = memory_event(sequence=1, event_id="event")
+    pending_key = "dream:session:u:s:pending-reservations"
+
+    await memory_store.reserve_event("u", "s", event.event_id, event.sha256)
+
+    assert redis.sets[pending_key] == {"event"}
+    assert redis.ttls[pending_key] == 43_200
+
+    await memory_store.commit_event("u", "s", event)
+
+    assert pending_key not in redis.sets
+    assert pending_key not in redis.ttls
+
+
+@pytest.mark.asyncio
 async def test_commit_makes_event_visible_once(
     memory_store: AsyncRedisMemoryStore,
 ) -> None:

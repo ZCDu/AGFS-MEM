@@ -29,6 +29,27 @@ async def memory_store():
 
 
 @pytest.mark.asyncio
+async def test_real_redis_reserve_pending_and_commit_cleanup(
+    memory_store: AsyncRedisMemoryStore,
+) -> None:
+    user_id = f"redis-pending-{uuid4().hex}"
+    session_id = "session"
+    event = memory_event(event_id="event", content="pending lifecycle")
+    prefix = f"dream:session:{user_id}:{session_id}"
+
+    reservation = await memory_store.reserve_event(
+        user_id, session_id, event.event_id, event.sha256
+    )
+
+    pending = await memory_store.client.smembers(f"{prefix}:pending-reservations")
+    assert pending == {event.event_id}
+
+    committed = event.model_copy(update={"sequence": reservation.sequence})
+    assert await memory_store.commit_event(user_id, session_id, committed) == "committed"
+    assert await memory_store.client.smembers(f"{prefix}:pending-reservations") == set()
+
+
+@pytest.mark.asyncio
 async def test_real_redis_reservations_are_atomic_under_concurrency(
     memory_store: AsyncRedisMemoryStore,
 ) -> None:

@@ -1,12 +1,13 @@
 """Append-only, recoverable per-session original-event journals."""
 
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
 from threading import RLock
-from typing import Literal
+from typing import Iterator, Literal
 
 from pydantic import BaseModel, Field
 
@@ -53,6 +54,12 @@ class JournalAppendResult:
     path: Path
 
 
+@dataclass
+class _SessionLockEntry:
+    lock: RLock
+    users: int = 0
+
+
 def _utc_timestamp(value: datetime | None) -> datetime:
     timestamp = value or datetime.now(timezone.utc)
     if timestamp.tzinfo is None or timestamp.utcoffset() is None:
@@ -82,7 +89,12 @@ class JournalStore:
     def __init__(self, vfs: VFSAdapter) -> None:
         self.vfs = vfs
         self._locks_guard = RLock()
-        self._session_locks: dict[tuple[str, str], RLock] = {}
+        self._session_locks: dict[tuple[str, str], _SessionLockEntry] = {}
+
+    @property
+    def session_lock_count(self) -> int:
+        with self._locks_guard:
+            return len(self._session_locks)
 
     def append_message(
         self,
@@ -313,13 +325,28 @@ class JournalStore:
                     raise ValueError(f"unknown journal event type in {path.name}")
         return tuple(records)
 
-    def _session_lock(self, user_id: str, session_id: str) -> RLock:
+    @contextmanager
+    def _session_lock(
+        self, user_id: str, session_id: str
+    ) -> Iterator[None]:
         key = (
             safe_component(user_id, "user_id"),
             safe_component(session_id, "session_id"),
         )
         with self._locks_guard:
-            return self._session_locks.setdefault(key, RLock())
+            entry = self._session_locks.get(key)
+            if entry is None:
+                entry = _SessionLockEntry(RLock())
+                self._session_locks[key] = entry
+            entry.users += 1
+        try:
+            with entry.lock:
+                yield
+        finally:
+            with self._locks_guard:
+                entry.users -= 1
+                if entry.users == 0 and self._session_locks.get(key) is entry:
+                    self._session_locks.pop(key, None)
 
     @staticmethod
     def _memory_event(record: JournalMessageEvent) -> MemoryEvent:

@@ -311,6 +311,9 @@ class MemoryService:
                     envelope = await self._wait_for_cold_rebuild(job)
                     recovery_seconds += time.perf_counter() - cold_started
                     source = "journal_rebuild"
+                    latest_sequence = max(
+                        latest_sequence, envelope.compressed_through_sequence
+                    )
 
         assembly_started = time.perf_counter()
         messages = self.assembler.build_read_messages(envelope, originals, now)

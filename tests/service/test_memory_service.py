@@ -497,3 +497,35 @@ async def test_empty_redis_and_empty_journal_is_an_empty_redis_source(service):
     assert response.memory.source == "redis"
     assert response.memory.latest_sequence == 0
     assert response.messages == []
+
+
+@pytest.mark.asyncio
+async def test_coalesced_cold_rebuild_refreshes_latest_sequence_from_stronger_envelope(service):
+    now = datetime(2026, 8, 6, tzinfo=timezone.utc)
+    expired = CompressionGeneration(
+        generation=1, from_sequence=1, through_sequence=5,
+        messages=({"role": "system", "content": "EXPIRED"},),
+        tokens_before=10, tokens_after=5,
+        created_at=(now - timedelta(hours=2)).isoformat(),
+        ccr_expires_at=(now - timedelta(hours=1)).isoformat(),
+    )
+    fresh = CompressionGeneration(
+        generation=2, from_sequence=1, through_sequence=10,
+        messages=({"role": "system", "content": "FRESH"},),
+        tokens_before=20, tokens_after=5,
+        created_at=now.isoformat(),
+        ccr_expires_at=(now + timedelta(hours=1)).isoformat(),
+    )
+    old = envelope(version=1, through=5, generations=[expired])
+    stronger = envelope(version=2, through=10, generations=[fresh])
+    service.store.envelope = old
+    service.store.originals = tuple(
+        memory_event(sequence=sequence, event_id=f"event-{sequence}")
+        for sequence in range(1, 6)
+    )
+    service.rebuild_waiter = RecordingRebuildWaiter(stronger)
+
+    response = await service.read(read_request(), "req-1")
+
+    assert response.memory.compressed_through_sequence == 10
+    assert response.memory.latest_sequence == 10
