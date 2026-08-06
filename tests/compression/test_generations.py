@@ -7,6 +7,7 @@ import pytest
 from short_term_memory.compression.generations import (
     GenerationAssembler,
     GenerationPlanner,
+    OriginalSequenceGapError,
 )
 from short_term_memory.models import CompressionGeneration
 from short_term_memory.storage.async_redis_memory_store import AsyncRedisMemoryStore
@@ -43,6 +44,17 @@ async def seed_originals(
         )
         journals.append_event("u", "s", event)
         await repository.commit_event("u", "s", event)
+
+
+class OriginalStoreWithEvents:
+    def __init__(self, events):
+        self.events = tuple(events)
+
+    async def read_envelope(self, user_id: str, session_id: str):
+        return None
+
+    async def read_originals_after(self, user_id: str, session_id: str, sequence: int):
+        return tuple(event for event in self.events if event.sequence > sequence)
 
 
 def envelope_from(candidate, marker: str):
@@ -134,6 +146,118 @@ async def test_rebuild_reads_covered_originals_only_from_journal(
     ]
 
 
+@pytest.mark.asyncio
+async def test_incremental_waits_for_first_missing_sequence_then_uses_contiguous_prefix(
+    repository: AsyncRedisMemoryStore,
+    journals: JournalStore,
+) -> None:
+    events = []
+    for sequence in range(1, 4):
+        content = f"original-{sequence}"
+        reservation = await repository.reserve_event(
+            "u", "s", f"e-{sequence}", sha256(content.encode()).hexdigest()
+        )
+        event = memory_event(
+            sequence=reservation.sequence,
+            event_id=f"e-{sequence}",
+            content=content,
+        )
+        events.append(event)
+        journals.append_event("u", "s", event)
+
+    await repository.commit_event("u", "s", events[1])
+    assert (
+        await GenerationPlanner(repository, journals, max_segments=8).plan_incremental(
+            "u", "s"
+        )
+        is None
+    )
+
+    await repository.commit_event("u", "s", events[0])
+    await repository.commit_event("u", "s", events[2])
+    planner = GenerationPlanner(repository, journals, max_segments=8)
+    first = await planner.plan_incremental("u", "s")
+    assert first is not None
+    assert [event.sequence for event in first.originals] == [1, 2, 3]
+
+
+@pytest.mark.asyncio
+async def test_incremental_stops_before_a_later_sequence_gap(
+    repository: AsyncRedisMemoryStore,
+    journals: JournalStore,
+) -> None:
+    events = []
+    for sequence in range(1, 4):
+        content = f"original-{sequence}"
+        reservation = await repository.reserve_event(
+            "u", "s", f"e-{sequence}", sha256(content.encode()).hexdigest()
+        )
+        event = memory_event(
+            sequence=reservation.sequence,
+            event_id=f"e-{sequence}",
+            content=content,
+        )
+        events.append(event)
+        journals.append_event("u", "s", event)
+
+    await repository.commit_event("u", "s", events[0])
+    await repository.commit_event("u", "s", events[2])
+    planner = GenerationPlanner(repository, journals, max_segments=8)
+    first = await planner.plan_incremental("u", "s")
+    assert first is not None
+    assert [event.sequence for event in first.originals] == [1]
+    assert await repository.compare_and_set_envelope("u", "s", 0, envelope_from(first, "HR-1"))
+
+    await repository.commit_event("u", "s", events[1])
+    second = await planner.plan_incremental("u", "s")
+    assert second is not None
+    assert [event.sequence for event in second.originals] == [2, 3]
+
+
+@pytest.mark.asyncio
+async def test_rebuild_rejects_a_missing_journal_sequence(
+    repository: AsyncRedisMemoryStore,
+    journals: JournalStore,
+) -> None:
+    journals.append_event("u", "s", memory_event(sequence=1, event_id="e-1"))
+    journals.append_event("u", "s", memory_event(sequence=3, event_id="e-3"))
+
+    with pytest.raises(OriginalSequenceGapError, match="missing sequence 2"):
+        await GenerationPlanner(repository, journals, max_segments=8).plan_rebuild(
+            "u", "s", 3
+        )
+
+
+@pytest.mark.asyncio
+async def test_incremental_rejects_conflicting_duplicate_sequences(
+    journals: JournalStore,
+) -> None:
+    store = OriginalStoreWithEvents(
+        (
+            memory_event(sequence=1, event_id="first", content="first"),
+            memory_event(sequence=1, event_id="second", content="second"),
+        )
+    )
+
+    with pytest.raises(ValueError, match="conflicting original events"):
+        await GenerationPlanner(store, journals, max_segments=8).plan_incremental(
+            "u", "s"
+        )
+
+
+@pytest.mark.asyncio
+async def test_incremental_safely_folds_identical_duplicate_sequences(
+    journals: JournalStore,
+) -> None:
+    event = memory_event(sequence=1, event_id="e-1", content="original")
+    candidate = await GenerationPlanner(
+        OriginalStoreWithEvents((event, event)), journals, max_segments=8
+    ).plan_incremental("u", "s")
+
+    assert candidate is not None
+    assert candidate.originals == (event,)
+
+
 def test_read_assembly_keeps_semantic_summary_unexpired_opaque_generations_and_recent_originals() -> None:
     fresh = CompressionGeneration(
         generation=2,
@@ -203,3 +327,85 @@ def test_read_assembly_limits_opaque_generations_to_latest_segments() -> None:
         "segment-2",
         "segment-3",
     ]
+
+
+def test_read_assembly_preserves_null_opaque_fields() -> None:
+    generation = CompressionGeneration(
+        generation=1,
+        from_sequence=1,
+        through_sequence=1,
+        messages=[{"role": "tool", "content": None, "tool_call_id": None}],
+        tokens_before=10,
+        tokens_after=5,
+        created_at="2026-08-06T00:00:00+00:00",
+        ccr_expires_at="2026-08-06T12:00:00+00:00",
+    )
+
+    assembled = GenerationAssembler(max_segments=8).build_read_messages(
+        envelope(version=1, through=1, generations=[generation]),
+        (),
+        datetime(2026, 8, 6, 11, tzinfo=timezone.utc),
+    )
+
+    assert assembled[1] == {"role": "tool", "content": None, "tool_call_id": None}
+
+
+@pytest.mark.parametrize(
+    ("expires_at", "now"),
+    [
+        (
+            "2026-08-06T12:00:00+00:00",
+            datetime(2026, 8, 6, 12, tzinfo=timezone.utc),
+        ),
+        (
+            "2026-08-06T20:00:00+08:00",
+            datetime(2026, 8, 6, 12, tzinfo=timezone.utc),
+        ),
+    ],
+)
+def test_read_assembly_treats_exact_expiry_as_expired(
+    expires_at: str, now: datetime
+) -> None:
+    generation = CompressionGeneration(
+        generation=1,
+        from_sequence=1,
+        through_sequence=1,
+        messages=[{"role": "assistant", "content": "expired"}],
+        tokens_before=10,
+        tokens_after=5,
+        created_at="2026-08-06T00:00:00+00:00",
+        ccr_expires_at=expires_at,
+    )
+
+    assembled = GenerationAssembler(max_segments=8).build_read_messages(
+        envelope(version=1, through=1, generations=[generation]), (), now
+    )
+
+    assert len(assembled) == 1
+
+
+def test_read_assembly_rejects_naive_expiry_and_now() -> None:
+    naive_expiry = CompressionGeneration(
+        generation=1,
+        from_sequence=1,
+        through_sequence=1,
+        messages=[{"role": "assistant", "content": "opaque"}],
+        tokens_before=10,
+        tokens_after=5,
+        created_at="2026-08-06T00:00:00+00:00",
+        ccr_expires_at="2026-08-06T12:00:00",
+    )
+    assembler = GenerationAssembler(max_segments=8)
+
+    with pytest.raises(ValueError, match="ccr_expires_at must be timezone-aware"):
+        assembler.build_read_messages(
+            envelope(version=1, through=1, generations=[naive_expiry]),
+            (),
+            datetime(2026, 8, 6, 11, tzinfo=timezone.utc),
+        )
+    with pytest.raises(ValueError, match="now must be timezone-aware"):
+        assembler.build_read_messages(
+            None,
+            (),
+            datetime(2026, 8, 6, 11),
+        )

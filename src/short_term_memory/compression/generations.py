@@ -9,6 +9,14 @@ from short_term_memory.models import MemoryEvent, MemorySummaryEnvelope
 from short_term_memory.storage.journal_store import JournalStore
 
 
+class OriginalSequenceGapError(ValueError):
+    """A requested journal-original range has an unfilled sequence gap."""
+
+
+class OriginalSequenceConflictError(ValueError):
+    """Two different original events claim the same sequence."""
+
+
 class OriginalMemoryStore(Protocol):
     async def read_originals_after(
         self, user_id: str, session_id: str, sequence: int
@@ -49,8 +57,11 @@ class GenerationPlanner:
     ) -> CompressionCandidate | None:
         envelope = await self.store.read_envelope(user_id, session_id)
         through = envelope.compressed_through_sequence if envelope else 0
-        originals = self._deduplicate_by_sequence(
-            await self.store.read_originals_after(user_id, session_id, through)
+        originals = self._contiguous_prefix(
+            through + 1,
+            self._deduplicate_by_sequence(
+                await self.store.read_originals_after(user_id, session_id, through)
+            ),
         )
         if not originals:
             return None
@@ -70,11 +81,14 @@ class GenerationPlanner:
         if through_sequence < 1:
             raise ValueError("through_sequence must be positive")
         envelope = await self.store.read_envelope(user_id, session_id)
-        originals = self._deduplicate_by_sequence(
-            self.journals.read_original_range(user_id, session_id, 1, through_sequence)
+        originals = self._complete_range(
+            through_sequence,
+            self._deduplicate_by_sequence(
+                self.journals.read_original_range(
+                    user_id, session_id, 1, through_sequence
+                )
+            ),
         )
-        if not originals:
-            return None
         return CompressionCandidate(
             user_id=user_id,
             session_id=session_id,
@@ -91,8 +105,42 @@ class GenerationPlanner:
     ) -> tuple[MemoryEvent, ...]:
         unique: dict[int, MemoryEvent] = {}
         for event in originals:
+            existing = unique.get(event.sequence)
+            if existing is not None and existing != event:
+                raise OriginalSequenceConflictError(
+                    "conflicting original events for sequence "
+                    f"{event.sequence}"
+                )
             unique.setdefault(event.sequence, event)
         return tuple(unique[sequence] for sequence in sorted(unique))
+
+    @staticmethod
+    def _contiguous_prefix(
+        first_sequence: int, originals: tuple[MemoryEvent, ...]
+    ) -> tuple[MemoryEvent, ...]:
+        contiguous: list[MemoryEvent] = []
+        expected = first_sequence
+        for event in originals:
+            if event.sequence < expected:
+                continue
+            if event.sequence != expected:
+                break
+            contiguous.append(event)
+            expected += 1
+        return tuple(contiguous)
+
+    @staticmethod
+    def _complete_range(
+        through_sequence: int, originals: tuple[MemoryEvent, ...]
+    ) -> tuple[MemoryEvent, ...]:
+        expected = 1
+        for event in originals:
+            if event.sequence != expected:
+                raise OriginalSequenceGapError(f"missing sequence {expected}")
+            expected += 1
+        if expected <= through_sequence:
+            raise OriginalSequenceGapError(f"missing sequence {expected}")
+        return originals
 
 
 class GenerationAssembler:
@@ -116,7 +164,7 @@ class GenerationAssembler:
             result.append(self._semantic_summary(envelope))
             for generation in self._fresh_generations(envelope, now):
                 result.extend(
-                    message.model_dump(mode="json", exclude_none=True)
+                    message.model_dump(mode="json")
                     for message in generation.messages
                 )
         # Recent originals deliberately remain even when their sequence overlaps a
