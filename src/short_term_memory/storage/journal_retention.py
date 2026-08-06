@@ -5,7 +5,7 @@ from datetime import date, datetime, timedelta, timezone
 import json
 from pathlib import Path
 
-from short_term_memory.storage.vfs_adapter import VFSAdapter
+from short_term_memory.storage.vfs_adapter import VFSAdapter, safe_component
 
 
 @dataclass(frozen=True)
@@ -61,6 +61,7 @@ class JournalRetentionJob:
             return False
         try:
             date.fromisoformat(filename[:10])
+            safe_component(filename[11:-6], "session_id")
         except ValueError:
             return False
         return True

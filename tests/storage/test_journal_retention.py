@@ -88,6 +88,11 @@ def test_retention_skips_malformed_filenames_without_broad_deletion(
     journals = store.vfs.paths("u").journals
     malformed = journals / "not-a-date-s.jsonl"
     malformed.write_text("{}\n", encoding="utf-8")
+    empty_session = journals / "2026-07-01-.jsonl"
+    empty_session.write_text(
+        '{"timestamp":"2026-07-01T00:00:00+00:00"}\n',
+        encoding="utf-8",
+    )
 
     result = JournalRetentionJob(store.vfs, retention_days=30).run(
         datetime(2026, 8, 6, tzinfo=UTC)
@@ -95,6 +100,8 @@ def test_retention_skips_malformed_filenames_without_broad_deletion(
 
     assert result.removed == ()
     assert malformed.exists()
+    assert empty_session.exists()
+    assert empty_session not in [failure.path for failure in result.failures]
 
 
 def test_retention_isolates_invalid_utf8_file_and_keeps_cleaning(
