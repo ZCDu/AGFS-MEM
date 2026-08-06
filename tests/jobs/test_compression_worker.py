@@ -64,6 +64,17 @@ class BlockingHeadroom:
         await asyncio.Event().wait()
 
 
+class DelayedSuccessfulHeadroom:
+    async def compress(self, *args, **kwargs):
+        return HeadroomCompressionResult(
+            status=HeadroomCompressionStatus.SUCCESS,
+            messages=({"role": "system", "content": "marker"},),
+            fallback_used=False,
+            tokens_before=100,
+            tokens_after=25,
+        )
+
+
 async def seed(store, journals, count=10):
     for sequence in range(1, count + 1):
         content = f"ORIGINAL-{sequence}"
@@ -168,6 +179,52 @@ async def test_headroom_failure_retries_without_advancing_envelope(worker):
     assert result.state == "retry"
     assert await store.read_envelope("u", "s") is None
     assert worker.queue.client.zsets[worker.queue.RETRY_KEY]
+
+
+@pytest.mark.asyncio
+async def test_headroom_failure_uses_fresh_clock_for_retry_deadline(worker):
+    worker, _, _ = worker
+    t0 = datetime(2026, 8, 6, tzinfo=timezone.utc)
+    t10 = datetime(2026, 8, 6, 0, 0, 10, tzinfo=timezone.utc)
+    clock_values = iter((t0, t10))
+    worker.clock = lambda: next(clock_values)
+    worker.headroom = FailingHeadroom()
+    await worker.queue.enqueue(compression_job())
+
+    assert (await worker.run_once()).state == "retry"
+    due = worker.queue.client.zsets[worker.queue.RETRY_KEY]["job-10-0"]
+    assert due == int(t10.timestamp() * 1_000) + 1_000
+
+
+@pytest.mark.asyncio
+async def test_deferred_session_lease_uses_fresh_clock_for_retry_deadline(worker):
+    worker, _, _ = worker
+    t0 = datetime(2026, 8, 6, tzinfo=timezone.utc)
+    t10 = datetime(2026, 8, 6, 0, 0, 10, tzinfo=timezone.utc)
+    clock_values = iter((t0, t10))
+    worker.clock = lambda: next(clock_values)
+    worker.store.acquire_compression_lease = AsyncMock(return_value=False)
+    await worker.queue.enqueue(compression_job())
+
+    assert (await worker.run_once()).state == "deferred"
+    due = worker.queue.client.zsets[worker.queue.RETRY_KEY]["job-10-0"]
+    assert due == int(t10.timestamp() * 1_000) + 1_000
+
+
+@pytest.mark.asyncio
+async def test_generation_timestamps_use_the_headroom_completion_clock(worker):
+    worker, store, _ = worker
+    t0 = datetime(2026, 8, 6, tzinfo=timezone.utc)
+    t10 = datetime(2026, 8, 6, 0, 0, 10, tzinfo=timezone.utc)
+    clock_values = iter((t0, t10))
+    worker.clock = lambda: next(clock_values)
+    worker.headroom = DelayedSuccessfulHeadroom()
+    await worker.queue.enqueue(compression_job())
+
+    assert (await worker.run_once()).state == "acked"
+    generation = (await store.read_envelope("u", "s")).compression_generations[0]
+    assert generation.created_at == t10.isoformat()
+    assert generation.ccr_expires_at == "2026-08-06T12:00:10+00:00"
 
 
 @pytest.mark.asyncio

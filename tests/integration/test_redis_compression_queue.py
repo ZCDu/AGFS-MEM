@@ -16,16 +16,17 @@ pytestmark = pytest.mark.skipif(
 
 @pytest.mark.asyncio
 async def test_redis_lua_recovers_expired_lease_promotes_pending_and_protects_token():
-    redis = pytest.importorskip("redis.asyncio")
+    import redis.asyncio as redis
+
     client = redis.Redis.from_url(
         os.environ.get("REDIS_QUEUE_TEST_URL", "redis://127.0.0.1:6379/15"),
         decode_responses=True,
     )
     try:
         await client.ping()
-    except Exception as exc:
+    except Exception:
         await client.aclose()
-        pytest.skip(f"Redis unavailable: {type(exc).__name__}")
+        raise
 
     first_id, second_id = f"it-{uuid4().hex}", f"it-{uuid4().hex}"
     queue = RedisCompressionQueue(client, capacity=1, lease_seconds=1)

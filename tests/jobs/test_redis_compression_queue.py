@@ -36,7 +36,7 @@ class QueueRedis:
         if "dream:compression:enqueue-v2" in script:
             (
                 job_key, ready_key, ready_members_key, pending_key, pending_prefix,
-                inflight_key, retry_key, dead_key,
+                job_prefix,
             ) = keys
             payload, job_id, session_key, capacity = values
             existing = self.values.get(job_key)
@@ -50,7 +50,22 @@ class QueueRedis:
             pointer = f"{pending_prefix}{session_key}"
             previous = self.values.get(pointer)
             if previous and previous != job_id:
-                self.values.pop(f"dream:compression:job:{previous}", None)
+                previous_key = f"{job_prefix}{previous}"
+                previous_payload = self.values.get(previous_key)
+                if previous_payload is not None:
+                    old, new = json.loads(previous_payload), json.loads(payload)
+                    old_wins = (
+                        old["expected_version"] > new["expected_version"]
+                        or (
+                            old["expected_version"] == new["expected_version"]
+                            and old["requested_through_sequence"]
+                            >= new["requested_through_sequence"]
+                        )
+                    )
+                    if old_wins:
+                        self.values.pop(job_key, None)
+                        return ["coalesced"]
+                self.values.pop(previous_key, None)
             self.values[pointer] = job_id
             self._set(pending_key).add(session_key)
             return ["pending"]
@@ -169,6 +184,36 @@ async def test_pending_session_is_promoted_and_newer_pending_job_coalesces_safel
 
     assert promoted is not None and promoted.job.job_id == "newest"
     assert "dream:compression:job:older" not in redis.values
+
+
+@pytest.mark.asyncio
+async def test_pending_coalesce_keeps_highest_version_then_largest_coverage():
+    redis = QueueRedis()
+    queue = RedisCompressionQueue(redis, capacity=1)
+    active = compression_job(job_id="active", session_id="active")
+    best = compression_job(
+        job_id="best", session_id="pending", expected_version=1, through_sequence=100
+    )
+    late_old = compression_job(
+        job_id="late-old", session_id="pending", expected_version=0, through_sequence=50
+    )
+    late_short = compression_job(
+        job_id="late-short", session_id="pending", expected_version=1, through_sequence=50
+    )
+    await queue.enqueue(active)
+    assert await queue.enqueue(best) == "pending"
+    assert await queue.enqueue(late_old) == "coalesced"
+    assert await queue.enqueue(late_short) == "coalesced"
+    assert redis.sets[queue.PENDING_KEY] == {queue._session_key(best)}
+
+    active_lease = await queue.lease("active-worker", now_unix_ms=0)
+    assert active_lease is not None
+    assert await queue.ack(active_lease)
+    promoted = await queue.lease("pending-worker", now_unix_ms=1)
+
+    assert promoted is not None and promoted.job == best
+    assert "dream:compression:job:late-old" not in redis.values
+    assert "dream:compression:job:late-short" not in redis.values
 
 
 @pytest.mark.asyncio

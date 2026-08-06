@@ -82,13 +82,13 @@ class CompressionWorker:
             lease.job.user_id, lease.job.session_id, session_token
         )
         if not acquired:
-            return await self._retry(lease, now, "deferred")
+            return await self._retry(lease, "deferred")
         try:
             return await self._execute(lease, now)
         except asyncio.CancelledError:
             raise
         except Exception:
-            return await self._retry(lease, now, "retry")
+            return await self._retry(lease, "retry")
         finally:
             await self.store.release_compression_lease(
                 lease.job.user_id, lease.job.session_id, session_token
@@ -136,14 +136,17 @@ class CompressionWorker:
             ).as_headroom_headers(),
         )
         if compressed.status is not HeadroomCompressionStatus.SUCCESS:
-            return await self._retry(lease, now, "retry")
+            return await self._retry(lease, "retry")
 
+        completed_at = self._now()
         summary = await anyio.to_thread.run_sync(
             self.summary_model.summarize, compressed.messages
         )
         if not isinstance(summary, SessionSummaryPayload):
             summary = SessionSummaryPayload.model_validate(summary)
-        next_envelope = self._next_envelope(envelope, candidate, compressed, summary, now)
+        next_envelope = self._next_envelope(
+            envelope, candidate, compressed, summary, completed_at
+        )
         written = await self.store.compare_and_set_envelope(
             job.user_id, job.session_id, job.expected_version, next_envelope
         )
@@ -236,9 +239,10 @@ class CompressionWorker:
         return int(value.timestamp() * 1_000)
 
     async def _retry(
-        self, lease: CompressionJobLease, now: datetime, state: str
+        self, lease: CompressionJobLease, state: str
     ) -> CompressionWorkerResult:
-        result = await self.queue.retry(lease, now_unix_ms=self._unix_ms(now))
+        retry_now = self._now()
+        result = await self.queue.retry(lease, now_unix_ms=self._unix_ms(retry_now))
         if result == "dead":
             return CompressionWorkerResult("dead")
         if result == "lost":

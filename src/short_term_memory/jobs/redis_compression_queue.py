@@ -49,7 +49,19 @@ end
 local pointer = KEYS[5] .. ARGV[3]
 local previous = redis.call('GET', pointer)
 if previous and previous ~= ARGV[2] then
-  redis.call('DEL', 'dream:compression:job:' .. previous)
+  local previous_payload = redis.call('GET', KEYS[6] .. previous)
+  if previous_payload then
+    local old = cjson.decode(previous_payload)
+    local new = cjson.decode(ARGV[1])
+    local old_wins = old.expected_version > new.expected_version
+      or (old.expected_version == new.expected_version
+        and old.requested_through_sequence >= new.requested_through_sequence)
+    if old_wins then
+      redis.call('DEL', KEYS[1])
+      return {'coalesced'}
+    end
+  end
+  redis.call('DEL', KEYS[6] .. previous)
 end
 redis.call('SET', pointer, ARGV[2])
 redis.call('SADD', KEYS[4], ARGV[3])
@@ -169,15 +181,13 @@ class RedisCompressionQueue:
         job_key = self._job_key(job.job_id)
         result = await self.client.eval(
             ENQUEUE_SCRIPT,
-            8,
+            6,
             job_key,
             self.READY_KEY,
             self.READY_MEMBERS_KEY,
             self.PENDING_KEY,
             self.PENDING_PREFIX,
-            self.INFLIGHT_KEY,
-            self.RETRY_KEY,
-            self.DEAD_KEY,
+            self.JOB_PREFIX,
             job.model_dump_json(),
             self._job_component(job.job_id),
             self._session_key(job),
