@@ -3,9 +3,32 @@
 from typing import Any, Callable, Literal, Mapping, Protocol
 
 from short_term_memory.models import (
+    EventReservation,
     HeadroomCompressionResult,
+    MemoryEvent,
+    MemorySummaryEnvelope,
     SessionSummaryPayload,
 )
+
+
+class AsyncMemoryStore(Protocol):
+    """Async storage boundary for sequence-aware memory events."""
+
+    async def reserve_event(
+        self, user_id: str, session_id: str, event_id: str, digest: str
+    ) -> EventReservation: ...
+
+    async def commit_event(
+        self, user_id: str, session_id: str, event: MemoryEvent
+    ) -> Literal["committed", "duplicate"]: ...
+
+    async def read_recent_originals(
+        self, user_id: str, session_id: str, history_turns: int
+    ) -> tuple[MemoryEvent, ...]: ...
+
+    async def read_envelope(
+        self, user_id: str, session_id: str
+    ) -> MemorySummaryEnvelope | None: ...
 
 
 class TokenEstimator(Protocol):

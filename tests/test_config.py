@@ -20,6 +20,22 @@ ENV_NAMES = (
     "HEADROOM_TRIGGER_RATIO",
     "HEADROOM_MAX_MESSAGES",
     "HEADROOM_MAX_SESSION_SECONDS",
+    "MEMORY_API_HOST",
+    "MEMORY_API_PORT",
+    "MEMORY_API_WORKERS",
+    "MEMORY_API_CONCURRENCY_LIMIT",
+    "MEMORY_API_REDIS_POOL_SIZE",
+    "MEMORY_API_MAX_BODY_BYTES",
+    "MEMORY_API_REQUEST_TIMEOUT_SECONDS",
+    "MEMORY_WRITE_MAX_BATCH_EVENTS",
+    "MEMORY_API_AUTH_TOKEN",
+    "JOURNAL_RETENTION_DAYS",
+    "HEADROOM_CCR_REFRESH_SECONDS",
+    "HEADROOM_MAX_COMPRESSION_SEGMENTS",
+    "HEADROOM_COMPRESSION_WORKERS",
+    "HEADROOM_QUEUE_CAPACITY",
+    "DEEPSEEK_API_URL",
+    "DEEPSEEK_MODEL",
 )
 
 
@@ -39,6 +55,40 @@ def test_default_short_term_settings(tmp_path: Path) -> None:
     assert settings.redis_session.history_turns == 10
     assert settings.redis_session.trigger_ratio == 0.65
     assert settings.headroom_service.ccr_ttl_seconds == 43_200
+
+
+def test_http_memory_defaults_are_teacher_visible() -> None:
+    settings = load_settings()
+
+    assert settings.api.concurrency_limit == 100
+    assert settings.api.redis_pool_size == 200
+    assert settings.api.max_body_bytes == 10 * 1024 * 1024
+    assert settings.journal.retention_days == 30
+    assert settings.compression_queue.worker_concurrency == 8
+    assert settings.headroom_service.ccr_ttl_seconds == 43_200
+    assert settings.headroom_service.compression_model == "deepseek-v4-flash"
+    assert settings.deepseek_public.model == "deepseek-v4-flash"
+    assert settings.deepseek_public.api_url == "https://api.deepseek.com"
+
+
+def test_new_memory_settings_parse_validated_environment(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / ".env"
+    path.write_text(
+        "MEMORY_API_PORT=9000\n"
+        "MEMORY_WRITE_MAX_BATCH_EVENTS=5\n"
+        "JOURNAL_RETENTION_DAYS=60\n"
+        "HEADROOM_CCR_REFRESH_SECONDS=600\n",
+        encoding="utf-8",
+    )
+
+    settings = load_settings(path)
+
+    assert settings.api.port == 9000
+    assert settings.api.write_max_batch_events == 5
+    assert settings.journal.retention_days == 60
+    assert settings.headroom_service.ccr_refresh_seconds == 600
 
 
 def test_process_environment_overrides_dotenv(

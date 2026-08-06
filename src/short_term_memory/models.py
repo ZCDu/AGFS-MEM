@@ -3,7 +3,7 @@
 from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -19,6 +19,20 @@ class HeadroomFailureReason(str, Enum):
     HTTP_ERROR = "http_error"
     INVALID_RESPONSE = "invalid_response"
     UNEXPECTED_ERROR = "unexpected_error"
+
+
+class JournalRole(str, Enum):
+    SYSTEM = "system"
+    USER = "user"
+    ASSISTANT = "assistant"
+    TOOL = "tool"
+
+
+class MemoryContentType(str, Enum):
+    CONVERSATION = "conversation"
+    CODE = "code"
+    DOCUMENT = "document"
+    SKILL = "skill"
 
 
 @dataclass(frozen=True)
@@ -85,6 +99,64 @@ class SessionCompressionMessage(BaseModel):
 
     role: str = Field(min_length=1)
     content: Any = None
+
+
+class MemoryEvent(BaseModel):
+    """An immutable original event persisted by the memory service."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    sequence: int = Field(ge=1)
+    event_id: str = Field(min_length=1, max_length=200)
+    role: JournalRole
+    content_type: MemoryContentType
+    content: str = Field(min_length=1)
+    metadata: dict[str, str] = Field(default_factory=dict)
+    sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    created_at: str = Field(min_length=1)
+
+
+class EventReservation(BaseModel):
+    """The sequence and state assigned by an atomic idempotency reservation."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    sequence: int = Field(ge=1)
+    state: Literal["reserved", "pending", "committed"]
+
+
+class CompressionGeneration(BaseModel):
+    """An opaque Headroom compression result over one original-event range."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    generation: int = Field(ge=1)
+    from_sequence: int = Field(ge=1)
+    through_sequence: int = Field(ge=1)
+    messages: list[SessionCompressionMessage]
+    tokens_before: int = Field(ge=0)
+    tokens_after: int = Field(ge=0)
+    created_at: str = Field(min_length=1)
+    ccr_expires_at: str = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def ordered_range(self) -> "CompressionGeneration":
+        if self.through_sequence < self.from_sequence:
+            raise ValueError("through_sequence must be >= from_sequence")
+        return self
+
+
+class MemorySummaryEnvelope(SessionSummaryPayload):
+    """Semantic summary plus opaque Headroom compression generations."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    version: int = Field(ge=1)
+    compressed_through_sequence: int = Field(ge=0)
+    compression_generations: list[CompressionGeneration] = Field(
+        default_factory=list
+    )
+    updated_at: str = Field(min_length=1)
 
 
 class SessionCompressionContext(BaseModel):

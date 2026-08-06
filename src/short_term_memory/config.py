@@ -21,8 +21,40 @@ class RedisSessionSettings:
 class HeadroomServiceSettings:
     url: str = ""
     timeout_seconds: float = 300.0
-    compression_model: str = "gpt-4o"
+    compression_model: str = "deepseek-v4-flash"
     ccr_ttl_seconds: int = 43_200
+    ccr_refresh_seconds: int = 3_600
+    max_compression_segments: int = 8
+
+
+@dataclass(frozen=True)
+class ApiSettings:
+    host: str = "127.0.0.1"
+    port: int = 8_080
+    workers: int = 4
+    concurrency_limit: int = 100
+    redis_pool_size: int = 200
+    max_body_bytes: int = 10 * 1024 * 1024
+    request_timeout_seconds: float = 10.0
+    write_max_batch_events: int = 100
+    auth_token: str = ""
+
+
+@dataclass(frozen=True)
+class JournalSettings:
+    retention_days: int = 30
+
+
+@dataclass(frozen=True)
+class CompressionQueueSettings:
+    worker_concurrency: int = 8
+    capacity: int = 10_000
+
+
+@dataclass(frozen=True)
+class DeepSeekPublicSettings:
+    api_url: str = "https://api.deepseek.com"
+    model: str = "deepseek-v4-flash"
 
 
 @dataclass(frozen=True)
@@ -33,6 +65,14 @@ class ShortTermMemorySettings:
     redis_session: RedisSessionSettings = field(default_factory=RedisSessionSettings)
     headroom_service: HeadroomServiceSettings = field(
         default_factory=HeadroomServiceSettings
+    )
+    api: ApiSettings = field(default_factory=ApiSettings)
+    journal: JournalSettings = field(default_factory=JournalSettings)
+    compression_queue: CompressionQueueSettings = field(
+        default_factory=CompressionQueueSettings
+    )
+    deepseek_public: DeepSeekPublicSettings = field(
+        default_factory=DeepSeekPublicSettings
     )
 
 
@@ -98,6 +138,12 @@ def _http_service_url(value: str, name: str) -> str:
     return normalized
 
 
+def _non_blank(value: str, name: str) -> str:
+    if not value:
+        raise ValueError(f"{name} must not be blank")
+    return value
+
+
 def load_settings(path: Path | None = None) -> ShortTermMemorySettings:
     """Load dotenv values with process environment taking priority."""
 
@@ -120,10 +166,21 @@ def load_settings(path: Path | None = None) -> ShortTermMemorySettings:
             value("HEADROOM_SERVICE_TIMEOUT_SECONDS", "300"),
             "HEADROOM_SERVICE_TIMEOUT_SECONDS",
         ),
-        compression_model=value("HEADROOM_COMPRESSION_MODEL", "gpt-4o"),
+        compression_model=_non_blank(
+            value("HEADROOM_COMPRESSION_MODEL", "deepseek-v4-flash"),
+            "HEADROOM_COMPRESSION_MODEL",
+        ),
         ccr_ttl_seconds=_positive_int(
             value("HEADROOM_CCR_TTL_SECONDS", "43200"),
             "HEADROOM_CCR_TTL_SECONDS",
+        ),
+        ccr_refresh_seconds=_positive_int(
+            value("HEADROOM_CCR_REFRESH_SECONDS", "3600"),
+            "HEADROOM_CCR_REFRESH_SECONDS",
+        ),
+        max_compression_segments=_positive_int(
+            value("HEADROOM_MAX_COMPRESSION_SEGMENTS", "8"),
+            "HEADROOM_MAX_COMPRESSION_SEGMENTS",
         ),
     )
     if environment == "production" and not headroom.url:
@@ -166,10 +223,67 @@ def load_settings(path: Path | None = None) -> ShortTermMemorySettings:
         ),
     )
 
+    api = ApiSettings(
+        host=_non_blank(value("MEMORY_API_HOST", "127.0.0.1"), "MEMORY_API_HOST"),
+        port=_positive_int(value("MEMORY_API_PORT", "8080"), "MEMORY_API_PORT"),
+        workers=_positive_int(
+            value("MEMORY_API_WORKERS", "4"), "MEMORY_API_WORKERS"
+        ),
+        concurrency_limit=_positive_int(
+            value("MEMORY_API_CONCURRENCY_LIMIT", "100"),
+            "MEMORY_API_CONCURRENCY_LIMIT",
+        ),
+        redis_pool_size=_positive_int(
+            value("MEMORY_API_REDIS_POOL_SIZE", "200"),
+            "MEMORY_API_REDIS_POOL_SIZE",
+        ),
+        max_body_bytes=_positive_int(
+            value("MEMORY_API_MAX_BODY_BYTES", str(10 * 1024 * 1024)),
+            "MEMORY_API_MAX_BODY_BYTES",
+        ),
+        request_timeout_seconds=_positive_float(
+            value("MEMORY_API_REQUEST_TIMEOUT_SECONDS", "10"),
+            "MEMORY_API_REQUEST_TIMEOUT_SECONDS",
+        ),
+        write_max_batch_events=_positive_int(
+            value("MEMORY_WRITE_MAX_BATCH_EVENTS", "100"),
+            "MEMORY_WRITE_MAX_BATCH_EVENTS",
+        ),
+        auth_token=value("MEMORY_API_AUTH_TOKEN"),
+    )
+    journal = JournalSettings(
+        retention_days=_positive_int(
+            value("JOURNAL_RETENTION_DAYS", "30"), "JOURNAL_RETENTION_DAYS"
+        )
+    )
+    compression_queue = CompressionQueueSettings(
+        worker_concurrency=_positive_int(
+            value("HEADROOM_COMPRESSION_WORKERS", "8"),
+            "HEADROOM_COMPRESSION_WORKERS",
+        ),
+        capacity=_positive_int(
+            value("HEADROOM_QUEUE_CAPACITY", "10000"),
+            "HEADROOM_QUEUE_CAPACITY",
+        ),
+    )
+    deepseek_public = DeepSeekPublicSettings(
+        api_url=_http_service_url(
+            value("DEEPSEEK_API_URL", "https://api.deepseek.com"),
+            "DEEPSEEK_API_URL",
+        ),
+        model=_non_blank(
+            value("DEEPSEEK_MODEL", "deepseek-v4-flash"), "DEEPSEEK_MODEL"
+        ),
+    )
+
     return ShortTermMemorySettings(
         environment=environment,
         home=value("SHORT_TERM_MEMORY_HOME", "~/.dream"),
         optimization_scope_secret=scope_secret,
         redis_session=redis_session,
         headroom_service=headroom,
+        api=api,
+        journal=journal,
+        compression_queue=compression_queue,
+        deepseek_public=deepseek_public,
     )
