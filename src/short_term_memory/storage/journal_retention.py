@@ -38,7 +38,7 @@ class JournalRetentionJob:
                 continue
             try:
                 latest = self._latest_valid_timestamp(path)
-            except OSError as error:
+            except (OSError, UnicodeError) as error:
                 failures.append(JournalRetentionFailure(path, str(error)))
                 continue
             if latest is None:

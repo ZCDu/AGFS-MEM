@@ -95,3 +95,24 @@ def test_retention_skips_malformed_filenames_without_broad_deletion(
 
     assert result.removed == ()
     assert malformed.exists()
+
+
+def test_retention_isolates_invalid_utf8_file_and_keeps_cleaning(
+    tmp_path: Path,
+) -> None:
+    store = JournalStore(VFSAdapter(tmp_path))
+    old = store.append_event(
+        "u",
+        "old",
+        memory_event(event_id="old", created_at=datetime(2026, 7, 1, tzinfo=UTC)),
+    )
+    corrupt = store.vfs.paths("u").journals / "2026-07-01-corrupt.jsonl"
+    corrupt.write_bytes(b"\xff")
+
+    result = JournalRetentionJob(store.vfs, retention_days=30).run(
+        datetime(2026, 8, 6, tzinfo=UTC)
+    )
+
+    assert result.removed == (old.path,)
+    assert corrupt.exists()
+    assert [failure.path for failure in result.failures] == [corrupt]

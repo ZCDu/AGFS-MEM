@@ -1,5 +1,5 @@
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -153,4 +153,32 @@ def test_incomplete_final_json_line_is_ignored_as_crash_residue(tmp_path: Path) 
         handle.write('{"type":"message"')
 
     assert store.find_event("u", "s", "durable") == event
+    assert store.read_original_range("u", "s", 1, 1) == (event,)
+
+
+def test_session_read_rejects_whitespace_middle_corruption(tmp_path: Path) -> None:
+    store = JournalStore(VFSAdapter(tmp_path))
+    first = store.append_event("u", "s", memory_event(sequence=1, event_id="one"))
+    store.append_event("u", "s", memory_event(sequence=2, event_id="two"))
+    durable_line, valid_line = first.path.read_text(encoding="utf-8").splitlines()
+    first.path.write_text(
+        f"{durable_line}\n \t\n{valid_line}\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(json.JSONDecodeError):
+        store.read_session("u", "s")
+
+
+def test_sequence_event_preserves_original_offset_timestamp(tmp_path: Path) -> None:
+    store = JournalStore(VFSAdapter(tmp_path))
+    event = memory_event(
+        event_id="offset",
+        created_at=datetime(2026, 8, 6, 8, tzinfo=timezone(timedelta(hours=8))),
+    )
+
+    result = store.append_event("u", "s", event)
+
+    assert json.loads(result.path.read_text(encoding="utf-8"))["timestamp"] == event.created_at
+    assert store.find_event("u", "s", "offset") == event
     assert store.read_original_range("u", "s", 1, 1) == (event,)

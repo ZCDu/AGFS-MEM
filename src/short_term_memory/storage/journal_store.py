@@ -124,7 +124,7 @@ class JournalStore:
         record = JournalMessageEvent(
             role=event.role,
             content=event.content,
-            timestamp=at.isoformat(),
+            timestamp=event.created_at,
             event_id=event.event_id,
             sequence=event.sequence,
             content_type=event.content_type,
@@ -243,7 +243,7 @@ class JournalStore:
                 lines = handle.readlines()
             for index, line in enumerate(lines):
                 if not line.strip():
-                    continue
+                    raise json.JSONDecodeError("blank journal line", line, 0)
                 try:
                     raw = json.loads(line)
                 except json.JSONDecodeError:
