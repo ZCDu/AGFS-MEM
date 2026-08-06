@@ -191,6 +191,16 @@ class SessionCompressionMessage(BaseModel):
             return values
         return {key: _freeze_opaque(value) for key, value in values.items()}
 
+    @model_validator(mode="after")
+    def freeze_extra_fields(self) -> "SessionCompressionMessage":
+        if self.__pydantic_extra__ is not None:
+            object.__setattr__(
+                self,
+                "__pydantic_extra__",
+                FrozenOpaqueMapping(self.__pydantic_extra__),
+            )
+        return self
+
 
 class MemoryEvent(BaseModel):
     """An immutable original event persisted by the memory service."""

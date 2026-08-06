@@ -183,6 +183,33 @@ def test_compression_generation_deeply_freezes_opaque_messages_and_round_trips()
     assert CompressionGeneration.model_validate(dumped) == generation
 
 
+def test_session_compression_message_freezes_top_level_extra_fields_and_round_trips() -> None:
+    message = SessionCompressionMessage(
+        role="assistant",
+        content="opaque",
+        tool_calls=[{"id": "call-1", "arguments": {"query": "opaque"}}],
+    )
+
+    assert message.model_extra is not None
+    with pytest.raises(TypeError):
+        message.model_extra["tool_calls"] = []
+    with pytest.raises(TypeError):
+        message.model_extra["new_field"] = "opaque"
+    with pytest.raises(TypeError):
+        del message.model_extra["tool_calls"]
+
+    dumped = message.model_dump(mode="json")
+    assert dumped == {
+        "role": "assistant",
+        "content": "opaque",
+        "tool_calls": [
+            {"id": "call-1", "arguments": {"query": "opaque"}}
+        ],
+    }
+    assert SessionCompressionMessage.model_validate(dumped) == message
+    assert message.model_copy(deep=True) == message
+
+
 def test_memory_summary_envelope_freezes_all_semantic_collections_and_round_trips() -> None:
     envelope = MemorySummaryEnvelope(
         version=1,
