@@ -49,6 +49,7 @@ class JournalSettings:
 class CompressionQueueSettings:
     worker_concurrency: int = 8
     capacity: int = 10_000
+    shutdown_grace_seconds: float = 30.0
 
 
 @dataclass(frozen=True)
@@ -275,6 +276,10 @@ def load_settings(path: Path | None = None) -> ShortTermMemorySettings:
         capacity=_positive_int(
             value("HEADROOM_QUEUE_CAPACITY", "10000"),
             "HEADROOM_QUEUE_CAPACITY",
+        ),
+        shutdown_grace_seconds=_positive_float(
+            value("MEMORY_WORKER_SHUTDOWN_GRACE_SECONDS", "30"),
+            "MEMORY_WORKER_SHUTDOWN_GRACE_SECONDS",
         ),
     )
     deepseek_public = DeepSeekPublicSettings(

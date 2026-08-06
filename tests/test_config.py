@@ -33,6 +33,7 @@ ENV_NAMES = (
     "HEADROOM_CCR_REFRESH_SECONDS",
     "HEADROOM_MAX_COMPRESSION_SEGMENTS",
     "HEADROOM_COMPRESSION_WORKERS",
+    "MEMORY_WORKER_SHUTDOWN_GRACE_SECONDS",
     "HEADROOM_QUEUE_CAPACITY",
     "DEEPSEEK_API_URL",
     "DEEPSEEK_MODEL",
@@ -65,6 +66,7 @@ def test_http_memory_defaults_are_teacher_visible() -> None:
     assert settings.api.max_body_bytes == 10 * 1024 * 1024
     assert settings.journal.retention_days == 30
     assert settings.compression_queue.worker_concurrency == 8
+    assert settings.compression_queue.shutdown_grace_seconds == 30.0
     assert settings.headroom_service.ccr_ttl_seconds == 43_200
     assert settings.headroom_service.compression_model == "deepseek-v4-flash"
     assert settings.deepseek_public.model == "deepseek-v4-flash"
@@ -79,7 +81,8 @@ def test_new_memory_settings_parse_validated_environment(
         "MEMORY_API_PORT=9000\n"
         "MEMORY_WRITE_MAX_BATCH_EVENTS=5\n"
         "JOURNAL_RETENTION_DAYS=60\n"
-        "HEADROOM_CCR_REFRESH_SECONDS=600\n",
+        "HEADROOM_CCR_REFRESH_SECONDS=600\n"
+        "MEMORY_WORKER_SHUTDOWN_GRACE_SECONDS=7.5\n",
         encoding="utf-8",
     )
 
@@ -89,6 +92,7 @@ def test_new_memory_settings_parse_validated_environment(
     assert settings.api.write_max_batch_events == 5
     assert settings.journal.retention_days == 60
     assert settings.headroom_service.ccr_refresh_seconds == 600
+    assert settings.compression_queue.shutdown_grace_seconds == 7.5
 
 
 def test_deepseek_api_url_must_be_a_non_blank_absolute_http_url(

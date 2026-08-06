@@ -91,6 +91,24 @@ class DelayedSuccessfulHeadroom:
         )
 
 
+class RecordingCompletionPublisher:
+    def __init__(self, queue=None):
+        self.queue = queue
+        self.calls = []
+
+    async def publish(self, job, completed_envelope):
+        if self.queue is not None:
+            assert await self.queue.ack(
+                type("Lease", (), {"job": job, "token": "already-acked"})()
+            ) is False
+        self.calls.append((job, completed_envelope))
+
+
+class FailingCompletionPublisher:
+    async def publish(self, job, completed_envelope):
+        raise ConnectionError("completion transport unavailable")
+
+
 async def seed(store, journals, count=10):
     for sequence in range(1, count + 1):
         content = f"ORIGINAL-{sequence}"
@@ -146,6 +164,46 @@ async def test_worker_stores_generation_only_after_headroom_success(worker):
     assert persisted.compression_generations[0].messages[0].content == "marker"
     assert b"ORIGINAL-1" in transport.requests[0].content
     assert b"marker" not in transport.requests[0].content
+
+
+@pytest.mark.asyncio
+async def test_worker_publishes_completion_only_after_successful_cas_and_ack(worker):
+    worker, store, _ = worker
+    publisher = RecordingCompletionPublisher(worker.queue)
+    worker.completion_publisher = publisher
+    await worker.queue.enqueue(compression_job())
+
+    result = await worker.run_once()
+
+    assert result.state == "acked"
+    assert len(publisher.calls) == 1
+    published_job, published_envelope = publisher.calls[0]
+    assert published_job.job_id == compression_job().job_id
+    assert published_envelope == await store.read_envelope("u", "s")
+
+
+@pytest.mark.asyncio
+async def test_worker_does_not_publish_completion_for_retry(worker):
+    worker, _, _ = worker
+    publisher = RecordingCompletionPublisher()
+    worker.completion_publisher = publisher
+    worker.headroom = FailingHeadroom()
+    await worker.queue.enqueue(compression_job())
+
+    assert (await worker.run_once()).state == "retry"
+    assert publisher.calls == []
+
+
+@pytest.mark.asyncio
+async def test_completion_publish_failure_does_not_rollback_stored_envelope(worker):
+    worker, store, _ = worker
+    worker.completion_publisher = FailingCompletionPublisher()
+    await worker.queue.enqueue(compression_job())
+
+    result = await worker.run_once()
+
+    assert result.state == "acked"
+    assert await store.read_envelope("u", "s") is not None
 
 
 @pytest.mark.asyncio

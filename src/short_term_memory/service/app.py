@@ -264,6 +264,7 @@ def create_app(
     *,
     settings: ShortTermMemorySettings | None = None,
     metrics: ApiMetrics | None = None,
+    lifespan: Any | None = None,
 ) -> FastAPI:
     """Build an authenticated memory API around one injected MemoryService."""
 
@@ -277,7 +278,9 @@ def create_app(
     if isinstance(memory_service, Awaitable):
         raise TypeError("runtime_factory must return a ready MemoryService")
 
-    app = FastAPI(title="Short-Term Memory API", version="1.0.0")
+    app = FastAPI(
+        title="Short-Term Memory API", version="1.0.0", lifespan=lifespan
+    )
     app.state.memory_service = memory_service
     app.state.metrics = api_metrics
     app.add_middleware(
@@ -373,6 +376,32 @@ def create_app(
     @app.get("/health", include_in_schema=True)
     async def health() -> dict[str, str]:
         return {"status": "ok"}
+
+    @app.get("/ready", include_in_schema=True)
+    async def ready() -> JSONResponse:
+        runtime = getattr(app.state, "service_runtime", None)
+        components = {"redis": False, "headroom": False}
+        if runtime is not None:
+            try:
+                result = await runtime.readiness()
+                components = {
+                    "redis": bool(result.get("redis", False)),
+                    "headroom": bool(result.get("headroom", False)),
+                }
+            except Exception:
+                pass
+        is_ready = all(components.values())
+        return JSONResponse(
+            status_code=(
+                status.HTTP_200_OK
+                if is_ready
+                else status.HTTP_503_SERVICE_UNAVAILABLE
+            ),
+            content={
+                "status": "ready" if is_ready else "not_ready",
+                "components": components,
+            },
+        )
 
     @app.get("/metrics", include_in_schema=False)
     async def prometheus_metrics() -> Response:

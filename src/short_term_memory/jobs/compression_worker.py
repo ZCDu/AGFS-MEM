@@ -57,6 +57,7 @@ class CompressionWorker:
         ccr_refresh_seconds: int,
         max_segments: int,
         worker_concurrency: int = 1,
+        completion_publisher: object | None = None,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
         if min(ccr_ttl_seconds, ccr_refresh_seconds, max_segments, worker_concurrency) < 1:
@@ -72,6 +73,7 @@ class CompressionWorker:
         self.ccr_refresh_seconds = ccr_refresh_seconds
         self.max_segments = max_segments
         self.worker_concurrency = worker_concurrency
+        self.completion_publisher = completion_publisher
         self.clock = clock or (lambda: datetime.now(timezone.utc))
 
     async def run_once(self) -> CompressionWorkerResult:
@@ -152,7 +154,11 @@ class CompressionWorker:
         written = await self.store.compare_and_set_envelope(
             job.user_id, job.session_id, job.expected_version, next_envelope
         )
-        return await self._ack(lease, "acked" if written else "stale")
+        if not written:
+            return await self._ack(lease, "stale")
+        return await self._ack(
+            lease, "acked", completed_envelope=next_envelope
+        )
 
     async def _candidate(
         self, job, envelope: MemorySummaryEnvelope | None, now: datetime
@@ -255,10 +261,30 @@ class CompressionWorker:
             return CompressionWorkerResult("lost", lease.job.job_id)
         return CompressionWorkerResult(state, lease.job.job_id)
 
-    async def _ack(self, lease: CompressionJobLease, state: str) -> CompressionWorkerResult:
-        return CompressionWorkerResult(
-            state if await self.queue.ack(lease) else "lost", lease.job.job_id
-        )
+    async def _ack(
+        self,
+        lease: CompressionJobLease,
+        state: str,
+        *,
+        completed_envelope: MemorySummaryEnvelope | None = None,
+    ) -> CompressionWorkerResult:
+        if not await self.queue.ack(lease):
+            return CompressionWorkerResult("lost", lease.job.job_id)
+        if (
+            state == "acked"
+            and completed_envelope is not None
+            and self.completion_publisher is not None
+        ):
+            try:
+                await self.completion_publisher.publish(
+                    lease.job, completed_envelope
+                )
+            except Exception:
+                # The envelope is already durable and the lease is ACKed.  A
+                # waiter periodically checks the envelope when notification is
+                # unavailable, so transport failure must not roll back success.
+                pass
+        return CompressionWorkerResult(state, lease.job.job_id)
 
 
 class InProcessRebuildWaiter:
