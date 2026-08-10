@@ -10,6 +10,11 @@ from uuid import uuid5, NAMESPACE_URL
 import anyio
 from redis.exceptions import RedisError
 
+from short_term_memory.compression.ccr_recall import (
+    CcrRecallClient,
+    CcrRecallError,
+    extract_marker_hashes,
+)
 from short_term_memory.compression.generations import GenerationAssembler
 from short_term_memory.compression.policy import HeadroomPolicy
 from short_term_memory.compression.scope import OptimizationScopeFactory
@@ -23,6 +28,9 @@ from short_term_memory.service.schemas import (
     MemoryReadRequest,
     MemoryReadResponse,
     MemoryReadState,
+    MemoryRecallRequest,
+    MemoryRecallResponse,
+    MemoryRecallResult,
     MemoryWriteRequest,
     MemoryWriteResponse,
     ReadTiming,
@@ -64,6 +72,7 @@ class MemoryService:
         policy_version: str = "v1",
         rebuild_waiter: RebuildCompletionWaiter | None = None,
         cold_rebuild_timeout_seconds: float | None = None,
+        recall_client: CcrRecallClient | None = None,
     ) -> None:
         if not headroom_proxy_url:
             raise ValueError("headroom_proxy_url must not be blank")
@@ -86,6 +95,7 @@ class MemoryService:
         self.cold_rebuild_timeout_seconds = (
             cold_rebuild_timeout_seconds or settings.api.request_timeout_seconds
         )
+        self.recall_client = recall_client
 
     async def write(
         self, request: MemoryWriteRequest, request_id: str
@@ -168,7 +178,9 @@ class MemoryService:
                 committed_new_event = True
 
         originals: tuple[MemoryEvent, ...] = ()
+        compressible: tuple[MemoryEvent, ...] = ()
         should_compress = False
+        should_recompress = False
         if committed_new_event:
             redis_started = time.perf_counter()
             originals, envelope = await asyncio.gather(
@@ -176,22 +188,68 @@ class MemoryService:
                 self.store.read_envelope(request.user_id, request.session_id),
             )
             redis_seconds += time.perf_counter() - redis_started
+
+            # Retain the most recent originals up to a token budget of
+            # context_window * retain_ratio (default 25%).  Originals beyond that
+            # budget are eligible for normal compression.
+            retain_budget = int(
+                self.settings.redis_session.context_window_tokens
+                * self.settings.redis_session.retain_ratio
+            )
+            compressible = self._originals_beyond_budget(originals, retain_budget)
+
+            # Normal compression: judge against the FULL context the model will
+            # actually see — all originals (retained 25% + beyond-budget) plus the
+            # compressed generations.  This makes the "context exceeds 60-70% of the
+            # window" rule reflect reality.
+            total_tokens = self._estimate_tokens(originals)
+            if envelope is not None:
+                total_tokens += self._estimate_generation_tokens(envelope)
             should_compress = self.policy.should_compress(
-                estimated_tokens=self._estimate_tokens(originals),
-                message_count=len(originals),
+                estimated_tokens=total_tokens,
+                message_count=len(compressible),
                 session_seconds=request.session_seconds,
             )
+
+            # Re-compression triggers independently: the compressed segments (older
+            # than the retained recent turns) alone exceed the threshold.  It is not
+            # gated by whether new originals exist — the retained originals always
+            # stay as originals.
+            if envelope is not None and envelope.compression_generations:
+                segment_tokens = self._estimate_generation_tokens(envelope)
+                if self.policy.should_compress(
+                    estimated_tokens=segment_tokens,
+                    message_count=len(envelope.compression_generations),
+                    session_seconds=request.session_seconds,
+                ):
+                    should_recompress = True
         else:
             envelope = None
-        if should_compress and originals:
+        # Normal compression and re-compression are independent; enqueue each that
+        # fired.  Normal compression targets only originals older than the retained
+        # window; re-compression targets the existing compressed segments.
+        if should_compress and compressible:
             queue_started = time.perf_counter()
             await self.compression_queue.enqueue(
                 self._compression_job(
                     request.user_id,
                     request.session_id,
                     envelope,
-                    originals[-1].sequence,
+                    compressible[-1].sequence,
                     rebuild=False,
+                )
+            )
+            queue_seconds += time.perf_counter() - queue_started
+        if should_recompress:
+            queue_started = time.perf_counter()
+            await self.compression_queue.enqueue(
+                self._compression_job(
+                    request.user_id,
+                    request.session_id,
+                    envelope,
+                    envelope.compressed_through_sequence,
+                    rebuild=False,
+                    recompress=True,
                 )
             )
             queue_seconds += time.perf_counter() - queue_started
@@ -238,7 +296,12 @@ class MemoryService:
         recovery_seconds = 0.0
         source = "redis"
 
-        if not originals:
+        # If Redis originals are gone but a compressed summary exists, prefer the
+        # compressed context (per design doc 5.1: when switching back to a historical
+        # session, pull Headroom's compressed content, not the full original journal,
+        # which would be too long). Only restore journal originals when there is no
+        # compressed summary at all.
+        if not originals and envelope is None:
             recovery_started = time.perf_counter()
             originals = await anyio.to_thread.run_sync(
                 self.journals.read_recent_originals,
@@ -320,6 +383,7 @@ class MemoryService:
         assembly_seconds = time.perf_counter() - assembly_started
         scope = self.scope_factory.for_session(request.user_id, request.session_id)
         config = self._effective_config() if request.include_effective_config else None
+        ccr_markers = list(extract_marker_hashes(messages))
 
         return MemoryReadResponse(
             request_id=request_id,
@@ -340,6 +404,7 @@ class MemoryService:
                 proxy_url=self.headroom_proxy_url,
                 scope_headers=scope.as_headroom_headers(),
             ),
+            ccr_markers=ccr_markers,
             effective_config=config,
             timing_ms=ReadTiming(
                 total=self._milliseconds(started),
@@ -349,6 +414,61 @@ class MemoryService:
             ),
         )
 
+    async def recall(
+        self, request: MemoryRecallRequest, request_id: str
+    ) -> MemoryRecallResponse:
+        """Pull originals back from the CCR store by marker hash (application-driven).
+
+        When ``query`` is provided, the stored hash->summary map is used to rank
+        the requested hashes by topical relevance to the question, so the caller
+        gets the most relevant original first.  Each hash is resolved recursively
+        (follows re-compression chains down to the true original text).
+        """
+        if self.recall_client is None:
+            raise MemoryReadUnavailableError("recall is not configured")
+        scope = self.scope_factory.for_session(request.user_id, request.session_id)
+        scope_headers = scope.as_headroom_headers()
+
+        # Rank hashes by relevance to query (if provided) using stored summaries.
+        hashes = list(request.hashes)
+        if request.query:
+            try:
+                summaries = await self.store.get_ccr_summaries(
+                    request.user_id, request.session_id
+                )
+                hashes = self._rank_hashes_by_query(hashes, summaries, request.query)
+            except Exception:
+                # Ranking is an optimization; fall back to the given order.
+                pass
+
+        results: list[MemoryRecallResult] = []
+        for hash_value in hashes:
+            try:
+                content = await self.recall_client.recall_recursive(
+                    hash_value, scope_headers=scope_headers
+                )
+                results.append(
+                    MemoryRecallResult(hash=hash_value, content=content, recovered=True)
+                )
+            except CcrRecallError:
+                results.append(
+                    MemoryRecallResult(hash=hash_value, content="", recovered=False)
+                )
+        return MemoryRecallResponse(request_id=request_id, results=results)
+
+    @staticmethod
+    def _rank_hashes_by_query(
+        hashes: list[str], summaries: dict[str, str], query: str
+    ) -> list[str]:
+        """Rank hashes by text similarity between their summary and the query."""
+        from short_term_memory.compression.recall_policy import text_similarity
+
+        def score(hash_value: str) -> float:
+            summary = summaries.get(hash_value, "")
+            return text_similarity(query, summary)
+
+        return sorted(hashes, key=score, reverse=True)
+
     def _compression_job(
         self,
         user_id: str,
@@ -357,9 +477,13 @@ class MemoryService:
         through_sequence: int,
         *,
         rebuild: bool,
+        recompress: bool = False,
     ) -> CompressionJob:
         expected_version = envelope.version if envelope is not None else 0
-        job_identity = f"{user_id}\n{session_id}\n{expected_version}\n{through_sequence}\n{rebuild}"
+        job_identity = (
+            f"{user_id}\n{session_id}\n{expected_version}\n"
+            f"{through_sequence}\n{rebuild}\n{recompress}"
+        )
         return CompressionJob(
             job_id=f"memory-{uuid5(NAMESPACE_URL, job_identity).hex}",
             user_id=user_id,
@@ -367,6 +491,7 @@ class MemoryService:
             expected_version=expected_version,
             requested_through_sequence=through_sequence,
             rebuild=rebuild,
+            recompress=recompress,
         )
 
     def _effective_config(self) -> EffectiveMemoryConfig:
@@ -387,6 +512,45 @@ class MemoryService:
         if hasattr(estimator, "estimate"):
             return int(estimator.estimate(messages))
         return int(estimator(messages))
+
+    @staticmethod
+    def _originals_beyond_budget(
+        originals: tuple[MemoryEvent, ...], retain_budget: int
+    ) -> tuple[MemoryEvent, ...]:
+        """Return originals beyond the retained token budget.
+
+        Keeps the most recent originals up to ``retain_budget`` tokens; the older
+        remainder (in the front) is returned as compressible.
+        """
+        if retain_budget <= 0 or not originals:
+            return originals
+        # originals are in ascending sequence order; the newest are at the end.
+        # Walk from the newest backwards, accumulating tokens until the budget fills.
+        accumulate = 0
+        cut_index = 0
+        for i in range(len(originals) - 1, -1, -1):
+            accumulate += len(originals[i].content)
+            if accumulate > retain_budget:
+                cut_index = i
+                break
+        return originals[:cut_index]
+
+    def _estimate_generation_tokens(
+        self, envelope: MemorySummaryEnvelope
+    ) -> int:
+        """Estimate tokens of the compressed generations that stay in context."""
+        messages: list[dict[str, Any]] = []
+        for gen in envelope.compression_generations:
+            for m in gen.messages:
+                content = m.content
+                if isinstance(content, str):
+                    messages.append({"role": m.role, "content": content})
+        if not messages:
+            return 0
+        estimator = self.token_estimator
+        if hasattr(estimator, "estimate"):
+            return int(estimator.estimate(tuple(messages)))
+        return int(estimator(tuple(messages)))
 
     def _requires_rebuild(
         self, envelope: MemorySummaryEnvelope | None, now: datetime

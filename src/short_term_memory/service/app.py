@@ -29,6 +29,8 @@ from short_term_memory.service.metrics import ApiMetrics
 from short_term_memory.service.schemas import (
     MemoryReadRequest,
     MemoryReadResponse,
+    MemoryRecallRequest,
+    MemoryRecallResponse,
     MemoryWriteRequest,
     MemoryWriteResponse,
 )
@@ -36,7 +38,9 @@ from short_term_memory.storage.async_redis_memory_store import EventConflictErro
 from short_term_memory.storage.journal_store import JournalConflictError
 
 
-_BUSINESS_PATHS = frozenset({"/v1/memories/write", "/v1/memories/read"})
+_BUSINESS_PATHS = frozenset(
+    {"/v1/memories/write", "/v1/memories/read", "/v1/memories/recall"}
+)
 _REQUEST_ID_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\Z")
 
 
@@ -437,5 +441,14 @@ def create_app(
         response = await app.state.memory_service.read(body, request.state.request_id)
         observe_phases(response.timing_ms)
         return response
+
+    @app.post(
+        "/v1/memories/recall",
+        response_model=MemoryRecallResponse,
+        responses=_ERROR_RESPONSES,
+        dependencies=[Depends(authenticate)],
+    )
+    async def recall_memory(request: Request, body: MemoryRecallRequest) -> Any:
+        return await app.state.memory_service.recall(body, request.state.request_id)
 
     return app

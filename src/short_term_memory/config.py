@@ -12,6 +12,7 @@ class RedisSessionSettings:
     ttl_seconds: int = 43_200
     history_turns: int = 10
     context_window_tokens: int = 128_000
+    retain_ratio: float = 0.25
     trigger_ratio: float = 0.65
     max_messages: int = 100
     max_session_seconds: int = 14_400
@@ -129,6 +130,13 @@ def _plan_trigger_ratio(value: str, name: str) -> float:
     return parsed
 
 
+def _retain_ratio(value: str, name: str) -> float:
+    parsed = _positive_float(value, name)
+    if not 0.0 <= parsed <= 1.0:
+        raise ValueError(f"{name} must be between 0.0 and 1.0")
+    return parsed
+
+
 def _http_service_url(value: str, name: str) -> str:
     if not value:
         return ""
@@ -156,10 +164,36 @@ def _non_blank(value: str, name: str) -> str:
     return value
 
 
-def load_settings(path: Path | None = None) -> ShortTermMemorySettings:
-    """Load dotenv values with process environment taking priority."""
+def resolve_env_file(
+    path: str | os.PathLike[str] | None = None,
+) -> Path | None:
+    """Resolve the .env path, or None to load process environment only.
 
-    file_values = _read_env_file(path) if path is not None else {}
+    Priority:
+      1. Explicit ``path`` argument.
+      2. ``SHORT_TERM_MEMORY_ENV_FILE`` environment variable.
+      3. ``.env`` in the current working directory (if present).
+    """
+    candidate = path
+    if candidate is None:
+        candidate = os.environ.get("SHORT_TERM_MEMORY_ENV_FILE")
+    if candidate is None:
+        candidate = Path.cwd() / ".env"
+    resolved = Path(candidate).expanduser().resolve()
+    return resolved if resolved.is_file() else None
+
+
+def load_settings(path: Path | None = None) -> ShortTermMemorySettings:
+    """Load dotenv values with process environment taking priority.
+
+    ``path`` is an explicit .env file; if omitted the path comes from
+    :func:`resolve_env_file` (env var ``SHORT_TERM_MEMORY_ENV_FILE`` then
+    ``./.env`` in the working directory).
+    """
+
+    file_values = (
+        _read_env_file(resolved) if (resolved := resolve_env_file(path)) else {}
+    )
 
     def value(name: str, default: str = "") -> str:
         return os.environ.get(name, file_values.get(name, default)).strip()
@@ -216,6 +250,9 @@ def load_settings(path: Path | None = None) -> ShortTermMemorySettings:
         ),
         history_turns=_positive_int(
             value("REDIS_HISTORY_TURNS", "10"), "REDIS_HISTORY_TURNS"
+        ),
+        retain_ratio=_retain_ratio(
+            value("REDIS_RETAIN_RATIO", "0.25"), "REDIS_RETAIN_RATIO"
         ),
         context_window_tokens=_positive_int(
             value("CONTEXT_WINDOW_TOKENS", "128000"),

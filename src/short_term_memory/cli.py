@@ -3,6 +3,8 @@
 import argparse
 import asyncio
 from contextlib import suppress
+import os
+from pathlib import Path
 import signal
 from typing import Awaitable, Callable, Sequence
 
@@ -12,14 +14,39 @@ from short_term_memory.config import ShortTermMemorySettings, load_settings
 from short_term_memory.service.runtime import ServiceRuntime
 
 
-def _arguments(argv: Sequence[str] | None, description: str) -> None:
+def _arguments(argv: Sequence[str] | None, description: str) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=description)
-    parser.parse_args(argv)
+    parser.add_argument(
+        "--env-file",
+        metavar="PATH",
+        default=None,
+        help=(
+            "Path to a .env file loaded with process environment taking "
+            "priority. Defaults to $SHORT_TERM_MEMORY_ENV_FILE, then ./.env "
+            "in the working directory."
+        ),
+    )
+    return parser.parse_args(argv)
+
+
+def _settings_for(args: argparse.Namespace) -> ShortTermMemorySettings:
+    """Load settings, honouring ``--env-file``.
+
+    ``load_settings`` discovers the .env file on its own (explicit path ->
+    ``SHORT_TERM_MEMORY_ENV_FILE`` -> ``./.env``). When ``--env-file`` is given
+    we set that variable first so it also reaches uvicorn worker subprocesses,
+    which fork before the app factory runs.
+    """
+    if args.env_file is not None:
+        os.environ["SHORT_TERM_MEMORY_ENV_FILE"] = str(
+            Path(args.env_file).expanduser().resolve()
+        )
+    return load_settings()
 
 
 def api_main(argv: Sequence[str] | None = None) -> None:
-    _arguments(argv, "Run the short-term memory HTTP API")
-    settings = load_settings()
+    args = _arguments(argv, "Run the short-term memory HTTP API")
+    settings = _settings_for(args)
     uvicorn.run(
         "short_term_memory.service.runtime:create_runtime_app",
         factory=True,
@@ -82,6 +109,6 @@ async def run_worker_process(
 
 
 def worker_main(argv: Sequence[str] | None = None) -> None:
-    _arguments(argv, "Run the short-term memory compression worker")
-    settings = load_settings()
+    args = _arguments(argv, "Run the short-term memory compression worker")
+    settings = _settings_for(args)
     asyncio.run(run_worker_process(settings))

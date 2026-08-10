@@ -106,6 +106,58 @@ redis.call('DEL', KEYS[1])
 return {'1'}
 """
 
+TRIM_ORIGINALS_SCRIPT = """
+-- dream:trim-originals-v3
+-- Remove original messages whose sequence <= ARGV[1] (compressed_through),
+-- EXCEPT the most recent messages that fit within ARGV[3] (retain_budget in
+-- approximate chars).  Newer originals stay so read returns them directly.
+local through = tonumber(ARGV[1])
+if not through or through < 0 then return {'0'} end
+local ttl = ARGV[2]
+local retain_budget = tonumber(ARGV[3] or 0)
+if retain_budget < 0 then retain_budget = 0 end
+local all = redis.call('LRANGE', KEYS[1], 0, -1)
+local kept = {}
+local remaining = 0
+-- Walk newest -> oldest, keeping originals until the budget fills.
+local budget_left = retain_budget
+local skip = 0
+for i = #all, 1, -1 do
+  local event = cjson.decode(all[i])
+  if tonumber(event.sequence) > through then
+    -- Newer-than-compressed always kept.
+  else
+    if budget_left > 0 then
+      budget_left = budget_left - #(event.content or '')
+      if budget_left < 0 then
+        skip = i
+        break
+      end
+    else
+      skip = i
+      break
+    end
+  end
+end
+for i = skip + 1, #all do
+  local event = cjson.decode(all[i])
+  if tonumber(event.sequence) > through or i > skip then
+    kept[#kept + 1] = all[i]
+    remaining = remaining + 1
+  end
+end
+if remaining == 0 then
+  redis.call('DEL', KEYS[1])
+else
+  redis.call('DEL', KEYS[1])
+  if #kept > 0 then
+    redis.call('RPUSH', KEYS[1], unpack(kept))
+    redis.call('EXPIRE', KEYS[1], ttl)
+  end
+end
+return {tostring(remaining)}
+"""
+
 
 class AsyncRedisMemoryStore:
     def __init__(self, client: AsyncRedisClient, *, ttl_seconds: int = 43_200) -> None:
@@ -251,6 +303,53 @@ class AsyncRedisMemoryStore:
         )
         return self._result(result)[0] == "1"
 
+    async def trim_originals(
+        self,
+        user_id: str,
+        session_id: str,
+        through_sequence: int,
+        retain_budget: int = 0,
+    ) -> int:
+        """Remove compressed original messages (sequence <= through) from Redis.
+
+        The most recent originals that fit within ``retain_budget`` (approximate
+        chars) are kept as original text so read can return them directly; older
+        compressed originals are trimmed.  The journal still owns the durable
+        original.  Returns the number of messages remaining in the list.
+        """
+        if through_sequence < 0:
+            raise ValueError("through_sequence must not be negative")
+        if retain_budget < 0:
+            raise ValueError("retain_budget must not be negative")
+        keys = self._keys(user_id, session_id)
+        result = await self.client.eval(
+            TRIM_ORIGINALS_SCRIPT,
+            1,
+            keys.messages,
+            str(through_sequence),
+            str(self.ttl_seconds),
+            str(retain_budget),
+        )
+        return int(self._result(result)[0])
+
+    async def store_ccr_summary(
+        self, user_id: str, session_id: str, hash_value: str, summary: str
+    ) -> None:
+        """Record the content summary for a marker hash (hash -> summary)."""
+        if not hash_value:
+            raise ValueError("hash_value must not be blank")
+        keys = self._keys(user_id, session_id)
+        await self.client.hset(keys.ccr_summaries, hash_value, summary)
+        await self.client.expire(keys.ccr_summaries, self.ttl_seconds)
+
+    async def get_ccr_summaries(
+        self, user_id: str, session_id: str
+    ) -> dict[str, str]:
+        """Return all recorded hash -> content-summary mappings for a session."""
+        keys = self._keys(user_id, session_id)
+        raw = await self.client.hgetall(keys.ccr_summaries)
+        return {self._text(k): self._text(v) for k, v in raw.items()}
+
     async def acquire_compression_lease(
         self, user_id: str, session_id: str, token: str
     ) -> bool:
@@ -308,6 +407,7 @@ class AsyncRedisMemoryStore:
             ),
             compression_lock=f"{prefix}:compression-lock",
             pending_reservations=f"{prefix}:pending-reservations",
+            ccr_summaries=f"{prefix}:ccr-summaries",
         )
 
 
@@ -321,6 +421,7 @@ class _Keys:
         event: str,
         compression_lock: str,
         pending_reservations: str,
+        ccr_summaries: str,
     ) -> None:
         self.sequence = sequence
         self.messages = messages
@@ -328,3 +429,4 @@ class _Keys:
         self.event = event
         self.compression_lock = compression_lock
         self.pending_reservations = pending_reservations
+        self.ccr_summaries = ccr_summaries

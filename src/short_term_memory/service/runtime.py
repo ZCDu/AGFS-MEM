@@ -10,6 +10,7 @@ import httpx
 import redis.asyncio as redis_async
 
 from short_term_memory.compression.async_headroom_client import AsyncHeadroomClient
+from short_term_memory.compression.ccr_recall import CcrRecallClient
 from short_term_memory.compression.generations import (
     GenerationAssembler,
     GenerationPlanner,
@@ -133,6 +134,10 @@ class ServiceRuntime:
                 ccr_ttl_seconds=settings.headroom_service.ccr_ttl_seconds,
                 ccr_refresh_seconds=settings.headroom_service.ccr_refresh_seconds,
                 max_segments=settings.headroom_service.max_compression_segments,
+                retain_budget=int(
+                    settings.redis_session.context_window_tokens
+                    * settings.redis_session.retain_ratio
+                ),
                 worker_concurrency=settings.compression_queue.worker_concurrency,
                 completion_publisher=completion,
             )
@@ -141,6 +146,11 @@ class ServiceRuntime:
                 trigger_ratio=settings.redis_session.trigger_ratio,
                 max_messages=settings.redis_session.max_messages,
                 max_session_seconds=settings.redis_session.max_session_seconds,
+            )
+            recall_client = CcrRecallClient(
+                settings.headroom_service.url,
+                timeout_seconds=settings.headroom_service.timeout_seconds,
+                http_client=http_client,
             )
             memory_service = MemoryService(
                 store=store,
@@ -153,6 +163,7 @@ class ServiceRuntime:
                 token_estimator=token_estimator or ApproximateTokenEstimator(),
                 headroom_proxy_url=f"{settings.headroom_service.url.rstrip('/')}/v1",
                 rebuild_waiter=completion,
+                recall_client=recall_client,
             )
             return cls(
                 settings=settings,

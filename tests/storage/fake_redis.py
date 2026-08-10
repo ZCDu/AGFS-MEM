@@ -210,6 +210,27 @@ class AsyncFakeRedis:
     async def get(self, key: str) -> str | None:
         return self.values.get(key)
 
+    async def hset(self, key: str, field: str, value: str) -> int:
+        async with self._lock:
+            self.hashes.setdefault(key, {})[field] = value
+            return 1
+
+    async def hgetall(self, key: str) -> dict[str, str]:
+        async with self._lock:
+            return dict(self.hashes.get(key, {}))
+
+    async def expire(self, key: str, seconds: int) -> bool:
+        async with self._lock:
+            exists = (
+                key in self.lists
+                or key in self.values
+                or key in self.hashes
+                or key in self.sets
+            )
+            if exists:
+                self.ttls[key] = int(seconds)
+            return exists
+
     async def set(
         self,
         key: str,

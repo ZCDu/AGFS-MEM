@@ -108,5 +108,34 @@ class MemoryReadResponse(BaseModel):
     messages: list[SessionCompressionMessage]
     memory: MemoryReadState
     headroom: HeadroomProxyContext
+    ccr_markers: list[str] = Field(default_factory=list)
     effective_config: EffectiveMemoryConfig | None
     timing_ms: ReadTiming
+
+
+class MemoryRecallRequest(BaseModel):
+    """Request to pull originals back from the CCR store by marker hash."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    user_id: str = Field(min_length=1)
+    session_id: str = Field(min_length=1)
+    hashes: list[str] = Field(min_length=1)
+    query: str | None = Field(default=None, min_length=1)
+
+
+class MemoryRecallResult(BaseModel):
+    """A single recalled original paired with its marker hash."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    hash: str = Field(min_length=1)
+    content: str = Field(min_length=1)
+    recovered: bool
+
+
+class MemoryRecallResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    request_id: str = Field(min_length=1)
+    results: list[MemoryRecallResult]

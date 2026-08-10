@@ -75,6 +75,21 @@ class RecordingMemoryService:
             timing_ms=ReadTiming(total=3.0, redis=1.0, recovery=0.0, assembly=0.5),
         )
 
+    async def recall(self, request, request_id):
+        self.calls.append(("recall", request, request_id))
+        self.entered.set()
+        if self.release is not None:
+            await self.release.wait()
+        if self.next_error is not None:
+            raise self.next_error
+        return {
+            "request_id": request_id,
+            "results": [
+                {"hash": h, "content": f"original-{h}", "recovered": True}
+                for h in request.hashes
+            ],
+        }
+
 
 def settings(
     *,
@@ -135,7 +150,7 @@ async def call_asgi(app, scope, receive):
 
 
 @pytest.mark.asyncio
-async def test_only_two_business_routes_exist_and_openapi_documents_auth() -> None:
+async def test_only_three_business_routes_exist_and_openapi_documents_auth() -> None:
     app = app_for(RecordingMemoryService())
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app), base_url="http://test"
@@ -145,7 +160,11 @@ async def test_only_two_business_routes_exist_and_openapi_documents_auth() -> No
     business = sorted(
         path for path in schema["paths"] if path.startswith("/v1/memories/")
     )
-    assert business == ["/v1/memories/read", "/v1/memories/write"]
+    assert business == [
+        "/v1/memories/read",
+        "/v1/memories/recall",
+        "/v1/memories/write",
+    ]
     for path in business:
         operation = schema["paths"][path]["post"]
         assert operation["security"] == [{"HTTPBearer": []}]
@@ -178,6 +197,26 @@ async def test_write_and_read_contract_call_only_the_injected_memory_service() -
         call[2] == response.headers["x-request-id"]
         for call, response in zip(service.calls, (written, read))
     )
+
+
+@pytest.mark.asyncio
+async def test_recall_contract_calls_only_the_injected_memory_service() -> None:
+    service = RecordingMemoryService()
+    app = app_for(service)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        response = await client.post(
+            "/v1/memories/recall",
+            headers=auth_headers(),
+            json={"user_id": "u-1", "session_id": "s-1", "hashes": ["abc123def456"]},
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["results"][0]["hash"] == "abc123def456"
+    assert body["results"][0]["recovered"] is True
+    assert [call[0] for call in service.calls] == ["recall"]
 
 
 @pytest.mark.asyncio

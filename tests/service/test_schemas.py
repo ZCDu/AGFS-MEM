@@ -136,6 +136,7 @@ def test_read_response_dumps_the_approved_optional_config_contract() -> None:
             "proxy_url": "http://headroom:8787/v1",
             "scope_headers": {"x-headroom-user-id": "opaque-value"},
         },
+        "ccr_markers": [],
         "effective_config": None,
         "timing_ms": {"total": 31.5, "redis": 12.2, "recovery": 0.0, "assembly": 3.1},
     }

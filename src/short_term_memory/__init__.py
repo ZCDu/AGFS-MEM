@@ -1,11 +1,13 @@
 """Redis and Headroom short-term memory SDK."""
 
+from short_term_memory.agent.agent_chat import AgentChatClient
 from short_term_memory.api.runtime import build_runtime
 from short_term_memory.config import ShortTermMemorySettings
 from short_term_memory.models import CompletionResult, PreparedTurn
 
 __all__ = [
     "build_runtime",
+    "AgentChatClient",
     "ShortTermMemorySettings",
     "PreparedTurn",
     "CompletionResult",

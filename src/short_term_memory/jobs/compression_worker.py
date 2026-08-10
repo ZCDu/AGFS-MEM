@@ -10,6 +10,7 @@ from typing import AsyncIterator, Callable
 import anyio
 
 from short_term_memory.compression.async_headroom_client import AsyncHeadroomClient
+from short_term_memory.compression.ccr_recall import extract_marker_hashes
 from short_term_memory.compression.generations import CompressionCandidate, GenerationPlanner
 from short_term_memory.compression.scope import OptimizationScopeFactory
 from short_term_memory.jobs.redis_compression_queue import (
@@ -56,6 +57,7 @@ class CompressionWorker:
         ccr_ttl_seconds: int,
         ccr_refresh_seconds: int,
         max_segments: int,
+        retain_budget: int = 0,
         worker_concurrency: int = 1,
         completion_publisher: object | None = None,
         clock: Callable[[], datetime] | None = None,
@@ -72,6 +74,7 @@ class CompressionWorker:
         self.ccr_ttl_seconds = ccr_ttl_seconds
         self.ccr_refresh_seconds = ccr_refresh_seconds
         self.max_segments = max_segments
+        self.retain_budget = retain_budget
         self.worker_concurrency = worker_concurrency
         self.completion_publisher = completion_publisher
         self.clock = clock or (lambda: datetime.now(timezone.utc))
@@ -155,6 +158,11 @@ class CompressionWorker:
         if current_version != job.expected_version:
             return await self._ack(lease, "stale")
 
+        # Re-compression: the whole context is already compressed but still over
+        # threshold.  Concatenate existing generations' messages and compress again.
+        if job.recompress:
+            return await self._execute_recompress(lease, envelope, now)
+
         candidate = await self._candidate(job, envelope, now)
         if candidate is None or candidate.expected_version != job.expected_version:
             return await self._ack(lease, "stale")
@@ -192,9 +200,77 @@ class CompressionWorker:
         )
         if not written:
             return await self._ack(lease, "stale")
+        # Record hash -> content summary for each marker so recall can match by query.
+        try:
+            await self._record_ccr_summaries(
+                job.user_id, job.session_id, compressed.messages
+            )
+        except Exception:
+            # Recording summaries is an optimization; failure must not fail the ack.
+            pass
+        # Shrink the online context: drop originals already covered by compression.
+        try:
+            await self.store.trim_originals(
+                job.user_id,
+                job.session_id,
+                next_envelope.compressed_through_sequence,
+                retain_budget=self.retain_budget,
+            )
+        except Exception:
+            # Trimming is an optimization; a failure must not fail the ack.
+            pass
         return await self._ack(
             lease, "acked", completed_envelope=next_envelope
         )
+
+    async def _execute_recompress(
+        self, lease, envelope: MemorySummaryEnvelope | None, now: datetime
+    ) -> CompressionWorkerResult:
+        """Shrink the context by dropping the OLDEST compressed generation.
+
+        When the whole context is already compressed but still over threshold, we
+        remove the oldest generation from the summary.  Its marker hashes remain in
+        the separate ``ccr-summaries`` map, so recall can still fetch the original
+        text from the CCR cache (within its TTL).
+        """
+        job = lease.job
+        if envelope is None or len(envelope.compression_generations) <= 1:
+            return await self._ack(lease, "acked")
+
+        old_generations = envelope.compression_generations
+        # Drop the oldest (first) generation; keep the rest.
+        kept = old_generations[1:]
+
+        next_envelope = envelope.model_copy(
+            update={
+                "version": envelope.version + 1,
+                "compression_generations": kept,
+                "updated_at": now.isoformat(),
+            }
+        )
+        written = await self.store.compare_and_set_envelope(
+            job.user_id, job.session_id, job.expected_version, next_envelope
+        )
+        if not written:
+            return await self._ack(lease, "stale")
+        return await self._ack(lease, "acked", completed_envelope=next_envelope)
+
+    async def _record_ccr_summaries(
+        self, user_id: str, session_id: str, compressed_messages: tuple[dict, ...]
+    ) -> None:
+        """Store a content snippet for every marker hash in the compressed result."""
+        hashes = extract_marker_hashes(compressed_messages)
+        if not hashes:
+            return
+        # Use the compressed messages text as the summary source.
+        text = "\n".join(
+            str(m.get("content", "")) for m in compressed_messages if isinstance(m, dict)
+        )
+        summary = text[:300]
+        for hash_value in hashes:
+            await self.store.store_ccr_summary(
+                user_id, session_id, hash_value, summary
+            )
 
     async def _candidate(
         self, job, envelope: MemorySummaryEnvelope | None, now: datetime
@@ -202,14 +278,6 @@ class CompressionWorker:
         if job.rebuild:
             return await self.planner.plan_rebuild(
                 job.user_id, job.session_id, job.requested_through_sequence
-            )
-        rebuild_through = max(
-            job.requested_through_sequence,
-            envelope.compressed_through_sequence if envelope is not None else 0,
-        )
-        if envelope is not None and self._needs_rebuild(envelope, now):
-            return await self.planner.plan_rebuild(
-                job.user_id, job.session_id, rebuild_through
             )
         candidate = await self.planner.plan_incremental(job.user_id, job.session_id)
         if candidate is None:
@@ -257,15 +325,6 @@ class CompressionWorker:
             compression_generations=generations,
             updated_at=now.isoformat(),
             **summary.model_dump(),
-        )
-
-    def _needs_rebuild(self, envelope: MemorySummaryEnvelope, now: datetime) -> bool:
-        if len(envelope.compression_generations) >= self.max_segments:
-            return True
-        refresh_at = now + timedelta(seconds=self.ccr_refresh_seconds)
-        return any(
-            self._aware_datetime(generation.ccr_expires_at) <= refresh_at
-            for generation in envelope.compression_generations
         )
 
     def _now(self) -> datetime:

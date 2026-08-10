@@ -26,6 +26,7 @@ class CompressionJob(BaseModel):
     requested_through_sequence: int = Field(ge=1)
     attempt: int = Field(ge=0, default=0)
     rebuild: bool = False
+    recompress: bool = False
 
 
 @dataclass(frozen=True)

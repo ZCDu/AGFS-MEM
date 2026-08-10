@@ -40,11 +40,14 @@ def test_package_source_does_not_import_headroom_package() -> None:
     assert offenders == []
 
 
-def test_package_source_does_not_implement_ccr_retrieval() -> None:
+def test_package_source_recall_goes_through_http_not_headroom_backend() -> None:
+    """The project drives recall via the HTTP retrieve endpoint, never by reading
+    Headroom's CCR backend directly (no sqlite file / home dir access)."""
     offenders = []
     for path in (ROOT / "src" / "short_term_memory").rglob("*.py"):
         text = path.read_text(encoding="utf-8")
-        if "headroom_retrieve" in text or "recall_references" in text:
+        # Accessing Headroom's internal on-disk CCR store would violate the boundary.
+        if "ccr_store.db" in text or "~/.headroom" in text or ".headroom/ccr" in text:
             offenders.append(path.relative_to(ROOT).as_posix())
 
     assert offenders == []
