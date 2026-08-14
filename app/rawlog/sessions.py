@@ -166,6 +166,21 @@ class SessionLog:
                 return key
         return None
 
+    def delete(self, user_id: str, session_id: str, day: date | None = None) -> bool:
+        """Delete one session log. Returns whether anything was removed.
+
+        `day` makes it a single targeted delete. Without it the session is
+        located first (backwards search), then removed.
+        """
+        validate_session_id(session_id)
+        key = self._key(user_id, day, session_id) if day is not None else None
+        if key is None:
+            key = self.find(user_id, session_id)
+        if key is None:
+            return False
+        self.backend.delete(key)
+        return True
+
     def _summarise(self, key: str) -> dict | None:
         records = self._parse(self.backend.get_bytes(key))
         if not records:

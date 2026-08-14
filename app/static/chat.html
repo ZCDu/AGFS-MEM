@@ -12,11 +12,11 @@
   Apply commits it. A model deciding on its own what to write into long-term
   memory is how memory fills with hallucinations.
 -->
-<html lang="zh-CN">
+<html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>对话</title>
+<title>Chat</title>
 <style>
   :root {
     --bg:#e9edf2; --panel:#fff; --ink:#16202b; --ink-soft:#5c6b7a;
@@ -49,11 +49,6 @@
   .msg.err .body{border-color:#e6c4bc; color:var(--danger)}
   .msg .cite{margin-top:7px; padding-top:6px; border-top:1px solid var(--line-soft);
              font:11px var(--mono); color:var(--ink-soft)}
-  .msg .files{margin-top:6px; display:flex; flex-wrap:wrap; gap:3px}
-  .msg .file-badge{display:inline-flex; align-items:center; gap:3px;
-                    background:var(--bg); border:1px solid var(--line);
-                    border-radius:3px; padding:2px 7px; font-size:11px}
-  .msg .file-badge .ficon{font-size:14px}
 
   .composer{border-top:1px solid var(--line); background:var(--panel); padding:11px 14px}
   .composer .row{display:flex; gap:8px; align-items:flex-end}
@@ -70,25 +65,6 @@
   :focus-visible{outline:2px solid var(--accent); outline-offset:1px}
   .hint{font-size:11px; color:var(--ink-soft); margin-top:6px}
 
-  /* attach button */
-  #attach-btn{background:transparent; border:none; color:var(--ink-soft); font-size:20px;
-              cursor:pointer; padding:4px 6px; line-height:1; border-radius:3px}
-  #attach-btn:hover{background:var(--line-soft); color:var(--ink)}
-  #file-input{display:none}
-
-  /* file chips below input */
-  #file-chips{display:flex; flex-wrap:wrap; gap:4px; margin-top:6px; min-height:0}
-  .file-chip{display:inline-flex; align-items:center; gap:5px;
-             background:var(--line-soft); border-radius:3px; padding:3px 8px;
-             font-size:11px; max-width:200px}
-  .file-chip .name{overflow:hidden; text-overflow:ellipsis; white-space:nowrap; flex:1}
-  .file-chip .sz{color:var(--ink-soft); font-size:10px; flex-shrink:0}
-  .file-chip .rm{cursor:pointer; color:var(--ink-soft); font-weight:bold;
-                 font-size:14px; line-height:1; flex-shrink:0}
-  .file-chip .rm:hover{color:var(--danger)}
-  .file-chip.uploading{opacity:.6}
-  .file-chip.failed{border:1px solid var(--danger); color:var(--danger)}
-
   aside{grid-area:side; background:var(--panel); border-left:1px solid var(--line);
         overflow-y:auto; display:flex; flex-direction:column}
   section{padding:12px 14px; border-bottom:1px solid var(--line-soft)}
@@ -98,6 +74,15 @@
   .muted{color:var(--ink-soft); font-size:12px}
   .item{border:1px solid var(--line-soft); border-radius:3px; padding:7px 9px;
         margin-bottom:6px; background:#fcfdfe}
+  .item.sitem{cursor:pointer}
+  .item.sitem:hover{border-color:var(--accent)}
+  .item.sitem.active{outline:2px solid var(--accent); outline-offset:0}
+  .sitem .row{display:flex; align-items:center; gap:6px}
+  .sitem .row .grow{flex:1}
+  .sitem .del{color:var(--danger); border:1px solid var(--line-soft);
+              background:#fff; border-radius:3px; padding:1px 6px; font-size:11px;
+              cursor:pointer}
+  .sitem .del:hover{border-color:var(--danger)}
   .id{font:10px var(--mono); color:var(--ink-soft)}
   .pill{display:inline-block; font:10px var(--mono); letter-spacing:.04em;
         text-transform:uppercase; color:#fff; padding:2px 6px; border-radius:2px}
@@ -116,6 +101,9 @@
          color:#fff; padding:9px 12px; border-radius:3px; font-size:13px; opacity:0;
          transform:translateY(6px); transition:opacity .18s,transform .18s;
          pointer-events:none; z-index:9;
+         /* Errors from a model or a stack trace can be one unbroken string
+            with nothing to wrap on, which otherwise runs off the screen and
+            takes the layout with it. */
          white-space:pre-wrap; overflow-wrap:anywhere}
   #toast.show{opacity:1; transform:none}
   #toast.err{background:var(--danger)}
@@ -125,61 +113,75 @@
 <body>
 
 <header>
-  <h1>对话</h1>
-  <label for="user" style="margin:0">用户</label>
+  <h1>Chat</h1>
+  <label for="user" style="margin:0">User</label>
   <input id="user" value="demo" style="width:110px; font-family:var(--mono); padding:4px 7px">
-  <label for="token" style="margin:0">令牌</label>
-  <input id="token" type="password" placeholder="如已启用认证" autocomplete="off"
+  <label for="token" style="margin:0">Token</label>
+  <input id="token" type="password" placeholder="if auth is on" autocomplete="off"
          style="width:130px; font-family:var(--mono); padding:4px 7px">
-  <button class="sm ghost" id="signin" style="padding:4px 9px">登录</button>
-  <button class="sm ghost" id="signout" style="padding:4px 9px">退出</button>
+  <button class="sm ghost" id="signin" style="padding:4px 9px">Sign in</button>
+  <button class="sm ghost" id="signout" style="padding:4px 9px">Sign out</button>
+  <label for="wiki" style="margin:0">Wiki</label>
+  <select id="wiki" style="width:150px; padding:4px 7px">
+    <option value="">auto (route per message)</option>
+  </select>
   <span class="sp"></span>
   <span id="who" class="muted" style="font-size:11px"></span>
-  <a class="navlink" href="/gui">图谱编辑器 &rarr;</a>
+  <a class="navlink" href="/gui">Graph editor &rarr;</a>
 </header>
 
 <main>
   <div id="log">
     <div class="msg">
-      <span class="who">系统</span>
-      <div class="body">随便问点什么。该用户已存储在记忆中的内容会被检索并用于回答——右侧面板会显示检索到了什么。
+      <span class="who">System</span>
+      <div class="body">Ask something. Anything already in memory for this user will be
+retrieved and used to answer — what was retrieved appears on the right.
 
-当对话中包含值得保留的内容时，点击<strong>审查提取</strong>。
-它会提出修改建议，但不会写入任何内容。</div>
+When the conversation contains something worth keeping, press <strong>Review extraction</strong>.
+That proposes changes without writing anything.</div>
     </div>
   </div>
   <div class="composer">
-    <div id="file-chips"></div>
     <div class="row">
-      <button id="attach-btn" title="添加附件">📎</button>
-      <input type="file" id="file-input" multiple>
-      <textarea id="input" placeholder="输入消息，或将文件拖放到此处…"></textarea>
-      <button id="send">发送</button>
+      <textarea id="input" placeholder="Type a message, then Enter to send (Shift+Enter for a new line)"></textarea>
+      <button id="send">Send</button>
     </div>
     <div class="hint">
       <label style="display:inline; margin:0">
-        <input type="checkbox" id="usemem" checked style="width:auto; vertical-align:-2px"> 使用记忆
+        <input type="checkbox" id="usemem" checked style="width:auto; vertical-align:-2px"> use memory
       </label>
-      &nbsp;·&nbsp; <span id="turns">0 轮</span>
+      &nbsp;·&nbsp; <span id="turns">0 turns</span>
       &nbsp;·&nbsp; <span id="sess" class="muted"></span>
-      &nbsp;·&nbsp; <a href="#" id="clear" class="navlink">清空对话</a>
+      &nbsp;·&nbsp; <span id="routed" class="muted"></span>
+      &nbsp;·&nbsp; <a href="#" id="clear" class="navlink">clear conversation</a>
     </div>
   </div>
 </main>
 
 <aside>
   <section>
-    <h2>上次回复使用的记忆</h2>
-    <div id="context"><p class="muted">尚未检索到任何内容。</p></div>
+    <h2>Conversations</h2>
+    <div class="row" style="display:flex; gap:6px; margin-bottom:8px">
+      <button class="ghost sm" id="newsession" style="flex:1">New conversation</button>
+      <button class="ghost sm" id="refreshsessions">Refresh</button>
+    </div>
+    <div id="sessions" style="max-height:240px; overflow-y:auto">
+      <p class="muted">No saved conversations.</p>
+    </div>
   </section>
 
   <section>
-    <h2>提取</h2>
-    <p class="muted">将这段对话转化为长期记忆。先审查——不会写入任何内容。</p>
+    <h2>Memory used in the last reply</h2>
+    <div id="context"><p class="muted">Nothing retrieved yet.</p></div>
+  </section>
+
+  <section>
+    <h2>Extraction</h2>
+    <p class="muted">Turn this conversation into stored memory. Review first — it writes nothing.</p>
     <div style="height:8px"></div>
     <div class="row" style="display:flex; gap:6px">
-      <button class="ghost sm" id="review">审查提取</button>
-      <button class="sm" id="apply" disabled>应用</button>
+      <button class="ghost sm" id="review">Review extraction</button>
+      <button class="sm" id="apply" disabled>Apply</button>
     </div>
     <div id="plan" style="margin-top:10px"></div>
   </section>
@@ -191,10 +193,23 @@
 <script>
 const $ = id => document.getElementById(id);
 let messages = [];          // {role, content}
+// The operations from the last reviewed plan. /extract/apply takes these, not
+// the transcript — so what gets written is exactly what was shown, rather than
+// a fresh extraction that might differ.
 let reviewedOps = null;
-let reviewedFrom = null;    // 生成计划时的对话记录
+let reviewedFrom = null;    // transcript the plan was built from
+// Assigned by the server on the first turn and echoed back on every later one,
+// so the whole conversation lands in a single session file rather than one
+// file per turn.
 let sessionId = null;
 let sessionDate = null;
+// The wiki the reviewed plan targets. Apply must write where the review said
+// it would, not wherever the picker happens to point by then.
+let reviewedTarget = null;
+// Past conversations for this user, so one can be resumed from where it
+// stopped instead of being lost when the tab closes. The server keeps the
+// logs; this is just the visible list.
+let sessionList = [];
 
 const user = () => $("user").value.trim() || "demo";
 const base = () => `/v1/users/${encodeURIComponent(user())}`;
@@ -224,50 +239,39 @@ async function api(method, path, body) {
     let detail = data && data.detail
       ? (typeof data.detail === "string" ? data.detail : JSON.stringify(data.detail))
       : `HTTP ${res.status}`;
-    if (res.status === 401) detail += " — 请在上方输入令牌。";
-    if (res.status === 403) detail += " — 该令牌属于其他用户。";
-    if (res.status === 503) detail += " — 请在 .env 中设置 DEEPSEEK_API_KEY 并重启。";
+    if (res.status === 401) detail += " — paste a token above.";
+    if (res.status === 403) detail += " — that token is for a different user.";
+    if (res.status === 503) detail += " — set DEEPSEEK_API_KEY in .env and restart.";
     throw new Error(detail);
   }
   return data;
 }
 
-/* ---------------- 对话 ---------------- */
+/* ---------------- conversation ---------------- */
 
 function render() {
   $("log").innerHTML = messages.map(m => `
     <div class="msg ${m.role === "user" ? "user" : ""}${m.error ? " err" : ""}">
-      <span class="who">${m.role === "user" ? "你" : "助手"}</span>
-      <div class="body">${esc(m.content)}${m.files && m.files.length ? `
-        <div class="files">${m.files.map(f =>
-          `<span class="file-badge"><span class="ficon">📄</span>${esc(f.name)}</span>`
-        ).join("")}</div>` : ""}${
+      <span class="who">${m.role === "user" ? "You" : "Bot"}</span>
+      <div class="body">${esc(m.content)}${
         m.cites && m.cites.length
-          ? `<div class="cite">记忆来源: ${m.cites.map(c => esc(c.wiki_id)).join(", ")}</div>`
+          ? `<div class="cite">memory: ${m.cites.map(c => esc(c.wiki_id)).join(", ")}</div>`
           : ""}</div>
     </div>`).join("");
   $("log").scrollTop = $("log").scrollHeight;
-  $("turns").textContent = `${messages.length} 轮`;
+  $("turns").textContent = `${messages.length} turn${messages.length === 1 ? "" : "s"}`;
 }
 
 function transcript() {
-  return messages.map(m => `${m.role === "user" ? "用户" : "助手"}: ${m.content}`)
+  return messages.map(m => `${m.role === "user" ? "User" : "Assistant"}: ${m.content}`)
                  .join("\n\n");
 }
 
 async function send() {
   const text = $("input").value.trim();
-  const hasFiles = pendingFiles.some(f => f.uploaded && f.file_id);
-  if (!text && !hasFiles) return;
+  if (!text) return;
   $("input").value = "";
-
-  // 收集已上传完成的文件，附加到消息中
-  const attachedFiles = pendingFiles.filter(f => f.uploaded && f.file_id);
-  const fileNames = attachedFiles.map(f => ({name: f.name}));
-  pendingFiles = pendingFiles.filter(f => !f.uploaded || !f.file_id);
-  renderChips();
-
-  messages.push({role: "user", content: text || " ", files: fileNames.length ? fileNames : undefined});
+  messages.push({role: "user", content: text});
   render();
 
   $("send").disabled = true;
@@ -275,20 +279,26 @@ async function send() {
   render();
 
   try {
-    const body = {
+    const res = await api("POST", "/chat", {
       messages: messages.filter(m => m.content !== "…")
                         .map(m => ({role: m.role, content: m.content})),
       use_memory: $("usemem").checked,
       session_id: sessionId,
-    };
-    if (attachedFiles.length) {
-      body.attachments = attachedFiles.map(f => `file:${f.session_id}:${f.file_id}`);
+      // Empty means "route it" — the server picks and reports which, rather
+      // than the client guessing.
+      wiki_id: $("wiki").value || null,
+    });
+    if (res.wiki_id) {
+      $("routed").textContent = "wiki: " + res.wiki_id
+        + (res.wiki_reason ? " (" + res.wiki_reason + ")" : "");
+    } else {
+      $("routed").textContent = res.wiki_reason
+        ? "no wiki: " + res.wiki_reason : "";
     }
-    const res = await api("POST", "/chat", body);
     if (res.session_id) {
       sessionId = res.session_id;
       sessionDate = new Date().toISOString().slice(0, 10);
-      $("sess").textContent = "会话 " + sessionId;
+      $("sess").textContent = "session " + sessionId;
     }
     messages.pop();
     messages.push({role: "assistant", content: res.reply, cites: res.context_used});
@@ -299,31 +309,140 @@ async function send() {
   } finally {
     $("send").disabled = false;
     render();
+    // The plan was built from an older transcript, so it no longer matches
+    // what is on screen. Better to invalidate than to apply something stale.
     if (reviewedFrom !== null && reviewedFrom !== transcript()) {
       $("apply").disabled = true;
       reviewedOps = null; reviewedFrom = null;
     }
+    // A new turn may have started a new session; keep the list current.
+    loadSessions();
   }
 }
 
 function renderContext(used) {
   if (!used || !used.length) {
-    $("context").innerHTML = `<p class="muted">记忆中没有匹配该消息的内容。</p>`;
+    $("context").innerHTML = `<p class="muted">Nothing in memory matched that message.</p>`;
     return;
   }
   $("context").innerHTML = used.map(c => `
     <div class="item">
       <div>${esc(c.title)}</div>
-      <div class="id">${esc(c.wiki_id)} · 匹配方式: ${esc(c.matched_on)} · ${c.confidence}</div>
+      <div class="id">${esc(c.wiki_id)} · matched on ${esc(c.matched_on)} · ${c.confidence}</div>
     </div>`).join("");
 }
 
-/* ---------------- 提取 ---------------- */
+/* ---------------- conversations (session resume) ---------------- */
+
+const dateStr = d => d.toISOString().slice(0, 10);
+
+async function loadSessions() {
+  // Recent conversations: the last 14 days, oldest first (the endpoint
+  // already sorts by start time).
+  const start = dateStr(new Date(Date.now() - 14 * 86400000));
+  const end = dateStr(new Date());
+  try {
+    sessionList = await api("GET", `/sessions?start=${start}&end=${end}`);
+    renderSessions();
+  } catch (e) {
+    $("sessions").innerHTML = `<p class="muted">${esc(e.message)}</p>`;
+  }
+}
+
+function renderSessions() {
+  const box = $("sessions");
+  if (!sessionList || !sessionList.length) {
+    box.innerHTML = `<p class="muted">No saved conversations.</p>`;
+    return;
+  }
+  box.innerHTML = sessionList.map(s => `
+    <div class="item sitem" data-id="${esc(s.session_id)}" data-date="${esc(s.date)}">
+      <div class="row">
+        <div class="grow">
+          <div class="muted" style="font-size:10px">${esc(s.date)} · ${esc(s.messages)} msg${s.messages === 1 ? "" : "s"}</div>
+          <div style="margin-top:2px">${esc(s.preview || "")}</div>
+        </div>
+        <button class="del" data-id="${esc(s.session_id)}" data-date="${esc(s.date)}" title="Delete this conversation">&times;</button>
+      </div>
+    </div>`).join("");
+  box.querySelectorAll(".sitem").forEach(el => {
+    el.onclick = e => {
+      // Clicking the delete button must not also resume the session.
+      if (e.target.closest(".del")) return;
+      resumeSession(el.dataset.id, el.dataset.date, el);
+    };
+  });
+  box.querySelectorAll(".sitem .del").forEach(btn => {
+    btn.onclick = async e => {
+      e.stopPropagation();
+      await deleteSession(btn.dataset.id, btn.dataset.date);
+    };
+  });
+}
+
+async function deleteSession(id, date) {
+  const ok = confirm("Delete this conversation? The stored memory it produced "
+    + "is kept — only the transcript is removed.");
+  if (!ok) return;
+  try {
+    await api("DELETE", `/sessions/${encodeURIComponent(id)}?on=${encodeURIComponent(date)}`);
+    // If the deleted session is the one on screen, start fresh.
+    if (sessionId === id) newConversation();
+    await loadSessions();
+    toast("Conversation deleted");
+  } catch (e) {
+    toast("Could not delete: " + e.message, true);
+  }
+}
+
+async function resumeSession(id, date, el) {
+  try {
+    const data = await api("GET", `/sessions/${encodeURIComponent(id)}?on=${encodeURIComponent(date)}`);
+    const msgs = (data.messages || [])
+      .filter(m => m.role === "user" || m.role === "assistant")
+      .map(m => ({role: m.role, content: m.content}));
+    if (!msgs.length) return toast("That conversation is empty", true);
+    messages = msgs;
+    sessionId = id;
+    sessionDate = date;
+    reviewedOps = null; reviewedFrom = null;
+    $("apply").disabled = true;
+    $("plan").innerHTML = "";
+    $("sess").textContent = "session " + id;
+    renderContext([]);
+    render();
+    if (el) {
+      document.querySelectorAll(".sitem").forEach(n => n.classList.remove("active"));
+      el.classList.add("active");
+    }
+    toast(`Resumed ${msgs.length} message${msgs.length === 1 ? "" : "s"}`);
+  } catch (e) {
+    toast("Could not resume: " + e.message, true);
+  }
+}
+
+function newConversation() {
+  // A new conversation is a new session; keeping the old id would append
+  // unrelated turns to a stored transcript.
+  messages = []; reviewedOps = null; reviewedFrom = null;
+  sessionId = null; sessionDate = null;
+  $("sess").textContent = "";
+  $("apply").disabled = true;
+  $("plan").innerHTML = "";
+  renderContext([]);
+  render();
+  document.querySelectorAll(".sitem").forEach(n => n.classList.remove("active"));
+}
+
+/* ---------------- extraction ---------------- */
 
 const OP_COLOUR = {upsert_entity: "var(--accent)", add_fact: "var(--ok)",
                    link_entities: "var(--warn)"};
 
 function showError(title, message) {
+  // Truncate on screen but keep the whole thing reachable: a validation error
+  // can be thousands of characters, and burying the first line — which is the
+  // part that names the problem — makes it unreadable.
   const full = String(message || "");
   const short = full.length > 400 ? full.slice(0, 400) + "…" : full;
   console.error(title + ":", full);
@@ -332,15 +451,15 @@ function showError(title, message) {
       <div class="top">${esc(title)}</div>
       <div id="errtext">${esc(short)}</div>
       ${full.length > 400
-        ? `<button class="ghost sm" id="errmore">显示全部 ${full.length} 个字符</button>`
+        ? `<button class="ghost sm" id="errmore">Show all ${full.length} characters</button>`
         : ""}
-      <button class="ghost sm" id="errcopy">复制</button>
+      <button class="ghost sm" id="errcopy">Copy</button>
     </div>`;
   const more = $("errmore");
   if (more) more.onclick = () => { $("errtext").textContent = full; more.remove(); };
   $("errcopy").onclick = async () => {
-    try { await navigator.clipboard.writeText(full); toast("已复制"); }
-    catch { toast("无法复制 — 详情已输出到浏览器控制台", true); }
+    try { await navigator.clipboard.writeText(full); toast("Copied"); }
+    catch { toast("Could not copy — it is also in the browser console", true); }
   };
 }
 
@@ -349,10 +468,10 @@ function renderPlan(plan) {
   const tone = plan.decision === "store" ? "var(--ok)"
              : plan.decision === "review" ? "var(--warn)" : "var(--ink-soft)";
   parts.push(`<div><span class="pill" style="background:${tone}">${esc(plan.decision)}</span>
-    <span class="muted" style="margin-left:6px">${plan.llm_used ? "已调用模型" : "未调用模型"}</span></div>`);
+    <span class="muted" style="margin-left:6px">${plan.llm_used ? "model ran" : "no model call"}</span></div>`);
 
   if (!plan.operations.length) {
-    parts.push(`<p class="muted" style="margin-top:8px">未提出任何建议。</p>`);
+    parts.push(`<p class="muted" style="margin-top:8px">Nothing proposed.</p>`);
   } else {
     parts.push(`<div style="margin-top:9px">` + plan.operations.map(o => `
       <div class="op"><span style="color:${OP_COLOUR[o.op] || "var(--ink)"}">${esc(o.op)}</span>
@@ -364,34 +483,42 @@ function renderPlan(plan) {
     parts.push(`<div class="muted" style="margin-top:7px; color:var(--danger)">${esc(r.reason)}</div>`);
   }
   if (plan.discarded && plan.discarded.length) {
-    parts.push(`<div class="muted" style="margin-top:7px">已忽略: ${
+    parts.push(`<div class="muted" style="margin-top:7px">Left out: ${
       plan.discarded.map(esc).join("; ")}</div>`);
   }
   $("plan").innerHTML = parts.join("");
 }
 
 $("review").onclick = async () => {
-  if (!messages.length) return toast("请先输入内容", true);
+  if (!messages.length) return toast("Say something first", true);
   $("review").disabled = true;
   try {
     const text = transcript();
+    // Passing the session stamps every extracted fact with where it came
+    // from, so a stored claim can be traced back to the exact conversation.
     const plan = await api("POST", "/extract",
-      {text, session_id: sessionId, session_date: sessionDate});
+      {text, session_id: sessionId, session_date: sessionDate,
+       target_wiki: $("wiki").value || null});
+    if (plan.target_wiki) {
+      $("routed").textContent = "writing to: " + plan.target_wiki;
+    }
     renderPlan(plan);
     reviewedOps = plan.operations.filter(o => o.status === "proposed");
+    reviewedTarget = plan.target_wiki || null;
     reviewedFrom = text;
     $("apply").disabled = !reviewedOps.length;
-    if (!plan.operations.length) toast("暂无可存储的内容");
+    if (!plan.operations.length) toast("Nothing worth storing yet");
   } catch (e) {
-    showError("审查失败", e.message);
+    showError("Review failed", e.message);
   } finally { $("review").disabled = false; }
 };
 
 $("apply").onclick = async () => {
-  if (!reviewedOps || !reviewedOps.length) return toast("请先审查", true);
+  if (!reviewedOps || !reviewedOps.length) return toast("Review first", true);
   $("apply").disabled = true;
   try {
     const res = await api("POST", "/extract/apply", {
+      target_wiki: reviewedTarget || $("wiki").value,
       operations: reviewedOps.map(o => ({
         op: o.op, wiki_id: o.wiki_id, payload: o.payload, reason: o.reason || "",
       })),
@@ -399,101 +526,17 @@ $("apply").onclick = async () => {
     renderPlan({decision: "applied", llm_used: false,
                 operations: res.operations, rejected: [], discarded: []});
     toast(res.failed
-      ? `已存储 ${res.applied} 项，${res.failed} 项失败 — 详见面板`
-      : `已存储 ${res.applied} 项`,
+      ? `Stored ${res.applied}, ${res.failed} failed — see the panel`
+      : `Stored ${res.applied} change${res.applied === 1 ? "" : "s"}`,
       res.failed > 0);
     reviewedOps = null; reviewedFrom = null;
   } catch (e) {
-    showError("应用失败", e.message);
+    showError("Apply failed", e.message);
     $("apply").disabled = false;
   }
 };
 
-/* ---------------- 文件上传 ---------------- */
-
-let pendingFiles = [];  // {name, file_id, session_id, size, uploaded, error}
-
-const fi = $("file-input");
-const chips = $("file-chips");
-
-$("attach-btn").onclick = () => fi.click();
-fi.onchange = () => { if (fi.files.length) uploadFiles(fi.files); fi.value = ""; };
-
-// 页面任意位置拖放
-let dragCounter = 0;
-document.addEventListener("dragenter", e => { e.preventDefault(); dragCounter++; });
-document.addEventListener("dragleave", () => { dragCounter--; });
-document.addEventListener("dragover", e => e.preventDefault());
-document.addEventListener("drop", e => {
-  e.preventDefault();
-  dragCounter = 0;
-  if (e.dataTransfer.files.length) uploadFiles(e.dataTransfer.files);
-});
-
-// 从剪贴板粘贴文件
-$("input").addEventListener("paste", e => {
-  const items = e.clipboardData?.items;
-  if (!items) return;
-  const files = [];
-  for (const item of items) {
-    if (item.kind === "file") files.push(item.getAsFile());
-  }
-  if (files.length) { e.preventDefault(); uploadFiles(files); }
-});
-
-function fmtSize(n) {
-  if (n < 1024) return n + "B";
-  if (n < 1024*1024) return (n/1024).toFixed(1) + "KB";
-  return (n/(1024*1024)).toFixed(1) + "MB";
-}
-
-function renderChips() {
-  chips.innerHTML = pendingFiles.map((f, i) => {
-    let cls = "file-chip";
-    if (f.error) cls += " failed";
-    else if (!f.uploaded) cls += " uploading";
-    return `<span class="${cls}" title="${esc(f.name)}">
-      <span class="name">${esc(f.name)}</span>
-      <span class="sz">${f.error ? esc(f.error) : f.uploaded ? "✓" : fmtSize(f.size)}</span>
-      <span class="rm" onclick="removeFile(${i})">&times;</span>
-    </span>`;
-  }).join("");
-}
-
-function removeFile(i) { pendingFiles.splice(i, 1); renderChips(); }
-
-async function uploadFiles(fileList) {
-  if (!sessionId) {
-    sessionId = "sess-" + Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 8);
-    $("sess").textContent = "会话 " + sessionId;
-  }
-  for (const file of fileList) {
-    const entry = {name: file.name, file_id: null, session_id: sessionId,
-                   size: file.size, uploaded: false, error: null};
-    pendingFiles.push(entry);
-    const idx = pendingFiles.length - 1;
-    renderChips();
-    try {
-      const fd = new FormData();
-      fd.append("file", file);
-      fd.append("session_id", sessionId);
-      const res = await fetch(base() + "/files", {
-        method: "POST", headers: authHeaders(), body: fd,
-      });
-      if (!res.ok) {
-        const t = await res.text(); let d = null;
-        try { d = JSON.parse(t); } catch {}
-        throw new Error(d?.detail || `HTTP ${res.status}`);
-      }
-      const meta = await res.json();
-      pendingFiles[idx].file_id = meta.file_id;
-      pendingFiles[idx].uploaded = true;
-    } catch (e) {
-      pendingFiles[idx].error = e.message;
-    }
-    renderChips();
-  }
-}
+/* ---------------- wiring ---------------- */
 
 $("send").onclick = send;
 $("input").addEventListener("keydown", e => {
@@ -501,30 +544,38 @@ $("input").addEventListener("keydown", e => {
 });
 $("clear").onclick = e => {
   e.preventDefault();
-  messages = []; reviewedOps = null; reviewedFrom = null;
-  pendingFiles = []; renderChips();
-  sessionId = null; sessionDate = null;
-  $("sess").textContent = "";
-  $("apply").disabled = true;
-  $("plan").innerHTML = "";
-  renderContext([]);
-  render();
+  newConversation();
 };
+$("newsession").onclick = newConversation;
+$("refreshsessions").onclick = loadSessions;
+
+async function loadWikis() {
+  const sel = $("wiki");
+  const keep = sel.value;
+  try {
+    const wikis = await (await fetch("/v1/wikis", {headers: MemAuth.headers()})).json();
+    sel.innerHTML = `<option value="">auto (route per message)</option>`
+      + (Array.isArray(wikis) ? wikis : []).map(w =>
+          `<option value="${esc(w.wiki_id)}">${esc(w.title)} (${w.entity_count})</option>`
+        ).join("");
+    sel.value = keep;
+  } catch { /* auth off or no registry yet; the auto option still works */ }
+}
 
 MemAuth.install({
   onSignedIn: () => {
-    messages = []; reviewedOps = null; reviewedFrom = null;
-  sessionId = null; sessionDate = null;
-  $("sess").textContent = "";
-    $("apply").disabled = true;
-    $("plan").innerHTML = "";
-    renderContext([]);
-    render();
-    toast("已登录");
+    loadWikis();
+    loadSessions();
+    // A new identity means a different memory namespace, so anything on
+    // screen was answered from someone else's graph.
+    newConversation();
+    toast("Signed in");
   },
 });
 
 render();
+loadWikis();
+loadSessions();
 </script>
 </body>
 </html>

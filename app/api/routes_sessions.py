@@ -89,3 +89,26 @@ def read_session(
     if not records:
         raise HTTPException(status_code=404, detail="No such session.")
     return {"session_id": session_id, "messages": records}
+
+
+@router.delete("/{session_id}")
+def delete_session(
+    user_id: str, session_id: str,
+    on: date | None = Query(None, description="The session's date. Required to "
+                                              "delete without a day-by-day search."),
+):
+    """Delete a conversation log. Returns 204 on success.
+
+    Deleting a log does not touch the knowledge graph: facts extracted from
+    it keep their evidence pointer, which now resolves to nothing. That is
+    deliberate -- the log is a transcript, the graph is the memory, and a
+    user removing their conversation history should not also erase stored
+    memory without a separate, explicit action."""
+    log = _log()
+    try:
+        deleted = log.delete(user_id, session_id, day=on)
+    except SessionIdError as e:
+        raise HTTPException(status_code=422, detail=str(e)) from e
+    if not deleted:
+        raise HTTPException(status_code=404, detail="No such session.")
+    return {"deleted": session_id}
