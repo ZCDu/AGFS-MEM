@@ -3,7 +3,12 @@
 import json
 from typing import Any, Literal, Protocol
 
-from short_term_memory.models import EventReservation, MemoryEvent, MemorySummaryEnvelope
+from short_term_memory.models import (
+    EventReservation,
+    MemoryEvent,
+    MemorySummaryEnvelope,
+    migrate_v1_envelope,
+)
 from short_term_memory.storage.recent_originals import select_recent_turns
 from short_term_memory.storage.vfs_adapter import safe_component
 
@@ -282,7 +287,7 @@ class AsyncRedisMemoryStore:
         value = await self.client.get(self._keys(user_id, session_id).summary)
         if value is None:
             return None
-        return MemorySummaryEnvelope.model_validate_json(self._text(value))
+        return migrate_v1_envelope(json.loads(self._text(value)))
 
     async def compare_and_set_envelope(
         self,

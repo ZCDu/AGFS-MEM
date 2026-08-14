@@ -1,13 +1,16 @@
 import pytest
 
 from short_term_memory.models import (
+    AutoCompactTrackingState,
+    CompactBoundary,
     CompressionGeneration,
+    ContextRevision,
     MemoryContentType,
     MemoryEvent,
     MemorySummaryEnvelope,
-    SessionAttachmentReference,
     SessionCompressionContext,
     SessionCompressionMessage,
+    SessionMemoryRevision,
     SessionSummaryCoverage,
     SessionSummaryDocument,
 )
@@ -69,20 +72,47 @@ def test_compression_generation_requires_an_ordered_sequence_range() -> None:
         )
 
 
-def test_memory_summary_envelope_preserves_semantic_summary_and_generations() -> None:
-    envelope = MemorySummaryEnvelope(
+def test_memory_summary_envelope_v2_round_trips_compaction_state() -> None:
+    boundary = CompactBoundary(
+        boundary_id="boundary-1",
+        trigger="auto",
+        strategy="traditional",
+        covered_through_sequence=8,
+        pre_compact_tokens=100_000,
+        true_post_compact_tokens=20_000,
+        created_at="2026-08-06T00:00:00+00:00",
+    )
+    revision = ContextRevision(
         version=1,
-        compressed_through_sequence=1,
+        boundary=boundary,
+        summary_message=SessionCompressionMessage(role="user", content="summary"),
+        messages_to_keep=(),
+        covered_generation_ids=(1, 2),
+        updated_at="2026-08-06T00:00:00+00:00",
+    )
+    envelope = MemorySummaryEnvelope(
+        schema_version=2,
+        version=1,
+        compressed_through_sequence=4,
         compression_generations=[],
-        current_goal=["ship the schema"],
-        preferences=[],
-        confirmed_facts=[],
-        pending_items=[],
-        attachment_references=[],
+        session_memory=SessionMemoryRevision(
+            version=1,
+            content="# Session Title\nCompaction",
+            covered_through_sequence=4,
+            token_count=100,
+            updated_at="2026-08-06T00:00:00+00:00",
+        ),
+        active_revision=revision,
+        auto_compact_tracking=AutoCompactTrackingState(),
         updated_at="2026-08-06T00:00:00+00:00",
     )
 
-    assert envelope.current_goal == ("ship the schema",)
+    restored = MemorySummaryEnvelope.model_validate_json(envelope.model_dump_json())
+
+    assert restored == envelope
+    assert restored.schema_version == 2
+    assert restored.active_revision is not None
+    assert restored.active_revision.boundary.covered_through_sequence == 8
 
 
 def test_memory_event_metadata_is_an_immutable_defensive_copy() -> None:
@@ -123,14 +153,11 @@ def test_compression_generation_messages_are_immutable() -> None:
 
 def test_memory_summary_envelope_generations_are_immutable() -> None:
     envelope = MemorySummaryEnvelope(
+        schema_version=2,
         version=1,
         compressed_through_sequence=0,
         compression_generations=[],
-        current_goal=[],
-        preferences=[],
-        confirmed_facts=[],
-        pending_items=[],
-        attachment_references=[],
+        auto_compact_tracking=AutoCompactTrackingState(),
         updated_at="2026-08-06T00:00:00+00:00",
     )
 
@@ -210,39 +237,51 @@ def test_session_compression_message_freezes_top_level_extra_fields_and_round_tr
     assert message.model_copy(deep=True) == message
 
 
-def test_memory_summary_envelope_freezes_all_semantic_collections_and_round_trips() -> None:
+def test_context_revision_collections_are_immutable_and_tracking_transitions() -> None:
+    boundary = CompactBoundary(
+        boundary_id="boundary-1",
+        trigger="auto",
+        strategy="session_memory",
+        covered_through_sequence=3,
+        pre_compact_tokens=10,
+        true_post_compact_tokens=4,
+        created_at="2026-08-06T00:00:00+00:00",
+    )
     envelope = MemorySummaryEnvelope(
+        schema_version=2,
         version=1,
         compressed_through_sequence=0,
         compression_generations=[],
-        current_goal=["ship"],
-        preferences=["brief"],
-        confirmed_facts=["fact"],
-        pending_items=["review"],
-        attachment_references=[
-            SessionAttachmentReference(placeholder="[a]", raw_ref="raw/a")
-        ],
+        active_revision=ContextRevision(
+            version=1,
+            boundary=boundary,
+            summary_message=SessionCompressionMessage(role="user", content="summary"),
+            messages_to_keep=(SessionCompressionMessage(role="user", content="tail"),),
+            covered_generation_ids=(1, 2),
+            updated_at="2026-08-06T00:00:00+00:00",
+        ),
+        auto_compact_tracking=AutoCompactTrackingState(),
         updated_at="2026-08-06T00:00:00+00:00",
     )
 
-    for values in (
-        envelope.current_goal,
-        envelope.preferences,
-        envelope.confirmed_facts,
-        envelope.pending_items,
-        envelope.attachment_references,
-    ):
-        with pytest.raises(AttributeError):
-            values.append("changed")
-        with pytest.raises(TypeError):
-            values[0] = "changed"
+    with pytest.raises(AttributeError):
+        envelope.active_revision.covered_generation_ids.append(3)
+    failed = envelope.auto_compact_tracking.record_failure()
+    succeeded = failed.reset_success("turn-2")
+    assert failed.consecutive_failures == 1
+    assert succeeded == AutoCompactTrackingState(
+        compacted=True, turn_counter=0, turn_id="turn-2", consecutive_failures=0
+    )
 
-    dumped = envelope.model_dump(mode="json")
-    assert dumped["current_goal"] == ["ship"]
-    assert dumped["preferences"] == ["brief"]
-    assert dumped["confirmed_facts"] == ["fact"]
-    assert dumped["pending_items"] == ["review"]
-    assert dumped["attachment_references"] == [
-        {"placeholder": "[a]", "raw_ref": "raw/a", "source_ref": None}
-    ]
-    assert MemorySummaryEnvelope.model_validate(dumped) == envelope
+
+def test_compact_boundary_rejects_negative_counts_and_revision_ids_are_positive() -> None:
+    with pytest.raises(ValueError):
+        CompactBoundary(
+            boundary_id="b",
+            trigger="auto",
+            strategy="traditional",
+            covered_through_sequence=0,
+            pre_compact_tokens=-1,
+            true_post_compact_tokens=0,
+            created_at="2026-08-06T00:00:00+00:00",
+        )

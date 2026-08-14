@@ -1,7 +1,11 @@
 from datetime import datetime, timezone
 from hashlib import sha256
 
-from short_term_memory.models import MemoryEvent, MemorySummaryEnvelope
+from short_term_memory.models import (
+    AutoCompactTrackingState,
+    MemoryEvent,
+    MemorySummaryEnvelope,
+)
 from short_term_memory.service.schemas import MemoryReadRequest, MemoryWriteRequest
 
 
@@ -21,14 +25,11 @@ def memory_event(*, sequence=1, event_id="event-1", content="original", created_
 
 def envelope(*, version=1, through=0, generations=None):
     return MemorySummaryEnvelope(
+        schema_version=2,
         version=version,
         compressed_through_sequence=through,
         compression_generations=list(generations or []),
-        current_goal=[],
-        preferences=[],
-        confirmed_facts=[],
-        pending_items=[],
-        attachment_references=[],
+        auto_compact_tracking=AutoCompactTrackingState(),
         updated_at="2026-08-06T00:00:00+00:00",
     )
 

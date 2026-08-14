@@ -258,7 +258,7 @@ async def test_incremental_safely_folds_identical_duplicate_sequences(
     assert candidate.originals == (event,)
 
 
-def test_read_assembly_keeps_semantic_summary_unexpired_opaque_generations_and_recent_originals() -> None:
+def test_read_assembly_keeps_unexpired_opaque_generations_and_recent_originals() -> None:
     fresh = CompressionGeneration(
         generation=2,
         from_sequence=3,
@@ -284,21 +284,17 @@ def test_read_assembly_keeps_semantic_summary_unexpired_opaque_generations_and_r
             version=2,
             through=4,
             generations=[expired, fresh],
-        ).model_copy(update={"current_goal": ("finish",)}),
+        ),
         (memory_event(sequence=4, event_id="e-4", content="recent overlap"),),
         datetime(2026, 8, 6, 11, tzinfo=timezone.utc),
     )
 
     assert assembled[0] == {
-        "role": "system",
-        "content": '{"current_goal":["finish"],"preferences":[],"confirmed_facts":[],"pending_items":[],"attachment_references":[]}',
-    }
-    assert assembled[1] == {
         "role": "tool",
         "content": "FRESH",
         "tool_call_id": "opaque",
     }
-    assert assembled[2] == {"role": "user", "content": "recent overlap"}
+    assert assembled[1] == {"role": "user", "content": "recent overlap"}
     assert "EXPIRED" not in json.dumps(assembled)
 
 
@@ -323,7 +319,7 @@ def test_read_assembly_limits_opaque_generations_to_latest_segments() -> None:
         datetime(2026, 8, 6, tzinfo=timezone.utc),
     )
 
-    assert [message["content"] for message in assembled[1:]] == [
+    assert [message["content"] for message in assembled] == [
         "segment-2",
         "segment-3",
     ]
@@ -347,7 +343,7 @@ def test_read_assembly_preserves_null_opaque_fields() -> None:
         datetime(2026, 8, 6, 11, tzinfo=timezone.utc),
     )
 
-    assert assembled[1] == {"role": "tool", "content": None, "tool_call_id": None}
+    assert assembled[0] == {"role": "tool", "content": None, "tool_call_id": None}
 
 
 @pytest.mark.parametrize(
@@ -381,7 +377,7 @@ def test_read_assembly_treats_exact_expiry_as_expired(
         envelope(version=1, through=1, generations=[generation]), (), now
     )
 
-    assert len(assembled) == 1
+    assert assembled == ()
 
 
 def test_read_assembly_rejects_naive_expiry_and_now() -> None:

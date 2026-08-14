@@ -252,32 +252,123 @@ class CompressionGeneration(BaseModel):
         return self
 
 
-class MemorySummaryEnvelope(SessionSummaryPayload):
-    """Semantic summary plus opaque Headroom compression generations."""
+class CompactBoundary(BaseModel):
+    """Claude compact boundary metadata translated to Journal sequences."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    current_goal: tuple[str, ...]
-    preferences: tuple[str, ...]
-    confirmed_facts: tuple[str, ...]
-    pending_items: tuple[str, ...]
-    attachment_references: tuple[SessionAttachmentReference, ...]
+    boundary_id: str = Field(min_length=1)
+    trigger: Literal["auto", "manual", "reactive"]
+    strategy: Literal["session_memory", "traditional"]
+    covered_through_sequence: int = Field(ge=0)
+    pre_compact_tokens: int = Field(ge=0)
+    true_post_compact_tokens: int = Field(ge=0)
+    created_at: str = Field(min_length=1)
+
+
+class SessionMemoryRevision(BaseModel):
+    """Latest Claude-style ten-section Session Memory revision."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    version: int = Field(ge=1)
+    content: str = Field(min_length=1)
+    covered_through_sequence: int = Field(ge=1)
+    token_count: int = Field(ge=0)
+    extraction_started_at: str | None = None
+    updated_at: str = Field(min_length=1)
+
+
+class ContextRevision(BaseModel):
+    """The single active post-compact context revision."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    version: int = Field(ge=1)
+    boundary: CompactBoundary
+    summary_message: SessionCompressionMessage
+    messages_to_keep: tuple[SessionCompressionMessage, ...] = Field(
+        default_factory=tuple
+    )
+    covered_generation_ids: tuple[int, ...] = Field(default_factory=tuple)
+    updated_at: str = Field(min_length=1)
+
+    @field_validator("covered_generation_ids")
+    @classmethod
+    def validate_generation_ids(cls, values: tuple[int, ...]) -> tuple[int, ...]:
+        if any(value < 1 for value in values):
+            raise ValueError("covered generation IDs must be positive")
+        return tuple(values)
+
+
+class AutoCompactTrackingState(BaseModel):
+    """Claude auto-compact same-chain and circuit-breaker state."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    compacted: bool = False
+    turn_counter: int = Field(default=0, ge=0)
+    turn_id: str = ""
+    consecutive_failures: int = Field(default=0, ge=0)
+
+    def record_failure(self) -> "AutoCompactTrackingState":
+        return self.model_copy(
+            update={
+                "compacted": False,
+                "consecutive_failures": self.consecutive_failures + 1,
+            }
+        )
+
+    def reset_success(self, turn_id: str) -> "AutoCompactTrackingState":
+        if not turn_id:
+            raise ValueError("turn_id must not be blank")
+        return AutoCompactTrackingState(
+            compacted=True,
+            turn_counter=0,
+            turn_id=turn_id,
+            consecutive_failures=0,
+        )
+
+
+class MemorySummaryEnvelope(BaseModel):
+    """Redis envelope for Headroom assets and Claude activity compaction."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    schema_version: Literal[2] = 2
     version: int = Field(ge=1)
     compressed_through_sequence: int = Field(ge=0)
     compression_generations: tuple[CompressionGeneration, ...] = Field(
         default_factory=tuple
     )
+    session_memory: SessionMemoryRevision | None = None
+    active_revision: ContextRevision | None = None
+    auto_compact_tracking: AutoCompactTrackingState = Field(
+        default_factory=AutoCompactTrackingState
+    )
     updated_at: str = Field(min_length=1)
 
-    @field_validator(
-        "current_goal",
-        "preferences",
-        "confirmed_facts",
-        "pending_items",
+
+def migrate_v1_envelope(raw: dict[str, Any]) -> MemorySummaryEnvelope:
+    """Lazily discard the retired five-category fields at the Redis boundary."""
+
+    if raw.get("schema_version") == 2:
+        return MemorySummaryEnvelope.model_validate(raw)
+    allowed = {
+        "version",
+        "compressed_through_sequence",
+        "compression_generations",
+        "updated_at",
+    }
+    return MemorySummaryEnvelope.model_validate(
+        {
+            "schema_version": 2,
+            **{key: value for key, value in raw.items() if key in allowed},
+            "session_memory": None,
+            "active_revision": None,
+            "auto_compact_tracking": {},
+        }
     )
-    @classmethod
-    def freeze_summary_items(cls, values: tuple[str, ...]) -> tuple[str, ...]:
-        return tuple(values)
 
 
 class SessionCompressionContext(BaseModel):

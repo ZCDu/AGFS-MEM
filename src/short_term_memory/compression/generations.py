@@ -2,7 +2,6 @@
 
 from dataclasses import dataclass
 from datetime import datetime
-import json
 from typing import Any, Protocol
 
 from short_term_memory.models import MemoryEvent, MemorySummaryEnvelope
@@ -161,7 +160,6 @@ class GenerationAssembler:
             raise ValueError("now must be timezone-aware")
         result: list[dict[str, Any]] = []
         if envelope is not None:
-            result.append(self._semantic_summary(envelope))
             for generation in self._fresh_generations(envelope, now):
                 result.extend(
                     message.model_dump(mode="json")
@@ -188,23 +186,6 @@ class GenerationAssembler:
         if expires_at.tzinfo is None or expires_at.utcoffset() is None:
             raise ValueError("ccr_expires_at must be timezone-aware")
         return expires_at
-
-    @staticmethod
-    def _semantic_summary(envelope: MemorySummaryEnvelope) -> dict[str, str]:
-        semantic = {
-            "current_goal": list(envelope.current_goal),
-            "preferences": list(envelope.preferences),
-            "confirmed_facts": list(envelope.confirmed_facts),
-            "pending_items": list(envelope.pending_items),
-            "attachment_references": [
-                attachment.model_dump(mode="json")
-                for attachment in envelope.attachment_references
-            ],
-        }
-        return {
-            "role": "system",
-            "content": json.dumps(semantic, ensure_ascii=False, separators=(",", ":")),
-        }
 
     @staticmethod
     def _event_message(event: MemoryEvent) -> dict[str, str]:

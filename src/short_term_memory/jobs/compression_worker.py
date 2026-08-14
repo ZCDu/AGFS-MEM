@@ -307,6 +307,7 @@ class CompressionWorker:
         summary: SessionSummaryPayload,
         now: datetime,
     ) -> MemorySummaryEnvelope:
+        del summary
         previous = current.compression_generations if current is not None else ()
         generation = CompressionGeneration(
             generation=max((item.generation for item in previous), default=0) + 1,
@@ -319,12 +320,20 @@ class CompressionWorker:
             ccr_expires_at=(now + timedelta(seconds=self.ccr_ttl_seconds)).isoformat(),
         )
         generations = (generation,) if candidate.rebuild else (*previous, generation)
+        if current is not None:
+            return current.model_copy(
+                update={
+                    "version": candidate.expected_version + 1,
+                    "compressed_through_sequence": candidate.through_sequence,
+                    "compression_generations": generations,
+                    "updated_at": now.isoformat(),
+                }
+            )
         return MemorySummaryEnvelope(
             version=candidate.expected_version + 1,
             compressed_through_sequence=candidate.through_sequence,
             compression_generations=generations,
             updated_at=now.isoformat(),
-            **summary.model_dump(),
         )
 
     def _now(self) -> datetime:

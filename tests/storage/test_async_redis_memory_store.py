@@ -1,4 +1,5 @@
 from hashlib import sha256
+import json
 
 import pytest
 
@@ -85,6 +86,34 @@ async def test_summary_cas_rejects_stale_worker(
     assert await memory_store.compare_and_set_envelope("u", "s", 0, envelope(version=1))
     assert not await memory_store.compare_and_set_envelope("u", "s", 0, envelope(version=2))
     assert (await memory_store.read_envelope("u", "s")).version == 1
+
+
+@pytest.mark.asyncio
+async def test_read_envelope_lazily_migrates_v1_without_semantic_categories(
+    redis: AsyncFakeRedis,
+    memory_store: AsyncRedisMemoryStore,
+) -> None:
+    redis.values["dream:session:u:s:summary"] = json.dumps(
+        {
+            "version": 3,
+            "compressed_through_sequence": 7,
+            "compression_generations": [],
+            "current_goal": ["legacy"],
+            "preferences": ["brief"],
+            "confirmed_facts": ["fact"],
+            "pending_items": ["pending"],
+            "attachment_references": [],
+            "updated_at": "2026-08-06T00:00:00+00:00",
+        }
+    )
+
+    migrated = await memory_store.read_envelope("u", "s")
+
+    assert migrated is not None
+    assert migrated.schema_version == 2
+    assert migrated.version == 3
+    assert migrated.active_revision is None
+    assert "current_goal" not in migrated.model_dump()
 
 
 @pytest.mark.asyncio
