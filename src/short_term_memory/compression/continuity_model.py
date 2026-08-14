@@ -15,6 +15,16 @@ class CompactionModelResponse(BaseModel):
     output_tokens: int = Field(default=0, ge=0)
 
 
+class PromptTooLongError(RuntimeError):
+    """Provider-normalized compact prompt-too-long failure."""
+
+    def __init__(self, token_gap: int | None = None) -> None:
+        if token_gap is not None and token_gap < 1:
+            raise ValueError("token_gap must be positive")
+        super().__init__("compact prompt is too long")
+        self.token_gap = token_gap
+
+
 class ContinuityCompactionModel(Protocol):
     async def update_session_memory(
         self,

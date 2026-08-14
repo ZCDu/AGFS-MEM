@@ -46,6 +46,7 @@ class CompactionResult:
     pre_compact_token_count: int = 0
     post_compact_token_count: int = 0
     true_post_compact_token_count: int = 0
+    compact_prompt: str = ""
 
 
 @dataclass(frozen=True)
