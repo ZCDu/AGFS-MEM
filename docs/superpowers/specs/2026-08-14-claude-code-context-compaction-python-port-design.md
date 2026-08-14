@@ -1,6 +1,6 @@
 # Claude Code 上下文压缩机制 Python 移植设计
 
-> 状态：待用户审阅
+> 状态：实施完成，待最终确认
 >
 > 日期：2026-08-14
 >
@@ -115,7 +115,8 @@
 
 | Claude 源码 | Python 目标模块 | 保留的核心职责 |
 |---|---|---|
-| `src/query.ts` | `compression/context_query.py` | 请求前 compact、替换活动消息、工具调用续跑 |
+| `src/query.ts` | `service/context_coordinator.py`、`compression/context_query.py` | 请求前 L1→L2、替换活动消息、Redis lease/CAS |
+| `services/compact/microCompact.ts` | `compression/micro_compact.py` | 时间触发、工具白名单、keep floor、copy-on-write、token 估算 |
 | `services/compact/autoCompact.ts` | `compression/auto_compact.py` | 阈值、L4→L3 调度、跟踪状态、断路器 |
 | `services/compact/compact.ts` | `compression/traditional_compact.py` | L3、CompactResult、边界、PTL retry |
 | `services/compact/prompt.ts` | `compression/compact_prompt.py` | L3 prompt、summary 格式化、继续会话提示 |
@@ -126,6 +127,13 @@
 | `tools/GrepTool/GrepTool.ts` | `transcript/grep_tool.py` | 正则检索、上下文、分页、输出模式 |
 | `tools/FileReadTool/FileReadTool.ts` | `transcript/read_tool.py` | offset/limit 分段读取、编号和大小限制 |
 | transcript filesystem | `transcript/journal_transcript.py` | 将跨日 Journal 渲染成单一逻辑 transcript |
+| Claude tool-use query loop | `agent/agent_chat.py` | Agent 自主 Grep→Read，工具结果回到同一模型循环 |
+
+必要适配只有：`repl_main_thread` 映射为 HTTP 请求的 `main...` query source；
+message UUID 映射为 Journal sequence；Session Memory 文件映射为 Redis revision；
+本地 transcript 工具映射为带 session scope 的 HTTP Grep/Read。Anthropic 专属
+cached microcompact cache-edit block 不移植，因为它不修改本地消息，外部 provider
+也没有对应协议。
 
 ## 5. 数据模型
 

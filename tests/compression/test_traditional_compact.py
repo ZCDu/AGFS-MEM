@@ -132,6 +132,20 @@ async def test_second_compact_summarizes_previous_summary_not_full_journal() -> 
 
 
 @pytest.mark.asyncio
+async def test_boundary_coverage_uses_latest_journal_sequence_in_compacted_input() -> None:
+    active = (
+        message("user", "summary AB", stm_sequence_through=2),
+        message("assistant", "generation CD", stm_sequence_through=4),
+        message("user", "recent E", stm_sequence_through=5),
+    )
+
+    result = await compact_conversation(active, context())
+
+    boundary = result.boundary_marker.model_extra["compact_boundary"]
+    assert boundary["covered_through_sequence"] == 5
+
+
+@pytest.mark.asyncio
 async def test_partial_from_summarizes_tail_and_keeps_prefix() -> None:
     result = await partial_compact_conversation(
         three_rounds(), 4, context(), direction="from"

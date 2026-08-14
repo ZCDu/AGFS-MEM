@@ -201,6 +201,7 @@ async def _compact_summary(
 def _boundary(
     *,
     trigger: str,
+    covered_through_sequence: int,
     pre_tokens: int,
     post_tokens: int,
     context: TraditionalCompactContext,
@@ -209,7 +210,7 @@ def _boundary(
         boundary_id=uuid.uuid4().hex,
         trigger=trigger,
         strategy="traditional",
-        covered_through_sequence=0,
+        covered_through_sequence=covered_through_sequence,
         pre_compact_tokens=pre_tokens,
         true_post_compact_tokens=post_tokens,
         created_at=context.clock().isoformat(),
@@ -224,6 +225,7 @@ def _boundary(
 def _result(
     *,
     all_messages: tuple[SessionCompressionMessage, ...],
+    covered_messages: tuple[SessionCompressionMessage, ...],
     raw_summary: str,
     compact_call_tokens: int,
     messages_to_keep: tuple[SessionCompressionMessage, ...],
@@ -232,10 +234,21 @@ def _result(
     context: TraditionalCompactContext,
 ) -> CompactionResult:
     pre = context.token_estimator.estimate(to_provider_messages(all_messages))
+    covered_through_sequence = max(
+        (
+            int(_extra(message, "stm_sequence_through") or 0)
+            for message in covered_messages
+        ),
+        default=0,
+    )
     summary = get_compact_user_summary_message(raw_summary)
     initial = CompactionResult(
         boundary_marker=_boundary(
-            trigger=trigger, pre_tokens=pre, post_tokens=0, context=context
+            trigger=trigger,
+            covered_through_sequence=covered_through_sequence,
+            pre_tokens=pre,
+            post_tokens=0,
+            context=context,
         ),
         summary_messages=(summary,),
         messages_to_keep=messages_to_keep,
@@ -253,6 +266,7 @@ def _result(
             **initial.__dict__,
             "boundary_marker": _boundary(
                 trigger=trigger,
+                covered_through_sequence=covered_through_sequence,
                 pre_tokens=pre,
                 post_tokens=true_post,
                 context=context,
@@ -277,6 +291,7 @@ async def compact_conversation(
     )
     return _result(
         all_messages=messages,
+        covered_messages=messages,
         raw_summary=summary,
         compact_call_tokens=call_tokens,
         messages_to_keep=(),
@@ -329,6 +344,7 @@ async def partial_compact_conversation(
     )
     return _result(
         all_messages=all_messages,
+        covered_messages=to_summarize,
         raw_summary=summary,
         compact_call_tokens=call_tokens,
         messages_to_keep=to_keep,

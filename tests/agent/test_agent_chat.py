@@ -22,7 +22,7 @@ def _recall_handler(request: httpx.Request) -> httpx.Response:
             json={
                 "request_id": "r1",
                 "messages": [
-                    {"role": "system", "content": '{"current_goal":[]}'},
+                    {"role": "system", "content": "continuity summary"},
                     {
                         "role": "assistant",
                         "content": "[20 items compressed. Retrieve more: hash=abc123]",

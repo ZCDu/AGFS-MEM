@@ -5,7 +5,6 @@ from short_term_memory import (
     CompletionResult,
     PreparedTurn,
     ShortTermMemorySettings,
-    build_runtime,
 )
 
 
@@ -15,7 +14,8 @@ def test_distribution_and_import_package_have_standalone_identity() -> None:
 
 
 def test_root_package_exports_only_agent_facing_contract() -> None:
-    assert callable(build_runtime)
+    assert short_term_memory.AgentChatClient.__name__ == "AgentChatClient"
+    assert not hasattr(short_term_memory, "build_runtime")
     assert ShortTermMemorySettings.__name__ == "ShortTermMemorySettings"
     assert PreparedTurn.__name__ == "PreparedTurn"
     assert CompletionResult.__name__ == "CompletionResult"
