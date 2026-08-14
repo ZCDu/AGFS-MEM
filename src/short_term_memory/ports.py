@@ -38,6 +38,32 @@ class AsyncMemoryStore(Protocol):
         self, user_id: str, session_id: str
     ) -> MemorySummaryEnvelope | None: ...
 
+    async def compare_and_set_envelope(
+        self,
+        user_id: str,
+        session_id: str,
+        expected_version: int,
+        envelope: MemorySummaryEnvelope,
+    ) -> bool: ...
+
+    async def acquire_session_memory_extraction(
+        self,
+        user_id: str,
+        session_id: str,
+        token: str,
+        *,
+        expected_version: int,
+        started_at: str,
+    ) -> bool: ...
+
+    async def read_session_memory_extraction(
+        self, user_id: str, session_id: str
+    ) -> Any | None: ...
+
+    async def release_session_memory_extraction(
+        self, user_id: str, session_id: str, token: str
+    ) -> bool: ...
+
     async def restore_originals(
         self,
         user_id: str,

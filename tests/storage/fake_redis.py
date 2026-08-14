@@ -199,6 +199,17 @@ class AsyncFakeRedis:
                 self.values.pop(key, None)
                 self.ttls.pop(key, None)
                 return ["1"]
+            if "dream:release-session-memory-extraction" in script:
+                import json
+
+                assert numkeys == 1 and len(args) == 2
+                key = keys[0]
+                current = self.values.get(key)
+                if current is None or json.loads(current)["token"] != values[0]:
+                    return ["0"]
+                self.values.pop(key, None)
+                self.ttls.pop(key, None)
+                return ["1"]
         raise AssertionError("unsupported Lua script")
 
     async def lrange(self, key: str, start: int, end: int) -> list[str]:

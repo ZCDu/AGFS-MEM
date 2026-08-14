@@ -1,5 +1,6 @@
 """Atomic async Redis persistence for original memory events and summaries."""
 
+from dataclasses import dataclass
 import json
 from typing import Any, Literal, Protocol
 
@@ -110,6 +111,23 @@ if redis.call('GET', KEYS[1]) ~= ARGV[1] then return {'0'} end
 redis.call('DEL', KEYS[1])
 return {'1'}
 """
+
+RELEASE_SESSION_MEMORY_EXTRACTION_SCRIPT = """
+-- dream:release-session-memory-extraction
+local current = redis.call('GET', KEYS[1])
+if not current then return {'0'} end
+local parsed = cjson.decode(current)
+if parsed.token ~= ARGV[1] then return {'0'} end
+redis.call('DEL', KEYS[1])
+return {'1'}
+"""
+
+
+@dataclass(frozen=True)
+class SessionMemoryExtractionState:
+    token: str
+    expected_version: int
+    started_at: str
 
 TRIM_ORIGINALS_SCRIPT = """
 -- dream:trim-originals-v3
@@ -381,6 +399,65 @@ class AsyncRedisMemoryStore:
         )
         return self._result(result)[0] == "1"
 
+    async def acquire_session_memory_extraction(
+        self,
+        user_id: str,
+        session_id: str,
+        token: str,
+        *,
+        expected_version: int,
+        started_at: str,
+    ) -> bool:
+        if not token:
+            raise ValueError("extraction token must not be blank")
+        if expected_version < 0:
+            raise ValueError("expected_version must not be negative")
+        if not started_at:
+            raise ValueError("started_at must not be blank")
+        payload = json.dumps(
+            {
+                "token": token,
+                "expected_version": expected_version,
+                "started_at": started_at,
+            },
+            separators=(",", ":"),
+        )
+        result = await self.client.set(
+            self._keys(user_id, session_id).session_memory_extraction,
+            payload,
+            nx=True,
+            px=60_000,
+        )
+        return bool(result)
+
+    async def read_session_memory_extraction(
+        self, user_id: str, session_id: str
+    ) -> SessionMemoryExtractionState | None:
+        value = await self.client.get(
+            self._keys(user_id, session_id).session_memory_extraction
+        )
+        if value is None:
+            return None
+        raw = json.loads(self._text(value))
+        return SessionMemoryExtractionState(
+            token=str(raw["token"]),
+            expected_version=int(raw["expected_version"]),
+            started_at=str(raw["started_at"]),
+        )
+
+    async def release_session_memory_extraction(
+        self, user_id: str, session_id: str, token: str
+    ) -> bool:
+        if not token:
+            raise ValueError("extraction token must not be blank")
+        result = await self.client.eval(
+            RELEASE_SESSION_MEMORY_EXTRACTION_SCRIPT,
+            1,
+            self._keys(user_id, session_id).session_memory_extraction,
+            token,
+        )
+        return self._result(result)[0] == "1"
+
     @staticmethod
     def _events(values: list[Any]) -> tuple[MemoryEvent, ...]:
         return tuple(
@@ -411,6 +488,7 @@ class AsyncRedisMemoryStore:
                 else ""
             ),
             compression_lock=f"{prefix}:compression-lock",
+            session_memory_extraction=f"{prefix}:session-memory-extraction",
             pending_reservations=f"{prefix}:pending-reservations",
             ccr_summaries=f"{prefix}:ccr-summaries",
         )
@@ -425,6 +503,7 @@ class _Keys:
         summary: str,
         event: str,
         compression_lock: str,
+        session_memory_extraction: str,
         pending_reservations: str,
         ccr_summaries: str,
     ) -> None:
@@ -433,5 +512,6 @@ class _Keys:
         self.summary = summary
         self.event = event
         self.compression_lock = compression_lock
+        self.session_memory_extraction = session_memory_extraction
         self.pending_reservations = pending_reservations
         self.ccr_summaries = ccr_summaries

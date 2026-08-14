@@ -152,6 +152,44 @@ async def test_compression_lease_is_exclusive_and_token_scoped(
 
 
 @pytest.mark.asyncio
+async def test_session_memory_extraction_lease_is_single_owner_and_expires_after_sixty_seconds(
+    redis: AsyncFakeRedis,
+    memory_store: AsyncRedisMemoryStore,
+) -> None:
+    started_at = "2026-08-14T08:00:00+00:00"
+    assert await memory_store.acquire_session_memory_extraction(
+        "u", "s", "owner", expected_version=2, started_at=started_at
+    )
+    assert not await memory_store.acquire_session_memory_extraction(
+        "u", "s", "other", expected_version=2, started_at=started_at
+    )
+    state = await memory_store.read_session_memory_extraction("u", "s")
+    assert state is not None
+    assert state.token == "owner"
+    assert state.expected_version == 2
+    assert state.started_at == started_at
+    key = "dream:session:u:s:session-memory-extraction"
+    assert redis.ttls[key] == 60
+
+    redis.expire_now(key)
+    assert await memory_store.acquire_session_memory_extraction(
+        "u", "s", "other", expected_version=2, started_at=started_at
+    )
+
+
+@pytest.mark.asyncio
+async def test_session_memory_extraction_release_compares_owner_token(
+    memory_store: AsyncRedisMemoryStore,
+) -> None:
+    assert await memory_store.acquire_session_memory_extraction(
+        "u", "s", "owner", expected_version=1,
+        started_at="2026-08-14T08:00:00+00:00",
+    )
+    assert not await memory_store.release_session_memory_extraction("u", "s", "other")
+    assert await memory_store.release_session_memory_extraction("u", "s", "owner")
+
+
+@pytest.mark.asyncio
 async def test_commit_rejects_different_digest_for_reserved_event(
     memory_store: AsyncRedisMemoryStore,
 ) -> None:
