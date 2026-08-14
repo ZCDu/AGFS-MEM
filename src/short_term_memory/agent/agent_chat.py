@@ -65,10 +65,22 @@ class AgentChatClient:
         auth_token: str | None = None,
         http_client: httpx.AsyncClient | None = None,
         max_tool_rounds: int = 5,
+        context_window_tokens: int = 128_000,
+        max_output_tokens: int = 8_192,
+        prepare_timeout_seconds: float = 300.0,
     ) -> None:
+        if min(context_window_tokens, max_output_tokens) < 1:
+            raise ValueError("model token limits must be positive")
+        if prepare_timeout_seconds <= 0:
+            raise ValueError("prepare_timeout_seconds must be positive")
         self.memory_api_url = memory_api_url.rstrip("/")
         self.model_call = model_call
         self.max_tool_rounds = max_tool_rounds
+        self.model_profile = {
+            "context_window_tokens": context_window_tokens,
+            "max_output_tokens": max_output_tokens,
+        }
+        self.prepare_timeout_seconds = prepare_timeout_seconds
         headers = {"Authorization": f"Bearer {auth_token}"} if auth_token else {}
         self._owns_http = http_client is None
         self.http = http_client or httpx.AsyncClient(headers=headers, timeout=60.0)
@@ -83,12 +95,14 @@ class AgentChatClient:
         payload: Mapping[str, Any],
         *,
         headers: Mapping[str, str] | None = None,
+        timeout: float | None = None,
     ) -> Any:
         url = f"{self.memory_api_url}{path}"
         response = await self.http.post(
             url,
             json=dict(payload),
             headers=None if headers is None else dict(headers),
+            timeout=timeout,
         )
         response.raise_for_status()
         return response.json()
@@ -125,15 +139,25 @@ class AgentChatClient:
             },
         )
 
-        # 2. read the current context.
+        # 2. prepare the current context, including request-time L2/L3/L4 compact.
         memory = await self._post(
-            "/v1/memories/read",
-            {"user_id": user_id, "session_id": session_id, "history_turns": history_turns},
+            "/v1/memories/prepare",
+            {
+                "user_id": user_id,
+                "session_id": session_id,
+                "history_turns": history_turns,
+                "model_profile": self.model_profile,
+                "query_source": "main",
+            },
+            timeout=self.prepare_timeout_seconds,
         )
         messages = list(memory.get("messages") or [])
         headroom = memory.get("headroom") or {}
         proxy_url = headroom.get("proxy_url")
         scope_headers = headroom.get("scope_headers") or {}
+        tools = tuple(memory.get("tools") or ()) + (
+            HEADROOM_RETRIEVE_TOOL_DEFINITION,
+        )
 
         # 3. call the model (may loop on tool calls).
         answer = await self._ask(
@@ -143,6 +167,7 @@ class AgentChatClient:
             model,
             user_id,
             session_id,
+            tools,
         )
 
         # 4. write the assistant answer back.
@@ -172,6 +197,7 @@ class AgentChatClient:
         model: str | None,
         user_id: str,
         session_id: str,
+        tools: tuple[dict[str, Any], ...] = MEMORY_TOOL_DEFINITIONS,
     ) -> str:
         working = list(messages)
         session_scope = str(scope_headers.get("x-headroom-session-id", ""))
@@ -182,7 +208,7 @@ class AgentChatClient:
                 model=model,
                 proxy_url=proxy_url,
                 scope_headers=scope_headers,
-                tools=MEMORY_TOOL_DEFINITIONS,
+                tools=tools,
             )
             content = completion.get("content")
             tool_calls = completion.get("tool_calls") or []

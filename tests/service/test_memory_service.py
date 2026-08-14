@@ -193,6 +193,38 @@ async def test_write_reserves_journals_commits_then_queues(service):
 
 
 @pytest.mark.asyncio
+async def test_assistant_commit_schedules_l4_only_after_durable_write(service):
+    from short_term_memory.service.schemas import MemoryWriteRequest
+
+    l4_queue = RecordingQueue(service.store.calls)
+    service.session_memory_queue = l4_queue
+    service.token_estimator = lambda messages: 10_000
+    request = MemoryWriteRequest.model_validate(
+        {
+            "user_id": "u",
+            "session_id": "s",
+            "events": [
+                {
+                    "event_id": "assistant-1",
+                    "role": "assistant",
+                    "content_type": "conversation",
+                    "content": "completed response",
+                    "metadata": {},
+                }
+            ],
+        }
+    )
+
+    await service.write(request, "req-l4")
+
+    assert len(l4_queue.jobs) == 1
+    job = l4_queue.jobs[0]
+    assert job.expected_version == 0
+    assert job.requested_through_sequence == 1
+    assert service.store.calls.index("redis_commit") < service.store.calls.index("enqueue")
+
+
+@pytest.mark.asyncio
 async def test_grep_transcript_validates_scope_and_reads_bound_session(service):
     service.journals.events.append(
         memory_event(sequence=87, event_id="ttl", content="TTL is 43200")

@@ -101,6 +101,24 @@ class SessionMemoryWorker:
                     )
                 )
 
+    async def run_forever(
+        self,
+        *,
+        stop_event: asyncio.Event | None = None,
+        poll_seconds: float = 0.1,
+    ) -> None:
+        if poll_seconds <= 0:
+            raise ValueError("poll_seconds must be positive")
+        stopping = stop_event or asyncio.Event()
+        while not stopping.is_set():
+            result = await self.run_once()
+            if result.state == "idle":
+                try:
+                    async with asyncio.timeout(poll_seconds):
+                        await stopping.wait()
+                except TimeoutError:
+                    pass
+
     async def _execute(
         self, lease: SessionMemoryJobLease, started_at: datetime
     ) -> SessionMemoryWorkerResult:

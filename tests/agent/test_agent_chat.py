@@ -16,7 +16,7 @@ from short_term_memory.agent.agent_chat import (
 def _recall_handler(request: httpx.Request) -> httpx.Response:
     """Mock memory API handler: read returns markers, recall returns original."""
     path = request.url.path
-    if path == "/v1/memories/read":
+    if path in {"/v1/memories/read", "/v1/memories/prepare"}:
         return httpx.Response(
             200,
             json={
@@ -34,6 +34,7 @@ def _recall_handler(request: httpx.Request) -> httpx.Response:
                     "scope_headers": {"x-headroom-user-id": "u"},
                 },
                 "ccr_markers": ["abc123"],
+                "tools": list(MEMORY_TOOL_DEFINITIONS[:-1]),
             },
         )
     if path == "/v1/memories/recall":
@@ -136,7 +137,7 @@ class RecordingTranscriptTransport:
     def __call__(self, request: httpx.Request) -> httpx.Response:
         self.paths.append(request.url.path)
         self.requests.append(request)
-        if request.url.path == "/v1/memories/read":
+        if request.url.path == "/v1/memories/prepare":
             return httpx.Response(
                 200,
                 json={
@@ -148,6 +149,7 @@ class RecordingTranscriptTransport:
                             "x-headroom-session-id": "opaque-session"
                         },
                     },
+                    "tools": list(MEMORY_TOOL_DEFINITIONS[:-1]),
                 },
             )
         if request.url.path == "/v1/memories/transcript/grep":

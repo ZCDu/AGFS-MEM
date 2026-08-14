@@ -6,6 +6,9 @@ import httpx
 import pytest
 
 from short_term_memory.config import ShortTermMemorySettings
+from short_term_memory.compression.auto_compact import ModelProfile
+from short_term_memory.compression.continuity_model import CompactionModelResponse
+from short_term_memory.models import AutoCompactTrackingState, SessionCompressionMessage
 from short_term_memory.service.runtime import ServiceRuntime, create_runtime_app
 
 
@@ -67,7 +70,69 @@ def settings(tmp_path: Path) -> ShortTermMemorySettings:
         headroom_service=replace(
             base.headroom_service, url="http://token:secret@headroom:8787"
         ),
+        continuity_compaction=replace(
+            base.continuity_compaction, enabled=False
+        ),
     )
+
+
+@pytest.mark.asyncio
+async def test_runtime_requires_continuity_model_when_compaction_enabled(tmp_path) -> None:
+    configured = settings(tmp_path)
+    configured = replace(
+        configured,
+        continuity_compaction=replace(
+            configured.continuity_compaction, enabled=True
+        ),
+    )
+    with pytest.raises(ValueError, match="continuity_model is required"):
+        await ServiceRuntime.start(
+            configured,
+            redis=FakeClosableRedis(),
+            headroom_http=FakeClosableAsyncClient(),
+        )
+
+
+@pytest.mark.asyncio
+async def test_runtime_shares_injected_continuity_model_with_l4_and_l3(tmp_path) -> None:
+    class ContinuityModel:
+        def __init__(self):
+            self.compact_calls = 0
+
+        async def compact(self, **kwargs):
+            self.compact_calls += 1
+            return CompactionModelResponse(
+                content="<summary>continuity</summary>", output_tokens=10
+            )
+
+        async def update_session_memory(self, **kwargs):
+            return kwargs["current_memory"]
+
+    configured = settings(tmp_path)
+    configured = replace(
+        configured,
+        continuity_compaction=replace(
+            configured.continuity_compaction, enabled=True, model="compact-model"
+        ),
+    )
+    model = ContinuityModel()
+    runtime = await ServiceRuntime.start(
+        configured,
+        redis=FakeClosableRedis(),
+        headroom_http=FakeClosableAsyncClient(),
+        continuity_model=model,
+    )
+    assert runtime.session_memory_worker.continuity_model is model
+    auto = runtime.context_coordinator.auto_context_factory(
+        ModelProfile(context_window_tokens=100_000, max_output_tokens=8_000),
+        "main",
+        None,
+    )
+    await auto.compact_conversation(
+        (SessionCompressionMessage(role="user", content="context"),),
+        AutoCompactTrackingState(),
+    )
+    assert model.compact_calls == 1
 
 
 @pytest.mark.asyncio

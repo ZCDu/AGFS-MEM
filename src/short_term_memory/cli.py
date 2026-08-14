@@ -2,7 +2,6 @@
 
 import argparse
 import asyncio
-from contextlib import suppress
 import os
 from pathlib import Path
 import signal
@@ -78,31 +77,39 @@ async def run_worker_process(
         except (NotImplementedError, RuntimeError):
             pass
 
-    worker_task = asyncio.create_task(
-        runtime.worker.run_forever(stop_event=stopping)
-    )
+    workers = [runtime.worker]
+    if session_worker := getattr(runtime, "session_memory_worker", None):
+        workers.append(session_worker)
+    worker_tasks = [
+        asyncio.create_task(worker.run_forever(stop_event=stopping))
+        for worker in workers
+    ]
     signal_task = asyncio.create_task(stopping.wait())
     try:
         done, _ = await asyncio.wait(
-            {worker_task, signal_task}, return_when=asyncio.FIRST_COMPLETED
+            {*worker_tasks, signal_task}, return_when=asyncio.FIRST_COMPLETED
         )
-        if worker_task in done:
-            await worker_task
+        completed_worker = next(
+            (task for task in worker_tasks if task in done), None
+        )
+        if completed_worker is not None:
+            await completed_worker
         else:
             try:
                 async with asyncio.timeout(
                     settings.compression_queue.shutdown_grace_seconds
                 ):
-                    await asyncio.shield(worker_task)
+                    await asyncio.shield(asyncio.gather(*worker_tasks))
             except TimeoutError:
-                worker_task.cancel()
-                with suppress(asyncio.CancelledError):
-                    await worker_task
+                for task in worker_tasks:
+                    task.cancel()
+                await asyncio.gather(*worker_tasks, return_exceptions=True)
     finally:
         signal_task.cancel()
-        if not worker_task.done():
-            worker_task.cancel()
-        await asyncio.gather(signal_task, worker_task, return_exceptions=True)
+        for task in worker_tasks:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(signal_task, *worker_tasks, return_exceptions=True)
         for signum in installed:
             loop.remove_signal_handler(signum)
         await runtime.close()

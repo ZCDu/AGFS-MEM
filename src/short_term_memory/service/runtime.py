@@ -15,6 +15,15 @@ from short_term_memory.compression.generations import (
     GenerationAssembler,
     GenerationPlanner,
 )
+from short_term_memory.compression.auto_compact import AutoCompactContext
+from short_term_memory.compression.session_memory_compact import (
+    SessionMemoryCompactContext,
+    try_session_memory_compaction,
+)
+from short_term_memory.compression.traditional_compact import (
+    TraditionalCompactContext,
+    compact_conversation,
+)
 from short_term_memory.compression.policy import HeadroomPolicy
 from short_term_memory.compression.scope import OptimizationScopeFactory
 from short_term_memory.config import ShortTermMemorySettings, load_settings
@@ -23,9 +32,12 @@ from short_term_memory.jobs.compression_worker import (
     EmptySummaryModel,
 )
 from short_term_memory.jobs.redis_compression_queue import RedisCompressionQueue
+from short_term_memory.jobs.session_memory_queue import RedisSessionMemoryQueue
+from short_term_memory.jobs.session_memory_worker import SessionMemoryWorker
 from short_term_memory.jobs.redis_rebuild_completion import RedisRebuildCompletion
 from short_term_memory.service.app import create_app
 from short_term_memory.service.memory_service import MemoryService
+from short_term_memory.service.context_coordinator import ContextCoordinator
 from short_term_memory.storage.async_redis_memory_store import AsyncRedisMemoryStore
 from short_term_memory.storage.journal_store import JournalStore
 from short_term_memory.storage.vfs_adapter import VFSAdapter
@@ -48,7 +60,10 @@ class ServiceRuntime:
     queue: RedisCompressionQueue
     completion: RedisRebuildCompletion
     worker: CompressionWorker
+    session_memory_queue: RedisSessionMemoryQueue
+    session_memory_worker: SessionMemoryWorker | None
     memory_service: MemoryService
+    context_coordinator: ContextCoordinator
     _owns_redis: bool
     _owns_headroom_http: bool
     _closed: bool = False
@@ -63,11 +78,16 @@ class ServiceRuntime:
         own_injected: bool = False,
         token_estimator: Any | None = None,
         summary_model: Any | None = None,
+        continuity_model: Any | None = None,
     ) -> "ServiceRuntime":
         """Construct one pool/client graph, closing owned partial state on failure."""
 
         if not settings.headroom_service.url:
             raise ValueError("HEADROOM_SERVICE_URL is required for the HTTP runtime")
+        if settings.continuity_compaction.enabled and continuity_model is None:
+            raise ValueError(
+                "continuity_model is required when continuity compaction is enabled"
+            )
         redis_client = redis
         http_client = headroom_http
         owns_redis = redis is None or own_injected
@@ -97,6 +117,11 @@ class ServiceRuntime:
             )
             queue = RedisCompressionQueue(
                 redis_client, capacity=settings.compression_queue.capacity
+            )
+            session_memory_queue = RedisSessionMemoryQueue(
+                redis_client,
+                capacity=settings.compression_queue.capacity,
+                lease_seconds=60,
             )
             scope_factory = OptimizationScopeFactory(
                 settings.optimization_scope_secret
@@ -152,6 +177,7 @@ class ServiceRuntime:
                 timeout_seconds=settings.headroom_service.timeout_seconds,
                 http_client=http_client,
             )
+            estimator = token_estimator or ApproximateTokenEstimator()
             memory_service = MemoryService(
                 store=store,
                 journals=journals,
@@ -160,10 +186,74 @@ class ServiceRuntime:
                 policy=policy,
                 scope_factory=scope_factory,
                 settings=settings,
-                token_estimator=token_estimator or ApproximateTokenEstimator(),
+                token_estimator=estimator,
                 headroom_proxy_url=f"{settings.headroom_service.url.rstrip('/')}/v1",
                 rebuild_waiter=completion,
                 recall_client=recall_client,
+                session_memory_queue=(
+                    session_memory_queue
+                    if settings.continuity_compaction.enabled
+                    else None
+                ),
+            )
+            def auto_context_factory(model_profile, query_source, session_memory):
+                effective_source = (
+                    query_source
+                    if settings.continuity_compaction.enabled
+                    else "compact"
+                )
+
+                async def l4(messages, threshold):
+                    return await try_session_memory_compaction(
+                        messages=messages,
+                        session_memory=session_memory,
+                        context=SessionMemoryCompactContext(
+                            token_estimator=estimator,
+                            history_turns=settings.redis_session.history_turns,
+                            auto_compact_threshold=threshold,
+                        ),
+                    )
+
+                async def l3(messages, tracking):
+                    del tracking
+                    return await compact_conversation(
+                        messages,
+                        TraditionalCompactContext(
+                            model=continuity_model,
+                            model_name=settings.continuity_compaction.model,
+                            token_estimator=estimator,
+                        ),
+                        is_auto_compact=True,
+                    )
+
+                return AutoCompactContext(
+                    model_profile=model_profile,
+                    token_estimator=estimator,
+                    query_source=effective_source,
+                    try_session_memory=l4,
+                    compact_conversation=l3,
+                )
+
+            context_coordinator = ContextCoordinator(
+                store=store,
+                token_estimator=estimator,
+                auto_context_factory=auto_context_factory,
+                history_turns=settings.redis_session.history_turns,
+                headroom_proxy_url=f"{settings.headroom_service.url.rstrip('/')}/v1",
+                scope_headers_factory=lambda user, session: scope_factory.for_session(
+                    user, session
+                ).as_headroom_headers(),
+            )
+            session_memory_worker = (
+                SessionMemoryWorker(
+                    queue=session_memory_queue,
+                    store=store,
+                    journals=journals,
+                    continuity_model=continuity_model,
+                    model_name=settings.continuity_compaction.model,
+                )
+                if settings.continuity_compaction.enabled
+                else None
             )
             return cls(
                 settings=settings,
@@ -173,7 +263,10 @@ class ServiceRuntime:
                 queue=queue,
                 completion=completion,
                 worker=worker,
+                session_memory_queue=session_memory_queue,
+                session_memory_worker=session_memory_worker,
                 memory_service=memory_service,
+                context_coordinator=context_coordinator,
                 _owns_redis=owns_redis,
                 _owns_headroom_http=owns_http,
             )
@@ -264,6 +357,8 @@ def create_runtime_app(
         runtime = await runtime_start(effective_settings)
         app.state.service_runtime = runtime
         app.state.memory_service = runtime.memory_service
+        if context_coordinator := getattr(runtime, "context_coordinator", None):
+            app.state.context_coordinator = context_coordinator
         try:
             yield
         finally:

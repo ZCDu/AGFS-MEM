@@ -60,6 +60,13 @@ class DeepSeekPublicSettings:
 
 
 @dataclass(frozen=True)
+class ContinuityCompactionSettings:
+    enabled: bool = True
+    model: str = "deepseek-v4-flash"
+    prepare_timeout_seconds: float = 300.0
+
+
+@dataclass(frozen=True)
 class ShortTermMemorySettings:
     environment: str = "development"
     home: str = "~/.dream"
@@ -75,6 +82,9 @@ class ShortTermMemorySettings:
     )
     deepseek_public: DeepSeekPublicSettings = field(
         default_factory=DeepSeekPublicSettings
+    )
+    continuity_compaction: ContinuityCompactionSettings = field(
+        default_factory=ContinuityCompactionSettings
     )
 
 
@@ -121,6 +131,15 @@ def _positive_float(value: str, name: str) -> float:
     if parsed <= 0:
         raise ValueError(f"{name} must be positive")
     return parsed
+
+
+def _boolean(value: str, name: str) -> bool:
+    normalized = value.casefold()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError(f"{name} must be true or false")
 
 
 def _plan_trigger_ratio(value: str, name: str) -> float:
@@ -328,6 +347,20 @@ def load_settings(path: Path | None = None) -> ShortTermMemorySettings:
             value("DEEPSEEK_MODEL", "deepseek-v4-flash"), "DEEPSEEK_MODEL"
         ),
     )
+    continuity_compaction = ContinuityCompactionSettings(
+        enabled=_boolean(
+            value("CONTINUITY_COMPACTION_ENABLED", "true"),
+            "CONTINUITY_COMPACTION_ENABLED",
+        ),
+        model=_non_blank(
+            value("CONTINUITY_COMPACTION_MODEL", deepseek_public.model),
+            "CONTINUITY_COMPACTION_MODEL",
+        ),
+        prepare_timeout_seconds=_positive_float(
+            value("COMPACTION_PREPARE_TIMEOUT_SECONDS", "300"),
+            "COMPACTION_PREPARE_TIMEOUT_SECONDS",
+        ),
+    )
 
     return ShortTermMemorySettings(
         environment=environment,
@@ -339,4 +372,5 @@ def load_settings(path: Path | None = None) -> ShortTermMemorySettings:
         journal=journal,
         compression_queue=compression_queue,
         deepseek_public=deepseek_public,
+        continuity_compaction=continuity_compaction,
     )

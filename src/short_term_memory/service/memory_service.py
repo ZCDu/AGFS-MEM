@@ -19,6 +19,8 @@ from short_term_memory.compression.ccr_recall import (
 from short_term_memory.compression.generations import GenerationAssembler
 from short_term_memory.compression.policy import HeadroomPolicy
 from short_term_memory.compression.scope import OptimizationScopeFactory
+from short_term_memory.compression.session_memory_state import should_extract_memory
+from short_term_memory.jobs.session_memory_queue import SessionMemoryJob
 from short_term_memory.config import ShortTermMemorySettings
 from short_term_memory.jobs.redis_compression_queue import CompressionJob
 from short_term_memory.models import MemoryEvent, MemorySummaryEnvelope
@@ -88,6 +90,7 @@ class MemoryService:
         rebuild_waiter: RebuildCompletionWaiter | None = None,
         cold_rebuild_timeout_seconds: float | None = None,
         recall_client: CcrRecallClient | None = None,
+        session_memory_queue: Any | None = None,
     ) -> None:
         if not headroom_proxy_url:
             raise ValueError("headroom_proxy_url must not be blank")
@@ -111,6 +114,7 @@ class MemoryService:
             cold_rebuild_timeout_seconds or settings.api.request_timeout_seconds
         )
         self.recall_client = recall_client
+        self.session_memory_queue = session_memory_queue
 
     async def write(
         self, request: MemoryWriteRequest, request_id: str
@@ -125,6 +129,7 @@ class MemoryService:
         duplicate_event_ids: list[str] = []
         committed_event_ids: list[str] = []
         committed_new_event = False
+        committed_events: list[MemoryEvent] = []
 
         for input_event in request.events:
             digest = sha256(input_event.content.encode("utf-8")).hexdigest()
@@ -191,6 +196,7 @@ class MemoryService:
             else:
                 committed_event_ids.append(input_event.event_id)
                 committed_new_event = True
+                committed_events.append(event)
 
         originals: tuple[MemoryEvent, ...] = ()
         compressible: tuple[MemoryEvent, ...] = ()
@@ -268,6 +274,41 @@ class MemoryService:
                 )
             )
             queue_seconds += time.perf_counter() - queue_started
+
+        last_committed = committed_events[-1] if committed_events else None
+        if (
+            self.session_memory_queue is not None
+            and last_committed is not None
+            and last_committed.role.value == "assistant"
+        ):
+            memory = envelope.session_memory if envelope is not None else None
+            covered = memory.covered_through_sequence if memory is not None else 0
+            tool_calls = sum(
+                int(event.metadata.get("tool_call_count", "0") or 0)
+                for event in originals
+                if event.sequence > covered
+            )
+            last_has_tools = (
+                last_committed.metadata.get("has_tool_calls", "").casefold()
+                in {"1", "true", "yes"}
+            )
+            if should_extract_memory(
+                current_token_count=total_tokens,
+                tokens_at_last_extraction=memory.token_count if memory else 0,
+                tool_calls_since_update=tool_calls,
+                last_assistant_turn_has_tool_calls=last_has_tools,
+                initialized=memory is not None,
+            ):
+                queue_started = time.perf_counter()
+                await self.session_memory_queue.enqueue(
+                    SessionMemoryJob(
+                        user_id=request.user_id,
+                        session_id=request.session_id,
+                        expected_version=envelope.version if envelope else 0,
+                        requested_through_sequence=last_committed.sequence,
+                    )
+                )
+                queue_seconds += time.perf_counter() - queue_started
 
         return MemoryWriteResponse(
             request_id=request_id,

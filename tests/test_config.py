@@ -37,6 +37,9 @@ ENV_NAMES = (
     "HEADROOM_QUEUE_CAPACITY",
     "DEEPSEEK_API_URL",
     "DEEPSEEK_MODEL",
+    "CONTINUITY_COMPACTION_ENABLED",
+    "CONTINUITY_COMPACTION_MODEL",
+    "COMPACTION_PREPARE_TIMEOUT_SECONDS",
 )
 
 
@@ -71,6 +74,27 @@ def test_http_memory_defaults_are_teacher_visible() -> None:
     assert settings.headroom_service.compression_model == "deepseek-v4-flash"
     assert settings.deepseek_public.model == "deepseek-v4-flash"
     assert settings.deepseek_public.api_url == "https://api.deepseek.com"
+    assert settings.continuity_compaction.enabled is True
+    assert settings.continuity_compaction.model == settings.deepseek_public.model
+    assert settings.continuity_compaction.prepare_timeout_seconds == 300.0
+
+
+def test_continuity_compaction_settings_are_independent_from_read_timeout(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / ".env"
+    path.write_text(
+        "MEMORY_API_REQUEST_TIMEOUT_SECONDS=10\n"
+        "COMPACTION_PREPARE_TIMEOUT_SECONDS=275\n"
+        "CONTINUITY_COMPACTION_ENABLED=false\n"
+        "CONTINUITY_COMPACTION_MODEL=compact-model\n",
+        encoding="utf-8",
+    )
+    settings = load_settings(path)
+    assert settings.api.request_timeout_seconds == 10
+    assert settings.continuity_compaction.prepare_timeout_seconds == 275
+    assert settings.continuity_compaction.enabled is False
+    assert settings.continuity_compaction.model == "compact-model"
 
 
 def test_new_memory_settings_parse_validated_environment(
