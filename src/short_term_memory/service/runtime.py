@@ -240,6 +240,7 @@ class ServiceRuntime:
                 scope_headers_factory=lambda user, session: scope_factory.for_session(
                     user, session
                 ).as_headroom_headers(),
+                microcompact_config=settings.time_based_microcompact,
             )
             session_memory_worker = (
                 SessionMemoryWorker(

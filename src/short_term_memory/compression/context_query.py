@@ -59,7 +59,11 @@ def _revision_summary(
 
 def _event_message(event: MemoryEvent) -> SessionCompressionMessage:
     return annotate_active_message(
-        SessionCompressionMessage(role=event.role.value, content=event.content),
+        SessionCompressionMessage(
+            role=event.role.value,
+            content=event.content,
+            stm_timestamp=event.created_at,
+        ),
         from_sequence=event.sequence,
         through_sequence=event.sequence,
         group_id=f"event:{event.sequence}",

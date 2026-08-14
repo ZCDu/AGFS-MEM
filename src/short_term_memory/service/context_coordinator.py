@@ -17,6 +17,10 @@ from short_term_memory.compression.context_query import (
     apply_compaction_result,
     load_active_messages,
 )
+from short_term_memory.compression.micro_compact import (
+    TimeBasedMicroCompactConfig,
+    microcompact_messages,
+)
 from short_term_memory.models import (
     AutoCompactTrackingState,
     CompactBoundary,
@@ -53,6 +57,7 @@ class ContextCoordinator:
         history_turns: int,
         headroom_proxy_url: str,
         scope_headers_factory: Callable[[str, str], dict[str, str]],
+        microcompact_config: TimeBasedMicroCompactConfig | None = None,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
         if history_turns < 1:
@@ -65,6 +70,9 @@ class ContextCoordinator:
         self.history_turns = history_turns
         self.headroom_proxy_url = headroom_proxy_url.rstrip("/")
         self.scope_headers_factory = scope_headers_factory
+        self.microcompact_config = (
+            microcompact_config or TimeBasedMicroCompactConfig()
+        )
         self.clock = clock or (lambda: datetime.now(timezone.utc))
 
     async def prepare(
@@ -78,7 +86,14 @@ class ContextCoordinator:
     ) -> PreparedContext:
         turns = history_turns or self.history_turns
         envelope, originals = await self._read(user_id, session_id, turns)
-        current = load_active_messages(envelope, originals, self._now())
+        now = self._now()
+        current = load_active_messages(envelope, originals, now)
+        current = microcompact_messages(
+            current,
+            query_source,
+            now=now,
+            config=self.microcompact_config,
+        ).messages
         token = uuid.uuid4().hex
         acquired = await self.store.acquire_context_compaction_lease(
             user_id, session_id, token
@@ -116,7 +131,14 @@ class ContextCoordinator:
             )
             if not written:
                 reloaded, recent = await self._read(user_id, session_id, turns)
-                safe = load_active_messages(reloaded, recent, self._now())
+                reloaded_at = self._now()
+                safe = load_active_messages(reloaded, recent, reloaded_at)
+                safe = microcompact_messages(
+                    safe,
+                    query_source,
+                    now=reloaded_at,
+                    config=self.microcompact_config,
+                ).messages
                 return self._prepared(
                     safe, model_profile, user_id, session_id, False
                 )

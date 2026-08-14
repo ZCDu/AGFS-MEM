@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from hashlib import sha256
 
 import pytest
@@ -7,9 +7,14 @@ from short_term_memory.compression.auto_compact import (
     AutoCompactContext,
     ModelProfile,
 )
+from short_term_memory.compression.micro_compact import (
+    TIME_BASED_MC_CLEARED_MESSAGE,
+    TimeBasedMicroCompactConfig,
+)
 from short_term_memory.compression.session_memory_compact import CompactionResult
 from short_term_memory.models import (
     AutoCompactTrackingState,
+    CompressionGeneration,
     MemoryEvent,
     MemorySummaryEnvelope,
     SessionCompressionMessage,
@@ -120,7 +125,7 @@ def result(summary="new summary"):
     )
 
 
-def coordinator(store, *, tokens, compact=None, calls=None):
+def coordinator(store, *, tokens, compact=None, calls=None, microcompact_config=None):
     calls = calls if calls is not None else []
     estimator = Estimator(tokens)
 
@@ -152,6 +157,7 @@ def coordinator(store, *, tokens, compact=None, calls=None):
         history_turns=10,
         headroom_proxy_url="http://headroom/v1",
         scope_headers_factory=lambda user, session: {"session": f"{user}:{session}"},
+        microcompact_config=microcompact_config,
         clock=lambda: NOW,
     )
 
@@ -184,6 +190,60 @@ async def test_below_threshold_returns_existing_context_without_model_calls() ->
     assert calls == []
     assert len(prepared.tools) == 2
     assert prepared.headroom.proxy_url == "http://headroom/v1"
+
+
+@pytest.mark.asyncio
+async def test_l1_clears_only_request_projection_before_l2_without_mutating_storage() -> None:
+    old = NOW - timedelta(hours=2)
+    generation = CompressionGeneration(
+        generation=1,
+        from_sequence=1,
+        through_sequence=4,
+        messages=(
+            SessionCompressionMessage(
+                role="assistant",
+                content=({"type": "tool_use", "id": "old", "name": "Read", "input": {}},),
+                stm_timestamp=old.isoformat(),
+            ),
+            SessionCompressionMessage(
+                role="user",
+                content=({"type": "tool_result", "tool_use_id": "old", "content": "OLD FULL"},),
+            ),
+            SessionCompressionMessage(
+                role="assistant",
+                content=({"type": "tool_use", "id": "new", "name": "Grep", "input": {}},),
+                stm_timestamp=old.isoformat(),
+            ),
+            SessionCompressionMessage(
+                role="user",
+                content=({"type": "tool_result", "tool_use_id": "new", "content": "NEW FULL"},),
+            ),
+        ),
+        tokens_before=100,
+        tokens_after=50,
+        created_at=old.isoformat(),
+        ccr_expires_at=(NOW + timedelta(hours=1)).isoformat(),
+    )
+    original_envelope = envelope().model_copy(
+        update={"compressed_through_sequence": 4, "compression_generations": (generation,)}
+    )
+    journal_event = event(5, "JOURNAL EXACT")
+    store = Store(original_envelope, (journal_event,))
+    prepared = await coordinator(
+        store,
+        tokens=1_000,
+        microcompact_config=TimeBasedMicroCompactConfig(
+            enabled=True, gap_threshold_minutes=30, keep_recent=1
+        ),
+    ).prepare(user_id="u", session_id="s", model_profile=PROFILE, query_source="main")
+
+    old_result = prepared.messages[1].content[0]["content"]
+    new_result = prepared.messages[3].content[0]["content"]
+    assert old_result == TIME_BASED_MC_CLEARED_MESSAGE
+    assert new_result == "NEW FULL"
+    assert store.envelope is original_envelope
+    assert store.envelope.compression_generations[0].messages[1].content[0]["content"] == "OLD FULL"
+    assert store.events[0].content == "JOURNAL EXACT"
 
 
 @pytest.mark.asyncio

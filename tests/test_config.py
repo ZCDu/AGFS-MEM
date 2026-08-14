@@ -40,6 +40,9 @@ ENV_NAMES = (
     "CONTINUITY_COMPACTION_ENABLED",
     "CONTINUITY_COMPACTION_MODEL",
     "COMPACTION_PREPARE_TIMEOUT_SECONDS",
+    "TIME_BASED_MICROCOMPACT_ENABLED",
+    "TIME_BASED_MICROCOMPACT_GAP_MINUTES",
+    "TIME_BASED_MICROCOMPACT_KEEP_RECENT",
 )
 
 
@@ -77,6 +80,25 @@ def test_http_memory_defaults_are_teacher_visible() -> None:
     assert settings.continuity_compaction.enabled is True
     assert settings.continuity_compaction.model == settings.deepseek_public.model
     assert settings.continuity_compaction.prepare_timeout_seconds == 300.0
+    assert settings.time_based_microcompact.enabled is False
+    assert settings.time_based_microcompact.gap_threshold_minutes == 60.0
+    assert settings.time_based_microcompact.keep_recent == 5
+
+
+def test_time_based_microcompact_settings_allow_zero_keep_with_runtime_floor(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / ".env"
+    path.write_text(
+        "TIME_BASED_MICROCOMPACT_ENABLED=true\n"
+        "TIME_BASED_MICROCOMPACT_GAP_MINUTES=45\n"
+        "TIME_BASED_MICROCOMPACT_KEEP_RECENT=0\n",
+        encoding="utf-8",
+    )
+    settings = load_settings(path)
+    assert settings.time_based_microcompact.enabled is True
+    assert settings.time_based_microcompact.gap_threshold_minutes == 45
+    assert settings.time_based_microcompact.keep_recent == 0
 
 
 def test_continuity_compaction_settings_are_independent_from_read_timeout(

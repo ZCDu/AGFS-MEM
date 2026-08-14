@@ -5,6 +5,8 @@ import os
 from pathlib import Path
 from urllib.parse import urlparse
 
+from short_term_memory.compression.micro_compact import TimeBasedMicroCompactConfig
+
 
 @dataclass(frozen=True)
 class RedisSessionSettings:
@@ -86,6 +88,9 @@ class ShortTermMemorySettings:
     continuity_compaction: ContinuityCompactionSettings = field(
         default_factory=ContinuityCompactionSettings
     )
+    time_based_microcompact: TimeBasedMicroCompactConfig = field(
+        default_factory=TimeBasedMicroCompactConfig
+    )
 
 
 def _read_env_file(path: Path) -> dict[str, str]:
@@ -120,6 +125,16 @@ def _positive_int(value: str, name: str) -> int:
         raise ValueError(f"{name} must be an integer") from exc
     if parsed < 1:
         raise ValueError(f"{name} must be positive")
+    return parsed
+
+
+def _non_negative_int(value: str, name: str) -> int:
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise ValueError(f"{name} must be an integer") from exc
+    if parsed < 0:
+        raise ValueError(f"{name} must not be negative")
     return parsed
 
 
@@ -361,6 +376,20 @@ def load_settings(path: Path | None = None) -> ShortTermMemorySettings:
             "COMPACTION_PREPARE_TIMEOUT_SECONDS",
         ),
     )
+    time_based_microcompact = TimeBasedMicroCompactConfig(
+        enabled=_boolean(
+            value("TIME_BASED_MICROCOMPACT_ENABLED", "false"),
+            "TIME_BASED_MICROCOMPACT_ENABLED",
+        ),
+        gap_threshold_minutes=_positive_float(
+            value("TIME_BASED_MICROCOMPACT_GAP_MINUTES", "60"),
+            "TIME_BASED_MICROCOMPACT_GAP_MINUTES",
+        ),
+        keep_recent=_non_negative_int(
+            value("TIME_BASED_MICROCOMPACT_KEEP_RECENT", "5"),
+            "TIME_BASED_MICROCOMPACT_KEEP_RECENT",
+        ),
+    )
 
     return ShortTermMemorySettings(
         environment=environment,
@@ -373,4 +402,5 @@ def load_settings(path: Path | None = None) -> ShortTermMemorySettings:
         compression_queue=compression_queue,
         deepseek_public=deepseek_public,
         continuity_compaction=continuity_compaction,
+        time_based_microcompact=time_based_microcompact,
     )
