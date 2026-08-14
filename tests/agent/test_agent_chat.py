@@ -7,7 +7,10 @@ import json
 import httpx
 import pytest
 
-from short_term_memory.agent.agent_chat import AgentChatClient
+from short_term_memory.agent.agent_chat import (
+    MEMORY_TOOL_DEFINITIONS,
+    AgentChatClient,
+)
 
 
 def _recall_handler(request: httpx.Request) -> httpx.Response:
@@ -99,25 +102,120 @@ async def test_agent_chat_handles_recall_tool_call_loop() -> None:
     )
 
 
+def tool_call(call_id: str, name: str, arguments: dict) -> dict:
+    return {
+        "content": None,
+        "tool_calls": [
+            {
+                "id": call_id,
+                "type": "function",
+                "function": {
+                    "name": name,
+                    "arguments": json.dumps(arguments),
+                },
+            }
+        ],
+    }
+
+
+class ScriptedModel:
+    def __init__(self, completions: list[dict]) -> None:
+        self.completions = completions
+        self.calls: list[dict] = []
+
+    async def __call__(self, **kwargs):
+        self.calls.append(kwargs)
+        return self.completions[len(self.calls) - 1]
+
+
+class RecordingTranscriptTransport:
+    def __init__(self) -> None:
+        self.paths: list[str] = []
+        self.requests: list[httpx.Request] = []
+
+    def __call__(self, request: httpx.Request) -> httpx.Response:
+        self.paths.append(request.url.path)
+        self.requests.append(request)
+        if request.url.path == "/v1/memories/read":
+            return httpx.Response(
+                200,
+                json={
+                    "messages": [{"role": "user", "content": "之前 TTL 是多少？"}],
+                    "ccr_markers": [],
+                    "headroom": {
+                        "proxy_url": "http://headroom/v1",
+                        "scope_headers": {
+                            "x-headroom-session-id": "opaque-session"
+                        },
+                    },
+                },
+            )
+        if request.url.path == "/v1/memories/transcript/grep":
+            return httpx.Response(200, json={"content": "84\tTTL was discussed"})
+        if request.url.path == "/v1/memories/transcript/read":
+            return httpx.Response(200, json={"content": "84\tTTL is 43200"})
+        if request.url.path == "/v1/memories/write":
+            return httpx.Response(200, json={"accepted": True})
+        return httpx.Response(404)
+
+
 @pytest.mark.asyncio
-async def test_agent_chat_injects_retrieve_guidance() -> None:
-    model = RecordingModelCall()
-
-    async def always_answer(**kwargs):
-        messages = kwargs["messages"]
-        model.calls.append(messages)
-        return {"content": "ok", "tool_calls": []}
-
-    client = AgentChatClient(
-        memory_api_url="http://test",
-        model_call=always_answer,
-        http_client=httpx.AsyncClient(transport=httpx.MockTransport(_recall_handler)),
+async def test_agent_autonomously_greps_then_reads_before_answering() -> None:
+    model = ScriptedModel(
+        [
+            tool_call(
+                "g1",
+                "Grep",
+                {
+                    "path": "journal://current-session",
+                    "pattern": "TTL",
+                    "output_mode": "content",
+                },
+            ),
+            tool_call(
+                "r1",
+                "Read",
+                {
+                    "file_path": "journal://current-session",
+                    "offset": 84,
+                    "limit": 8,
+                },
+            ),
+            {"content": "之前确定的 TTL 是 43200 秒。", "tool_calls": []},
+        ]
     )
-    try:
-        await client.turn("u-1", "s-1", "你好")
-    finally:
-        await client.aclose()
+    transport = RecordingTranscriptTransport()
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(transport)
+    ) as http:
+        client = AgentChatClient(
+            memory_api_url="http://memory", model_call=model, http_client=http
+        )
+        answer = await client.turn("u", "s", "之前 TTL 是多少？")
 
-    first_system = model.calls[0][0]
-    assert first_system["role"] == "system"
-    assert "headroom_retrieve" in first_system["content"]
+    assert answer == "之前确定的 TTL 是 43200 秒。"
+    assert transport.paths[-3:-1] == [
+        "/v1/memories/transcript/grep",
+        "/v1/memories/transcript/read",
+    ]
+    assert all(call["tools"] == MEMORY_TOOL_DEFINITIONS for call in model.calls)
+    assert model.calls[1]["messages"][-1] == {
+        "role": "tool",
+        "tool_call_id": "g1",
+        "content": "84\tTTL was discussed",
+    }
+    assert model.calls[2]["messages"][-1] == {
+        "role": "tool",
+        "tool_call_id": "r1",
+        "content": "84\tTTL is 43200",
+    }
+    assert model.calls[1]["messages"][-2]["tool_calls"][0]["id"] == "g1"
+    assert model.calls[2]["messages"][-2]["tool_calls"][0]["id"] == "r1"
+    assert not any(
+        "关键词" in str(message.get("content", ""))
+        or "headroom_retrieve` 工具" in str(message.get("content", ""))
+        for message in model.calls[0]["messages"]
+    )
+    for request in transport.requests:
+        if request.url.path.startswith("/v1/memories/transcript/"):
+            assert request.headers["x-memory-session-scope"] == "opaque-session"

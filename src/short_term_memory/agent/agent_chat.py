@@ -3,8 +3,8 @@
 This is the "方案2" deliverable: instead of each integrator copying chat_loop,
 they can import :class:`AgentChatClient` and get the full loop:
 
-  write user message -> read context -> call model -> handle headroom_retrieve
-  tool calls (recall) -> write assistant answer
+  write user message -> read context -> call model -> execute memory tools
+  -> append tool results -> call the same model -> write assistant answer
 
 The memory API is called over HTTP (httpx). The model provider is injected via
 ``model_call`` so the memory service source does not hard-depend on the OpenAI
@@ -18,9 +18,29 @@ from typing import Any, Callable, Mapping
 
 import httpx
 
-from short_term_memory.compression.recall_policy import (
-    retrieve_guidance,
-    should_recall,
+from short_term_memory.transcript.tool_definitions import (
+    TRANSCRIPT_TOOL_DEFINITIONS,
+)
+
+
+HEADROOM_RETRIEVE_TOOL_DEFINITION: dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": "headroom_retrieve",
+        "description": (
+            "Retrieve the exact original content for a Headroom CCR marker hash."
+        ),
+        "parameters": {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {"hash": {"type": "string", "minLength": 1}},
+            "required": ["hash"],
+        },
+    },
+}
+MEMORY_TOOL_DEFINITIONS = (
+    *TRANSCRIPT_TOOL_DEFINITIONS,
+    HEADROOM_RETRIEVE_TOOL_DEFINITION,
 )
 
 
@@ -45,12 +65,10 @@ class AgentChatClient:
         auth_token: str | None = None,
         http_client: httpx.AsyncClient | None = None,
         max_tool_rounds: int = 5,
-        enable_model_guidance: bool = True,
     ) -> None:
         self.memory_api_url = memory_api_url.rstrip("/")
         self.model_call = model_call
         self.max_tool_rounds = max_tool_rounds
-        self.enable_model_guidance = enable_model_guidance
         headers = {"Authorization": f"Bearer {auth_token}"} if auth_token else {}
         self._owns_http = http_client is None
         self.http = http_client or httpx.AsyncClient(headers=headers, timeout=60.0)
@@ -59,9 +77,19 @@ class AgentChatClient:
         if self._owns_http:
             await self.http.aclose()
 
-    async def _post(self, path: str, payload: Mapping[str, Any]) -> Any:
+    async def _post(
+        self,
+        path: str,
+        payload: Mapping[str, Any],
+        *,
+        headers: Mapping[str, str] | None = None,
+    ) -> Any:
         url = f"{self.memory_api_url}{path}"
-        response = await self.http.post(url, json=dict(payload))
+        response = await self.http.post(
+            url,
+            json=dict(payload),
+            headers=None if headers is None else dict(headers),
+        )
         response.raise_for_status()
         return response.json()
 
@@ -103,15 +131,18 @@ class AgentChatClient:
             {"user_id": user_id, "session_id": session_id, "history_turns": history_turns},
         )
         messages = list(memory.get("messages") or [])
-        ccr_markers = list(memory.get("ccr_markers") or [])
         headroom = memory.get("headroom") or {}
         proxy_url = headroom.get("proxy_url")
         scope_headers = headroom.get("scope_headers") or {}
 
         # 3. call the model (may loop on tool calls).
         answer = await self._ask(
-            messages, ccr_markers, proxy_url, scope_headers, model, user_id, session_id,
-            prompt=prompt,
+            messages,
+            proxy_url,
+            scope_headers,
+            model,
+            user_id,
+            session_id,
         )
 
         # 4. write the assistant answer back.
@@ -136,42 +167,22 @@ class AgentChatClient:
     async def _ask(
         self,
         messages: list[dict[str, Any]],
-        ccr_markers: list[str],
         proxy_url: str | None,
         scope_headers: dict[str, str],
         model: str | None,
         user_id: str,
         session_id: str,
-        prompt: str | None = None,
     ) -> str:
         working = list(messages)
-        # 方案1+方案2 proactive recall: if the user's question looks historical
-        # (keywords) or is semantically related to the compressed history, pull the
-        # originals back BEFORE the first model call.
-        if prompt and ccr_markers:
-            compressed_summary = "\n".join(
-                str(m.get("content", "")) for m in messages
-            )
-            if should_recall(prompt, compressed_summary):
-                originals = await self._recall_originals(
-                    user_id, session_id, ccr_markers
-                )
-                if originals:
-                    hint = (
-                        "以下是之前被压缩的历史对话原文，请基于这些内容回答用户的问题，"
-                        "优先引用其中的具体细节：\n\n" + "\n---\n".join(originals)
-                    )
-                    working = [{"role": "system", "content": hint}] + working
-        # 方案3 guidance: let the model decide whether to retrieve.
-        if self.enable_model_guidance:
-            working = [{"role": "system", "content": retrieve_guidance()}] + working
+        session_scope = str(scope_headers.get("x-headroom-session-id", ""))
 
         for _round in range(self.max_tool_rounds):
             completion = await self.model_call(
-                messages=working,
+                messages=list(working),
                 model=model,
                 proxy_url=proxy_url,
                 scope_headers=scope_headers,
+                tools=MEMORY_TOOL_DEFINITIONS,
             )
             content = completion.get("content")
             tool_calls = completion.get("tool_calls") or []
@@ -194,17 +205,30 @@ class AgentChatClient:
 
                 for tc in tool_calls:
                     name = tc.get("function", {}).get("name")
+                    raw_arguments = tc.get("function", {}).get("arguments") or "{}"
                     try:
-                        args = json.loads(tc.get("function", {}).get("arguments") or "{}")
-                    except json.JSONDecodeError:
+                        args = (
+                            dict(raw_arguments)
+                            if isinstance(raw_arguments, Mapping)
+                            else json.loads(raw_arguments)
+                        )
+                    except (json.JSONDecodeError, TypeError, ValueError):
                         args = {}
-                    if name == "headroom_retrieve":
-                        hash_value = args.get("hash", "")
-                        tool_content = await self._recall(user_id, session_id, hash_value) or "not found"
-                    else:
-                        tool_content = f"unknown tool {name}"
+                    if not isinstance(args, dict):
+                        args = {}
+                    tool_content = await self._execute_tool(
+                        name=str(name),
+                        arguments=args,
+                        user_id=user_id,
+                        session_id=session_id,
+                        session_scope=session_scope,
+                    )
                     working.append(
-                        {"role": "tool", "tool_call_id": tc.get("id"), "content": tool_content}
+                        {
+                            "role": "tool",
+                            "tool_call_id": tc.get("id"),
+                            "content": tool_content,
+                        }
                     )
                 continue
 
@@ -213,6 +237,38 @@ class AgentChatClient:
             return content
 
         raise RuntimeError("model exceeded tool-call rounds without a final answer")
+
+    async def _execute_tool(
+        self,
+        *,
+        name: str,
+        arguments: dict[str, Any],
+        user_id: str,
+        session_id: str,
+        session_scope: str,
+    ) -> str:
+        if name == "headroom_retrieve":
+            return (
+                await self._recall(
+                    user_id, session_id, str(arguments.get("hash", ""))
+                )
+                or "not found"
+            )
+        if name == "Grep":
+            body = await self._post(
+                "/v1/memories/transcript/grep",
+                {**arguments, "user_id": user_id, "session_id": session_id},
+                headers={"X-Memory-Session-Scope": session_scope},
+            )
+            return str(body["content"])
+        if name == "Read":
+            body = await self._post(
+                "/v1/memories/transcript/read",
+                {**arguments, "user_id": user_id, "session_id": session_id},
+                headers={"X-Memory-Session-Scope": session_scope},
+            )
+            return str(body["content"])
+        return f"unknown tool {name}"
 
     async def _recall(self, user_id: str, session_id: str, hash_value: str) -> str | None:
         """Fetch the original content for a marker hash via the recall endpoint."""
@@ -227,19 +283,3 @@ class AgentChatClient:
             if result.get("recovered"):
                 return result.get("content")
         return None
-
-    async def _recall_originals(
-        self, user_id: str, session_id: str, hashes: list[str]
-    ) -> list[str]:
-        """Recall originals for a list of marker hashes (query-driven ranking)."""
-        if not hashes:
-            return []
-        body = await self._post(
-            "/v1/memories/recall",
-            {"user_id": user_id, "session_id": session_id, "hashes": hashes},
-        )
-        return [
-            r.get("content")
-            for r in (body.get("results") or [])
-            if r.get("recovered") and r.get("content")
-        ]

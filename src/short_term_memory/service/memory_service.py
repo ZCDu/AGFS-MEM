@@ -493,27 +493,15 @@ class MemoryService:
     ) -> MemoryRecallResponse:
         """Pull originals back from the CCR store by marker hash (application-driven).
 
-        When ``query`` is provided, the stored hash->summary map is used to rank
-        the requested hashes by topical relevance to the question, so the caller
-        gets the most relevant original first.  Each hash is resolved recursively
-        (follows re-compression chains down to the true original text).
+        Each hash is resolved recursively, following re-compression chains down
+        to the true original text. Tool choice and ordering belong to the model.
         """
         if self.recall_client is None:
             raise MemoryReadUnavailableError("recall is not configured")
         scope = self.scope_factory.for_session(request.user_id, request.session_id)
         scope_headers = scope.as_headroom_headers()
 
-        # Rank hashes by relevance to query (if provided) using stored summaries.
         hashes = list(request.hashes)
-        if request.query:
-            try:
-                summaries = await self.store.get_ccr_summaries(
-                    request.user_id, request.session_id
-                )
-                hashes = self._rank_hashes_by_query(hashes, summaries, request.query)
-            except Exception:
-                # Ranking is an optimization; fall back to the given order.
-                pass
 
         results: list[MemoryRecallResult] = []
         for hash_value in hashes:
@@ -529,19 +517,6 @@ class MemoryService:
                     MemoryRecallResult(hash=hash_value, content="", recovered=False)
                 )
         return MemoryRecallResponse(request_id=request_id, results=results)
-
-    @staticmethod
-    def _rank_hashes_by_query(
-        hashes: list[str], summaries: dict[str, str], query: str
-    ) -> list[str]:
-        """Rank hashes by text similarity between their summary and the query."""
-        from short_term_memory.compression.recall_policy import text_similarity
-
-        def score(hash_value: str) -> float:
-            summary = summaries.get(hash_value, "")
-            return text_similarity(query, summary)
-
-        return sorted(hashes, key=score, reverse=True)
 
     def _compression_job(
         self,

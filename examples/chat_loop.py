@@ -35,7 +35,9 @@ def _build_model_call(deepseek_api_key: str, print_fn):
 
     client_holder: dict[str, OpenAI] = {}
 
-    async def model_call(*, messages, model, proxy_url, scope_headers, **_kwargs):
+    async def model_call(
+        *, messages, model, proxy_url, scope_headers, tools=None, **_kwargs
+    ):
         if proxy_url not in client_holder:
             client_holder[proxy_url] = OpenAI(
                 api_key=deepseek_api_key,
@@ -45,7 +47,7 @@ def _build_model_call(deepseek_api_key: str, print_fn):
         client = client_holder[proxy_url]
         print_fn("[思考] 已发送，DeepSeek 正在生成...")
         completion = client.chat.completions.create(
-            model=model, messages=messages, stream=False
+            model=model, messages=messages, tools=tools, stream=False
         )
         message = completion.choices[0].message
         content = message.content
