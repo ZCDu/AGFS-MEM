@@ -7,8 +7,6 @@ from datetime import datetime, timedelta, timezone
 import uuid
 from typing import AsyncIterator, Callable
 
-import anyio
-
 from short_term_memory.compression.async_headroom_client import AsyncHeadroomClient
 from short_term_memory.compression.ccr_recall import extract_marker_hashes
 from short_term_memory.compression.generations import CompressionCandidate, GenerationPlanner
@@ -21,20 +19,7 @@ from short_term_memory.models import (
     CompressionGeneration,
     HeadroomCompressionStatus,
     MemorySummaryEnvelope,
-    SessionSummaryPayload,
 )
-from short_term_memory.ports import SummaryModel
-
-
-class EmptySummaryModel:
-    """Standalone worker default that deliberately has no model-provider dependency."""
-
-    def summarize(self, messages: tuple[dict[str, object], ...]) -> SessionSummaryPayload:
-        del messages
-        return SessionSummaryPayload(
-            current_goal=[], preferences=[], confirmed_facts=[], pending_items=[],
-            attachment_references=[],
-        )
 
 
 @dataclass(frozen=True)
@@ -51,7 +36,6 @@ class CompressionWorker:
         store: object,
         planner: GenerationPlanner,
         headroom: AsyncHeadroomClient,
-        summary_model: SummaryModel,
         compression_model: str,
         scope_factory: OptimizationScopeFactory,
         ccr_ttl_seconds: int,
@@ -68,7 +52,6 @@ class CompressionWorker:
         self.store = store
         self.planner = planner
         self.headroom = headroom
-        self.summary_model = summary_model
         self.compression_model = compression_model
         self.scope_factory = scope_factory
         self.ccr_ttl_seconds = ccr_ttl_seconds
@@ -158,10 +141,9 @@ class CompressionWorker:
         if current_version != job.expected_version:
             return await self._ack(lease, "stale")
 
-        # Re-compression: the whole context is already compressed but still over
-        # threshold.  Concatenate existing generations' messages and compress again.
-        if job.recompress:
-            return await self._execute_recompress(lease, envelope, now)
+        # Storage-pressure eviction is deliberately separate from Claude L2/L3/L4.
+        if job.evict_oldest_generation:
+            return await self._execute_evict_oldest_generation(lease, envelope, now)
 
         candidate = await self._candidate(job, envelope, now)
         if candidate is None or candidate.expected_version != job.expected_version:
@@ -187,13 +169,8 @@ class CompressionWorker:
             return await self._retry(lease, "retry")
 
         completed_at = self._now()
-        summary = await anyio.to_thread.run_sync(
-            self.summary_model.summarize, compressed.messages
-        )
-        if not isinstance(summary, SessionSummaryPayload):
-            summary = SessionSummaryPayload.model_validate(summary)
         next_envelope = self._next_envelope(
-            envelope, candidate, compressed, summary, completed_at
+            envelope, candidate, compressed, completed_at
         )
         written = await self.store.compare_and_set_envelope(
             job.user_id, job.session_id, job.expected_version, next_envelope
@@ -223,7 +200,7 @@ class CompressionWorker:
             lease, "acked", completed_envelope=next_envelope
         )
 
-    async def _execute_recompress(
+    async def _execute_evict_oldest_generation(
         self, lease, envelope: MemorySummaryEnvelope | None, now: datetime
     ) -> CompressionWorkerResult:
         """Shrink the context by dropping the OLDEST compressed generation.
@@ -304,10 +281,8 @@ class CompressionWorker:
         current: MemorySummaryEnvelope | None,
         candidate: CompressionCandidate,
         compressed,
-        summary: SessionSummaryPayload,
         now: datetime,
     ) -> MemorySummaryEnvelope:
-        del summary
         previous = current.compression_generations if current is not None else ()
         generation = CompressionGeneration(
             generation=max((item.generation for item in previous), default=0) + 1,

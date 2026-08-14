@@ -52,6 +52,12 @@ class QueueRedis:
                     and old["requested_through_sequence"]
                     >= incoming["requested_through_sequence"]
                     and (old.get("rebuild", False) or not incoming.get("rebuild", False))
+                    and (
+                        old.get("evict_oldest_generation", old.get("recompress", False))
+                        or not incoming.get(
+                            "evict_oldest_generation", incoming.get("recompress", False)
+                        )
+                    )
                 ):
                     return ["idempotent"]
                 return ["conflict"]
@@ -75,16 +81,25 @@ class QueueRedis:
                         new["requested_through_sequence"],
                     )
                     rebuild = old.get("rebuild", False) or new.get("rebuild", False)
+                    evict_oldest_generation = old.get(
+                        "evict_oldest_generation", old.get("recompress", False)
+                    ) or new.get(
+                        "evict_oldest_generation", new.get("recompress", False)
+                    )
                     if (
                         expected_version == old["expected_version"]
                         and through_sequence == old["requested_through_sequence"]
                         and rebuild == old.get("rebuild", False)
+                        and evict_oldest_generation
+                        == old.get("evict_oldest_generation", old.get("recompress", False))
                     ):
                         self.values.pop(job_key, None)
                         return ["coalesced"]
                     new["expected_version"] = expected_version
                     new["requested_through_sequence"] = through_sequence
                     new["rebuild"] = rebuild
+                    new["evict_oldest_generation"] = evict_oldest_generation
+                    new.pop("recompress", None)
                     self.values[job_key] = json.dumps(new, separators=(",", ":"))
                 self.values.pop(previous_key, None)
             self.values[pointer] = job_id
@@ -180,6 +195,17 @@ def compression_job(*, job_id="job-10-0", through_sequence=10, expected_version=
         job_id=job_id, user_id="u", session_id=session_id,
         expected_version=expected_version, requested_through_sequence=through_sequence,
     )
+
+
+def test_legacy_recompress_job_lazily_migrates_to_generation_eviction() -> None:
+    legacy = compression_job().model_dump(mode="json")
+    legacy.pop("evict_oldest_generation", None)
+    legacy["recompress"] = True
+
+    migrated = CompressionJob.model_validate(legacy)
+
+    assert migrated.evict_oldest_generation is True
+    assert "recompress" not in migrated.model_dump(mode="json")
 
 
 @pytest.mark.asyncio

@@ -29,7 +29,6 @@ from short_term_memory.compression.scope import OptimizationScopeFactory
 from short_term_memory.config import ShortTermMemorySettings, load_settings
 from short_term_memory.jobs.compression_worker import (
     CompressionWorker,
-    EmptySummaryModel,
 )
 from short_term_memory.jobs.redis_compression_queue import RedisCompressionQueue
 from short_term_memory.jobs.session_memory_queue import RedisSessionMemoryQueue
@@ -77,7 +76,6 @@ class ServiceRuntime:
         headroom_http: Any | None = None,
         own_injected: bool = False,
         token_estimator: Any | None = None,
-        summary_model: Any | None = None,
         continuity_model: Any | None = None,
     ) -> "ServiceRuntime":
         """Construct one pool/client graph, closing owned partial state on failure."""
@@ -153,7 +151,6 @@ class ServiceRuntime:
                 store=store,
                 planner=planner,
                 headroom=headroom,
-                summary_model=summary_model or EmptySummaryModel(),
                 compression_model=settings.headroom_service.compression_model,
                 scope_factory=scope_factory,
                 ccr_ttl_seconds=settings.headroom_service.ccr_ttl_seconds,

@@ -193,6 +193,29 @@ async def test_write_reserves_journals_commits_then_queues(service):
 
 
 @pytest.mark.asyncio
+async def test_generation_pressure_queues_explicit_oldest_eviction(service):
+    now = datetime(2026, 8, 6, tzinfo=timezone.utc)
+    existing = CompressionGeneration(
+        generation=1,
+        from_sequence=1,
+        through_sequence=1,
+        messages=({"role": "system", "content": "compressed segment"},),
+        tokens_before=100,
+        tokens_after=80,
+        created_at=now.isoformat(),
+        ccr_expires_at=(now + timedelta(hours=1)).isoformat(),
+    )
+    service.store.seed_envelope(envelope(through=1, generations=[existing]))
+
+    await service.write(write_request("event-evict", "recent original"), "req-evict")
+
+    assert len(service.compression_queue.jobs) == 1
+    job = service.compression_queue.jobs[0]
+    assert job.evict_oldest_generation is True
+    assert "recompress" not in job.model_dump(mode="json")
+
+
+@pytest.mark.asyncio
 async def test_assistant_commit_schedules_l4_only_after_durable_write(service):
     from short_term_memory.service.schemas import MemoryWriteRequest
 

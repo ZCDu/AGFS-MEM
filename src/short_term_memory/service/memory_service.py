@@ -201,7 +201,7 @@ class MemoryService:
         originals: tuple[MemoryEvent, ...] = ()
         compressible: tuple[MemoryEvent, ...] = ()
         should_compress = False
-        should_recompress = False
+        should_evict_oldest_generation = False
         if committed_new_event:
             redis_started = time.perf_counter()
             originals, envelope = await asyncio.gather(
@@ -232,10 +232,8 @@ class MemoryService:
                 session_seconds=request.session_seconds,
             )
 
-            # Re-compression triggers independently: the compressed segments (older
-            # than the retained recent turns) alone exceed the threshold.  It is not
-            # gated by whether new originals exist — the retained originals always
-            # stay as originals.
+            # Generation eviction is a storage-pressure fallback, not Claude compact.
+            # It is independent of whether new originals are eligible for Headroom.
             if envelope is not None and envelope.compression_generations:
                 segment_tokens = self._estimate_generation_tokens(envelope)
                 if self.policy.should_compress(
@@ -243,12 +241,10 @@ class MemoryService:
                     message_count=len(envelope.compression_generations),
                     session_seconds=request.session_seconds,
                 ):
-                    should_recompress = True
+                    should_evict_oldest_generation = True
         else:
             envelope = None
-        # Normal compression and re-compression are independent; enqueue each that
-        # fired.  Normal compression targets only originals older than the retained
-        # window; re-compression targets the existing compressed segments.
+        # Original-only Headroom compression and generation eviction are independent.
         if should_compress and compressible:
             queue_started = time.perf_counter()
             await self.compression_queue.enqueue(
@@ -261,7 +257,7 @@ class MemoryService:
                 )
             )
             queue_seconds += time.perf_counter() - queue_started
-        if should_recompress:
+        if should_evict_oldest_generation:
             queue_started = time.perf_counter()
             await self.compression_queue.enqueue(
                 self._compression_job(
@@ -270,7 +266,7 @@ class MemoryService:
                     envelope,
                     envelope.compressed_through_sequence,
                     rebuild=False,
-                    recompress=True,
+                    evict_oldest_generation=True,
                 )
             )
             queue_seconds += time.perf_counter() - queue_started
@@ -567,12 +563,12 @@ class MemoryService:
         through_sequence: int,
         *,
         rebuild: bool,
-        recompress: bool = False,
+        evict_oldest_generation: bool = False,
     ) -> CompressionJob:
         expected_version = envelope.version if envelope is not None else 0
         job_identity = (
             f"{user_id}\n{session_id}\n{expected_version}\n"
-            f"{through_sequence}\n{rebuild}\n{recompress}"
+            f"{through_sequence}\n{rebuild}\n{evict_oldest_generation}"
         )
         return CompressionJob(
             job_id=f"memory-{uuid5(NAMESPACE_URL, job_identity).hex}",
@@ -581,7 +577,7 @@ class MemoryService:
             expected_version=expected_version,
             requested_through_sequence=through_sequence,
             rebuild=rebuild,
-            recompress=recompress,
+            evict_oldest_generation=evict_oldest_generation,
         )
 
     def _effective_config(self) -> EffectiveMemoryConfig:

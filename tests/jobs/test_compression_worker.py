@@ -1,5 +1,5 @@
 import asyncio
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from hashlib import sha256
 from unittest.mock import AsyncMock
 
@@ -8,19 +8,25 @@ import pytest
 import pytest_asyncio
 
 from short_term_memory.compression.async_headroom_client import AsyncHeadroomClient
-from short_term_memory.compression.generations import GenerationPlanner
+from short_term_memory.compression.generations import GenerationAssembler, GenerationPlanner
 from short_term_memory.compression.scope import OptimizationScopeFactory
 from short_term_memory.jobs.compression_worker import (
     CompressionWorkerResult,
     CompressionWorker,
-    EmptySummaryModel,
     InProcessRebuildWaiter,
 )
 from short_term_memory.jobs.redis_compression_queue import CompressionJob, RedisCompressionQueue
 from short_term_memory.models import (
+    AutoCompactTrackingState,
+    CompactBoundary,
+    CompressionGeneration,
+    ContextRevision,
     HeadroomCompressionResult,
     HeadroomCompressionStatus,
     HeadroomFailureReason,
+    MemorySummaryEnvelope,
+    SessionCompressionMessage,
+    SessionMemoryRevision,
 )
 from short_term_memory.storage.async_redis_memory_store import AsyncRedisMemoryStore
 from short_term_memory.storage.journal_store import JournalStore
@@ -132,7 +138,6 @@ async def worker(tmp_path):
         store=store,
         planner=GenerationPlanner(store, journals, max_segments=8),
         headroom=headroom,
-        summary_model=EmptySummaryModel(),
         compression_model="deepseek-v4-flash",
         scope_factory=OptimizationScopeFactory("secret"),
         ccr_ttl_seconds=43_200,
@@ -150,6 +155,58 @@ def compression_job(*, through_sequence=10, expected_version=0):
     )
 
 
+def generation(number: int, start: int, through: int, content: str) -> CompressionGeneration:
+    now = datetime(2026, 8, 6, tzinfo=timezone.utc)
+    return CompressionGeneration(
+        generation=number,
+        from_sequence=start,
+        through_sequence=through,
+        messages=(SessionCompressionMessage(role="system", content=content),),
+        tokens_before=100,
+        tokens_after=25,
+        created_at=now.isoformat(),
+        ccr_expires_at=(now + timedelta(days=1)).isoformat(),
+    )
+
+
+def continuity_envelope() -> MemorySummaryEnvelope:
+    now = datetime(2026, 8, 6, tzinfo=timezone.utc)
+    boundary = CompactBoundary(
+        boundary_id="boundary-10",
+        trigger="auto",
+        strategy="traditional",
+        covered_through_sequence=10,
+        pre_compact_tokens=1000,
+        true_post_compact_tokens=100,
+        created_at=now.isoformat(),
+    )
+    return MemorySummaryEnvelope(
+        version=1,
+        compressed_through_sequence=5,
+        compression_generations=(generation(1, 1, 5, "old marker"),),
+        session_memory=SessionMemoryRevision(
+            version=1,
+            content="L4 CONTINUITY",
+            covered_through_sequence=5,
+            token_count=20,
+            updated_at=now.isoformat(),
+        ),
+        active_revision=ContextRevision(
+            version=1,
+            boundary=boundary,
+            summary_message=SessionCompressionMessage(
+                role="user", content="L3 CONTINUITY"
+            ),
+            covered_generation_ids=(1,),
+            updated_at=now.isoformat(),
+        ),
+        auto_compact_tracking=AutoCompactTrackingState(
+            compacted=True, turn_counter=0, turn_id="turn-1"
+        ),
+        updated_at=now.isoformat(),
+    )
+
+
 @pytest.mark.asyncio
 async def test_worker_stores_generation_only_after_headroom_success(worker):
     worker, store, transport = worker
@@ -164,6 +221,68 @@ async def test_worker_stores_generation_only_after_headroom_success(worker):
     assert persisted.compression_generations[0].messages[0].content == "marker"
     assert b"ORIGINAL-1" in transport.requests[0].content
     assert b"marker" not in transport.requests[0].content
+
+
+@pytest.mark.asyncio
+async def test_generation_worker_preserves_continuity_state_and_hides_late_coverage(
+    worker,
+):
+    worker, store, transport = worker
+    existing = continuity_envelope()
+    assert await store.compare_and_set_envelope("u", "s", 0, existing)
+    await worker.queue.enqueue(compression_job(expected_version=1))
+
+    result = await worker.run_once()
+    saved = await store.read_envelope("u", "s")
+
+    assert result.state == "acked"
+    assert saved is not None
+    assert saved.session_memory == existing.session_memory
+    assert saved.active_revision == existing.active_revision
+    assert saved.auto_compact_tracking == existing.auto_compact_tracking
+    assert [item.generation for item in saved.compression_generations] == [1, 2]
+    request_body = transport.requests[0].content
+    assert b"ORIGINAL-6" in request_body and b"ORIGINAL-10" in request_body
+    assert b"ORIGINAL-5" not in request_body
+    assert b"L3 CONTINUITY" not in request_body
+    assert b"L4 CONTINUITY" not in request_body
+    active = GenerationAssembler(max_segments=8).build_read_messages(
+        saved, (), datetime.now(timezone.utc)
+    )
+    assert "marker" not in [item["content"] for item in active]
+    assert "L3 CONTINUITY" in [item["content"] for item in active]
+
+
+@pytest.mark.asyncio
+async def test_generation_eviction_drops_only_oldest_and_keeps_ccr_catalog(worker):
+    worker, store, _ = worker
+    existing = MemorySummaryEnvelope(
+        version=1,
+        compressed_through_sequence=10,
+        compression_generations=(
+            generation(1, 1, 5, "Retrieve more: hash=aaa111bbb222"),
+            generation(2, 6, 10, "Retrieve more: hash=ccc333ddd444"),
+        ),
+        updated_at="2026-08-06T00:00:00+00:00",
+    )
+    assert await store.compare_and_set_envelope("u", "s", 0, existing)
+    await store.store_ccr_summary("u", "s", "aaa111bbb222", "old catalog entry")
+    await store.store_ccr_summary("u", "s", "ccc333ddd444", "new catalog entry")
+    job = compression_job(expected_version=1).model_copy(
+        update={"evict_oldest_generation": True}
+    )
+    await worker.queue.enqueue(job)
+
+    result = await worker.run_once()
+    saved = await store.read_envelope("u", "s")
+
+    assert result.state == "acked"
+    assert saved is not None
+    assert [item.generation for item in saved.compression_generations] == [2]
+    assert await store.get_ccr_summaries("u", "s") == {
+        "aaa111bbb222": "old catalog entry",
+        "ccc333ddd444": "new catalog entry",
+    }
 
 
 @pytest.mark.asyncio

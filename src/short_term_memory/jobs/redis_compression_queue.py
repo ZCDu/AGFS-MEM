@@ -1,9 +1,9 @@
 """Durable Redis state machine for deferred Headroom compression jobs."""
 
 from dataclasses import dataclass
-from typing import Any, Protocol
+from typing import Any, Mapping, Protocol
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from short_term_memory.storage.vfs_adapter import safe_component
 
@@ -26,7 +26,20 @@ class CompressionJob(BaseModel):
     requested_through_sequence: int = Field(ge=1)
     attempt: int = Field(ge=0, default=0)
     rebuild: bool = False
-    recompress: bool = False
+    evict_oldest_generation: bool = False
+
+    @model_validator(mode="before")
+    @classmethod
+    def migrate_legacy_recompress(cls, value: Any) -> Any:
+        """Accept jobs queued before the eviction intent was named accurately."""
+
+        if not isinstance(value, Mapping) or "recompress" not in value:
+            return value
+        migrated = dict(value)
+        legacy = migrated.pop("recompress")
+        if "evict_oldest_generation" not in migrated or legacy is True:
+            migrated["evict_oldest_generation"] = legacy
+        return migrated
 
 
 @dataclass(frozen=True)
@@ -37,6 +50,9 @@ class CompressionJobLease:
 
 ENQUEUE_SCRIPT = """
 -- dream:compression:enqueue-v2
+local function evicts_oldest(job)
+  return job.evict_oldest_generation == true or job.recompress == true
+end
 local existing = redis.call('GET', KEYS[1])
 if existing then
   if existing == ARGV[1] then return {'idempotent'} end
@@ -46,7 +62,8 @@ if existing then
     and old.session_id == incoming.session_id
     and old.expected_version >= incoming.expected_version
     and old.requested_through_sequence >= incoming.requested_through_sequence
-    and ((old.rebuild == true) or (incoming.rebuild ~= true)) then
+    and ((old.rebuild == true) or (incoming.rebuild ~= true))
+    and (evicts_oldest(old) or not evicts_oldest(incoming)) then
     return {'idempotent'}
   end
   return {'conflict'}
@@ -68,15 +85,19 @@ if previous and previous ~= ARGV[2] then
     local through_sequence = math.max(
       old.requested_through_sequence, new.requested_through_sequence)
     local rebuild = (old.rebuild == true) or (new.rebuild == true)
+    local evict_oldest_generation = evicts_oldest(old) or evicts_oldest(new)
     if expected_version == old.expected_version
       and through_sequence == old.requested_through_sequence
-      and rebuild == (old.rebuild == true) then
+      and rebuild == (old.rebuild == true)
+      and evict_oldest_generation == evicts_oldest(old) then
       redis.call('DEL', KEYS[1])
       return {'coalesced'}
     end
     new.expected_version = expected_version
     new.requested_through_sequence = through_sequence
     new.rebuild = rebuild
+    new.evict_oldest_generation = evict_oldest_generation
+    new.recompress = nil
     redis.call('SET', KEYS[1], cjson.encode(new))
   end
   redis.call('DEL', KEYS[6] .. previous)
