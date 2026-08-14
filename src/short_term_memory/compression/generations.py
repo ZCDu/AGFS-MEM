@@ -4,6 +4,8 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Protocol
 
+from short_term_memory.compression.context_messages import to_provider_messages
+from short_term_memory.compression.context_query import load_active_messages
 from short_term_memory.models import MemoryEvent, MemorySummaryEnvelope
 from short_term_memory.storage.journal_store import JournalStore
 
@@ -156,19 +158,14 @@ class GenerationAssembler:
         recent_originals: tuple[MemoryEvent, ...],
         now: datetime,
     ) -> tuple[dict[str, Any], ...]:
-        if now.tzinfo is None or now.utcoffset() is None:
-            raise ValueError("now must be timezone-aware")
-        result: list[dict[str, Any]] = []
-        if envelope is not None:
-            for generation in self._fresh_generations(envelope, now):
-                result.extend(
-                    message.model_dump(mode="json")
-                    for message in generation.messages
-                )
-        # Recent originals deliberately remain even when their sequence overlaps a
-        # compressed range: this is the approved read-context overlap policy.
-        result.extend(self._event_message(event) for event in recent_originals)
-        return tuple(result)
+        return to_provider_messages(
+            load_active_messages(
+                envelope,
+                recent_originals,
+                now,
+                max_segments=self.max_segments,
+            )
+        )
 
     def _fresh_generations(
         self, envelope: MemorySummaryEnvelope, now: datetime
@@ -186,7 +183,3 @@ class GenerationAssembler:
         if expires_at.tzinfo is None or expires_at.utcoffset() is None:
             raise ValueError("ccr_expires_at must be timezone-aware")
         return expires_at
-
-    @staticmethod
-    def _event_message(event: MemoryEvent) -> dict[str, str]:
-        return {"role": event.role.value, "content": event.content}
