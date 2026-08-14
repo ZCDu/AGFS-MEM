@@ -50,55 +50,55 @@ def backend(s3_env):
 # ---------- basic semantics ----------
 
 def test_put_get_roundtrip(backend):
-    etag = backend.put_bytes("u/wiki/person/a.md", b"hello")
-    got = backend.get_bytes("u/wiki/person/a.md")
+    etag = backend.put_bytes("wikis/u/person/a.okf.md", b"hello")
+    got = backend.get_bytes("wikis/u/person/a.okf.md")
     assert got.data == b"hello"
     assert got.etag == etag
 
 
 def test_missing_key_returns_none(backend):
-    assert backend.get_bytes("u/wiki/person/nobody.md") is None
+    assert backend.get_bytes("wikis/u/person/nobody.okf.md") is None
 
 
 def test_prefix_is_applied_and_stripped(backend):
-    backend.put_bytes("u/wiki/person/a.md", b"x")
+    backend.put_bytes("wikis/u/person/a.okf.md", b"x")
     raw = boto3.client("s3", region_name="us-east-1").list_objects_v2(Bucket=BUCKET)
     stored = [o["Key"] for o in raw["Contents"]]
 
-    assert stored == ["graph/u/wiki/person/a.md"], "prefix must be applied on write"
-    assert backend.list_keys("u/wiki/") == ["u/wiki/person/a.md"], "and stripped on read"
+    assert stored == ["graph/wikis/u/person/a.okf.md"], "prefix must be applied on write"
+    assert backend.list_keys("wikis/u/") == ["wikis/u/person/a.okf.md"], "and stripped on read"
 
 
 def test_delete(backend):
-    backend.put_bytes("u/wiki/person/a.md", b"x")
-    backend.delete("u/wiki/person/a.md")
-    assert backend.get_bytes("u/wiki/person/a.md") is None
+    backend.put_bytes("wikis/u/person/a.okf.md", b"x")
+    backend.delete("wikis/u/person/a.okf.md")
+    assert backend.get_bytes("wikis/u/person/a.okf.md") is None
 
 
 # ---------- conditional writes: the whole concurrency scheme ----------
 
 def test_if_none_match_rejects_overwrite(backend):
     """if_match="" means 'must not already exist' -> IfNoneMatch: *"""
-    backend.put_bytes("u/wiki/person/a.md", b"first")
+    backend.put_bytes("wikis/u/person/a.okf.md", b"first")
     with pytest.raises(ConflictError):
-        backend.put_bytes("u/wiki/person/a.md", b"second", if_match="")
+        backend.put_bytes("wikis/u/person/a.okf.md", b"second", if_match="")
 
 
 def test_if_none_match_allows_create(backend):
-    backend.put_bytes("u/wiki/person/new.md", b"first", if_match="")
-    assert backend.get_bytes("u/wiki/person/new.md").data == b"first"
+    backend.put_bytes("wikis/u/person/new.okf.md", b"first", if_match="")
+    assert backend.get_bytes("wikis/u/person/new.okf.md").data == b"first"
 
 
 def test_if_match_rejects_stale_etag(backend):
-    backend.put_bytes("u/wiki/person/a.md", b"v1")
+    backend.put_bytes("wikis/u/person/a.okf.md", b"v1")
     with pytest.raises(ConflictError):
-        backend.put_bytes("u/wiki/person/a.md", b"v2", if_match="0" * 32)
+        backend.put_bytes("wikis/u/person/a.okf.md", b"v2", if_match="0" * 32)
 
 
 def test_if_match_accepts_current_etag(backend):
-    etag = backend.put_bytes("u/wiki/person/a.md", b"v1")
-    backend.put_bytes("u/wiki/person/a.md", b"v2", if_match=etag)
-    assert backend.get_bytes("u/wiki/person/a.md").data == b"v2"
+    etag = backend.put_bytes("wikis/u/person/a.okf.md", b"v1")
+    backend.put_bytes("wikis/u/person/a.okf.md", b"v2", if_match=etag)
+    assert backend.get_bytes("wikis/u/person/a.okf.md").data == b"v2"
 
 
 # ---------- the deployment failure mode ----------
@@ -115,7 +115,7 @@ def test_access_denied_on_get_explains_listbucket(s3_env):
 
     backend = S3Backend(bucket=BUCKET, client=DeniedClient())
     with pytest.raises(PermissionError, match="s3:ListBucket"):
-        backend.get_bytes("u/wiki/person/nobody.md")
+        backend.get_bytes("wikis/u/person/nobody.okf.md")
 
 
 def test_unsupported_conditional_write_is_explained(s3_env):
@@ -130,7 +130,7 @@ def test_unsupported_conditional_write_is_explained(s3_env):
 
     backend = S3Backend(bucket=BUCKET, client=NoCondClient())
     with pytest.raises(RuntimeError, match="conditional write"):
-        backend.put_bytes("u/wiki/person/a.md", b"x", if_match="abc")
+        backend.put_bytes("wikis/u/person/a.okf.md", b"x", if_match="abc")
 
 
 # ---------- the store on top of S3 ----------
@@ -168,9 +168,9 @@ def test_manifest_rebuild_on_s3(backend):
         store.upsert_entity("u1", "concept", f"C{i}")
     store.flush()
 
-    for key in list(backend.list_keys("u1/wiki/_manifest")):
+    for key in list(backend.list_keys("wikis/u1/_manifest")):
         backend.delete(key)
-    backend.delete("u1/wiki/_manifest.json")
+    backend.delete("wikis/u1/_manifest.json")
     store.manifest._cache.clear()
     assert store.list_entities("u1") == []
 

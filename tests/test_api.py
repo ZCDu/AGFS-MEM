@@ -28,6 +28,47 @@ def test_healthz(client):
     assert r.json()["status"] == "ok"
 
 
+def test_extract_first_use_falls_back_to_personal_wiki(client):
+    """Before any topic wiki exists, the very first Review must not 409.
+    It lands in the user's own personal wiki instead, and bare chatter is
+    still correctly classified as not worth storing (no LLM call)."""
+    r = client.post("/v1/users/demo/extract", json={
+        "text": "User: hello?\n\nAssistant: Hello! How can I help you today?",
+    })
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["target_wiki"] == "demo"
+    assert "personal wiki" in body["target_wiki_reason"]
+    assert body["llm_used"] is False
+
+
+def test_extract_new_topic_creates_a_wiki(client, monkeypatch):
+    """A write that matches nothing and is not the user's very first
+    conversation creates a NEW topic wiki instead of 409-ing. Auto-creation
+    still cannot fragment the graph -- a near-duplicate name reuses the
+    existing wiki rather than splitting it."""
+    # First use: establish the personal wiki so the next extract is NOT
+    # the "first use" path.
+    client.post("/v1/users/demo/extract", json={
+        "text": "User: hello?\n\nAssistant: Hello!",
+    })
+
+    # A genuinely new topic, unrelated to anything reachable. The target is
+    # resolved (and the wiki created) before the assessor/LLM runs, so this
+    # can stay key-less: short text is gated as chatter and never reaches
+    # the model.
+    r = client.post("/v1/users/demo/extract", json={
+        "text": "We signed a deal with Acme Corp yesterday.",
+    })
+    assert r.status_code == 200, r.text
+    assert r.json()["target_wiki"] == "acme-corp"
+    assert "created" in r.json()["target_wiki_reason"]
+
+    wiki = client.get("/v1/wikis/acme-corp")
+    assert wiki.status_code == 200, wiki.text
+    assert wiki.json()["title"] == "Acme Corp"
+
+
 def test_entity_upsert_and_get(client):
     r = client.put("/v1/users/u1/wiki", json={
         "type": "person", "title": "Alice Chen", "summary_append": "Engineer.",
@@ -40,7 +81,7 @@ def test_entity_upsert_and_get(client):
     assert body["summary"] == "Engineer."
     assert body["compact"] == "Engineer."  # auto-derived stopgap
     # "1.0" was never a real OKF version; the spec is at 0.1.
-    assert body["okf_version"] == "0.2"
+    assert body["okf_version"] == "0.1"
     assert body["metadata"]["user_id"] == "u1"
 
     r = client.get("/v1/users/u1/wiki/person/Alice Chen")
@@ -207,7 +248,7 @@ def test_soft_delete_leaves_tombstone_when_hard_delete_false(client):
     # ...but still there as a tombstone if you explicitly ask
     r = client.get("/v1/users/u1/wiki/person/Alice", params={"include_deleted": "true"})
     assert r.status_code == 200
-    assert r.json()["status"] == "deprecated"
+    assert r.json()["status"] == "deleted"
 
 
 def test_soft_deleted_entity_never_resolves_via_traverse(client):
@@ -239,7 +280,7 @@ def test_upsert_revives_a_tombstone(client):
     # re-upserting the same (type, title) should revive it, not error
     r = client.put("/v1/users/u1/wiki", json={"type": "person", "title": "Alice"})
     assert r.status_code == 200
-    assert r.json()["status"] == "stable"
+    assert r.json()["status"] == "active"
 
     r = client.get("/v1/users/u1/wiki/person/Alice")
     assert r.status_code == 200
@@ -521,7 +562,7 @@ def test_entity_files_conform_to_okf(client):
 
     import app.deps as deps
     backend = deps.get_storage_backend()
-    keys = [k for k in backend.list_keys("demo/wiki/") if k.endswith(".md")]
+    keys = [k for k in backend.list_keys("wikis/demo/") if k.endswith(".okf.md")]
     assert keys
 
     for key in keys:
@@ -531,7 +572,7 @@ def test_entity_files_conform_to_okf(client):
         front = yaml.safe_load(m.group(1))
         assert front.get("type"), f"{key} has no non-empty `type`"
         # Recommended fields, in OKF's spelling rather than only ours.
-        assert "title" in front and "generated" in front
+        assert "title" in front and "description" in front and "timestamp" in front
 
 
 def test_relations_appear_as_markdown_links_in_the_body(client):
@@ -546,16 +587,17 @@ def test_relations_appear_as_markdown_links_in_the_body(client):
 
     import app.deps as deps
     text = deps.get_storage_backend().get_bytes(
-        "demo/wiki/person/alice-chen.md").data.decode("utf-8")
+        "wikis/demo/person/alice-chen.okf.md").data.decode("utf-8")
 
     body = text.split("---\n", 2)[2]
     assert "[project/orion](/project/orion.md)" in body, "bundle-relative link per §5.1"
-    assert "leads" in body
+    assert "## Relations" in body
 
 
 def test_generated_body_sections_do_not_accumulate(client):
-    """The body is free-form markdown; facts/relations live in the .json sidecar.
-    Repeated writes must not duplicate facts or relations in the body."""
+    """_serialize rebuilds Facts/Relations/Citations from structured data on
+    every write, so _deserialize must strip them before recovering the
+    summary — otherwise each round-trip appends another copy."""
     client.put("/v1/users/demo/wiki", json={
         "type": "person", "title": "Alice Chen",
         "summary_append": "Staff engineer."})
@@ -566,7 +608,7 @@ def test_generated_body_sections_do_not_accumulate(client):
         client.put("/v1/users/demo/wiki", json={"type": "person", "title": "Alice Chen"})
 
     entity = client.get("/v1/users/demo/wiki/person/alice-chen").json()
-    assert "Staff engineer." in entity["summary"]
+    assert entity["summary"] == "Staff engineer."
     assert "## Facts" not in entity["summary"]
 
 
@@ -584,7 +626,7 @@ def test_frontmatter_does_not_duplicate_okf_fields(client):
 
     import app.deps as deps
     text = deps.get_storage_backend().get_bytes(
-        "demo/wiki/person/alexei.md").data.decode("utf-8")
+        "wikis/demo/person/alexei.okf.md").data.decode("utf-8")
     front = yaml.safe_load(re.match(r"^---\n(.*?)\n---\n", text, re.DOTALL).group(1))
 
     assert front["tags"] == ["Alexei Krasny"]
@@ -596,7 +638,7 @@ def test_old_files_using_aliases_and_compact_still_load(client):
     """Dropping fields from the writer must not orphan files already written."""
     import app.deps as deps
     backend = deps.get_storage_backend()
-    backend.put_bytes("demo/wiki/person/legacy.md", b"""---
+    backend.put_bytes("wikis/demo/person/legacy.okf.md", b"""---
 type: person
 title: Legacy Person
 wiki_id: person/legacy
@@ -640,9 +682,10 @@ def test_body_carries_the_detail_a_reader_needs(client):
 
     import app.deps as deps
     text = deps.get_storage_backend().get_bytes(
-        "demo/wiki/person/alexei.md").data.decode("utf-8")
+        "wikis/demo/person/alexei.okf.md").data.decode("utf-8")
     body = text.split("---\n", 2)[2]
 
-    assert "Fought in the war." in body, "facts belong in the body"
-    assert "(confidence: 0.8)" in body
-    assert "comrade of [person/yin](/person/yin.md)" in body
+    assert "| Fact | Confidence | Source |" in body, "facts belong in a table"
+    assert "| Fought in the war. | 0.8 | session:2026-08-03:x |" in body
+    assert "**comrade of** [person/yin](/person/yin.md) — Fought together." in body
+    assert "## Citations" in body

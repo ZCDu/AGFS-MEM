@@ -15,7 +15,7 @@ a 35 KB result.
 
 Records are now written as immutable segments:
 
-    {user_id}/wiki/_ops/{YYYY-MM-DD}/{timestamp}-{suffix}.jsonl
+    wikis/{wiki_id}/_ops/{YYYY-MM-DD}/{timestamp}-{suffix}.jsonl
 
 Each flush is one PUT of only the new lines — no read, no rewrite. Total
 bytes written is O(N), and the GET per op disappears entirely.
@@ -40,6 +40,8 @@ WRITE MODES (OPS_LOG_WRITE_MODE)
 
 from __future__ import annotations
 
+from app.graph.keys import wiki_key, wiki_prefix
+
 import json
 import os
 import threading
@@ -51,7 +53,10 @@ from app.storage.writebehind import FlushBuffer
 
 OpType = str  # "create" | "update_fact" | "update_relation" | "merge" | "delete"
 
-_LEGACY_DAY_KEY = "{user_id}/wiki/_ops/{day}_op.jsonl"
+# Compacted single-file form. Built with wiki_key like everything else:
+# a constant that hardcodes the prefix is exactly the kind of site that
+# gets missed when the layout moves.
+_LEGACY_DAY_SUFFIX = "_ops/{day}_op.jsonl"
 
 
 @dataclass
@@ -102,10 +107,10 @@ class WikiOpsLog(FlushBuffer):
     _pid = os.getpid()
 
     def _segment_key(self, user_id: str, day: date, suffix: str) -> str:
-        return f"{user_id}/wiki/_ops/{day.isoformat()}/{suffix}.jsonl"
+        return wiki_key(user_id, f"_ops/{day.isoformat()}/{suffix}.jsonl")
 
     def _legacy_key(self, user_id: str, day: date) -> str:
-        return _LEGACY_DAY_KEY.format(user_id=user_id, day=day.isoformat())
+        return wiki_key(user_id, _LEGACY_DAY_SUFFIX.format(day=day.isoformat()))
 
     def _next_op_id(self) -> str:
         with self._id_lock:
@@ -164,7 +169,7 @@ class WikiOpsLog(FlushBuffer):
                 json.loads(line) for line in legacy.data.decode("utf-8").splitlines() if line.strip()
             )
 
-        prefix = f"{user_id}/wiki/_ops/{day.isoformat()}/"
+        prefix = wiki_key(user_id, f"_ops/{day.isoformat()}") + "/"
         for key in self.backend.list_keys(prefix):
             if not key.endswith(".jsonl"):
                 continue
@@ -188,7 +193,7 @@ class WikiOpsLog(FlushBuffer):
             return 0
         payload = ("\n".join(json.dumps(r, ensure_ascii=False) for r in records) + "\n").encode("utf-8")
         self.backend.put_bytes(self._legacy_key(user_id, day), payload)
-        for key in self.backend.list_keys(f"{user_id}/wiki/_ops/{day.isoformat()}/"):
+        for key in self.backend.list_keys(wiki_key(user_id, f"_ops/{day.isoformat()}") + "/"):
             if key.endswith(".jsonl"):
                 self.backend.delete(key)
         return len(records)

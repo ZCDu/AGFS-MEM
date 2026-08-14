@@ -11,6 +11,17 @@ Env vars:
                          Ollama, vLLM) by changing this and LLM_MODEL.
   LLM_MODEL            default deepseek-chat
   LLM_TIMEOUT_SECONDS  default 60
+  OKF_MODE             "companion" (default) or "frontmatter".
+                         companion: the .okf.md carries only the fields OKF
+                           §4.1 defines and points at a sibling .okf.json via
+                           `resource`. Matches the spec's own examples; costs
+                           one extra write per entity change.
+                         frontmatter: one self-contained file with the
+                           structured data in the YAML block. Fewer writes,
+                           but ~40 lines of frontmatter.
+                         Both are conformant. Reads accept either, so
+                         switching needs no migration.
+
   LLM_MAX_TOKENS       default 8000. Extraction from a long conversation
                          produces a lot of JSON; at the old 2000 the reply was
                          cut off mid-object and failed to parse. Raise further
@@ -29,6 +40,12 @@ Env vars:
                          downtime.
   AUTH_ADMIN_TOKEN     optional token that may access any user_id. Intended
                          for cross-tenant maintenance jobs.
+  WIKI_CREATE_REQUIRES_ADMIN
+                         "false" (default) lets any authenticated user create
+                         a wiki, which is what the router's auto-creation
+                         needs. Set "true" to restrict it; auto-creation then
+                         fails rather than silently doing nothing.
+
   AUTH_SECRET          HMAC key for signing login session tokens. Required to
                          enable username/password login. Rotating it
                          invalidates every existing session, which is the only
@@ -95,12 +112,14 @@ class Settings:
     llm_model: str
     llm_timeout_seconds: float
     llm_max_tokens: int
+    okf_mode: str
     llm_min_decision: str
 
     auth_mode: str
     auth_tokens: str
     auth_admin_token: str | None
     auth_secret: str | None
+    wiki_create_requires_admin: bool
     auth_session_hours: float
     auth_login_max_attempts: int
     auth_login_window_seconds: float
@@ -138,11 +157,14 @@ class Settings:
             llm_model=os.environ.get("LLM_MODEL", "deepseek-chat"),
             llm_timeout_seconds=float(os.environ.get("LLM_TIMEOUT_SECONDS", "60")),
             llm_max_tokens=int(os.environ.get("LLM_MAX_TOKENS", "8000")),
+            okf_mode=os.environ.get("OKF_MODE", "companion").strip().lower(),
             llm_min_decision=os.environ.get("LLM_MIN_DECISION", "review").strip().lower(),
             auth_mode=os.environ.get("AUTH_MODE", "token").strip().lower(),
             auth_tokens=os.environ.get("AUTH_TOKENS", ""),
             auth_admin_token=os.environ.get("AUTH_ADMIN_TOKEN") or None,
             auth_secret=os.environ.get("AUTH_SECRET") or None,
+            wiki_create_requires_admin=os.environ.get(
+                "WIKI_CREATE_REQUIRES_ADMIN", "false").lower() in ("1", "true", "yes"),
             auth_session_hours=float(os.environ.get("AUTH_SESSION_HOURS", "12")),
             auth_login_max_attempts=int(os.environ.get("AUTH_LOGIN_MAX_ATTEMPTS", "8")),
             auth_login_window_seconds=float(

@@ -39,7 +39,7 @@ class StubLLM:
 
     def complete(self, system: str, user: str, **kw) -> str:
         self.calls += 1
-        self.last_prompt = system + "\n\n" + user
+        self.last_prompt = user
         if isinstance(self.response, Exception):
             raise self.response
         return self.response or "{}"
@@ -285,7 +285,7 @@ def test_extract_returns_503_without_a_key(client, monkeypatch):
     cfg._settings = None
     deps.get_llm_client.cache_clear()
 
-    r = client.post("/v1/users/demo/extract", json={"text": CONVERSATION})
+    r = client.post("/v1/users/demo/extract", json={"target_wiki": "demo", "text": CONVERSATION})
     assert r.status_code == 503
     assert "API key" in r.json()["detail"]
 
@@ -294,18 +294,18 @@ def test_extract_apply_validates_submitted_operations(client):
     """This endpoint is reachable without ever calling /extract, so operations
     cannot be trusted just because they look like a plan."""
     bad = client.post("/v1/users/demo/extract/apply",
-                      json={"operations": [{"op": "rm -rf", "wiki_id": "x", "payload": {}}]})
+                      json={"target_wiki": "demo", "operations": [{"op": "rm -rf", "wiki_id": "x", "payload": {}}]})
     assert bad.status_code == 422
 
     incomplete = client.post("/v1/users/demo/extract/apply",
-                             json={"operations": [{"op": "add_fact",
+                             json={"target_wiki": "demo", "operations": [{"op": "add_fact",
                                                    "wiki_id": "person/x", "payload": {}}]})
     assert incomplete.status_code == 422
     assert "missing" in incomplete.json()["detail"]
 
 
 def test_extract_apply_writes(client):
-    r = client.post("/v1/users/demo/extract/apply", json={"operations": [
+    r = client.post("/v1/users/demo/extract/apply", json={"target_wiki": "demo", "operations": [
         {"op": "upsert_entity", "wiki_id": "person/nadia",
          "payload": {"type": "person", "title": "Nadia", "summary_append": "A novelist."}},
         {"op": "add_fact", "wiki_id": "person/nadia",

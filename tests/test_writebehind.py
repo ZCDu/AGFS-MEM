@@ -61,9 +61,9 @@ def wipe_manifest(backend, user_id):
     """Delete all persisted manifest state — snapshot, deltas, and the
     legacy single file. Tests must not hardcode one filename, because the
     layout is snapshot+deltas and a compaction can move where state lives."""
-    for key in list(backend.list_keys(f"{user_id}/wiki/_manifest")):
+    for key in list(backend.list_keys(f"wikis/{user_id}/_manifest")):
         backend.delete(key)
-    backend.delete(f"{user_id}/wiki/_manifest.json")
+    backend.delete(f"wikis/{user_id}/_manifest.json")
 
 
 @pytest.fixture()
@@ -117,7 +117,7 @@ def test_manifest_bytes_are_linear(make_store):
         store.flush()
         written[n] = sum(
             len(backend.get_bytes(k).data)
-            for k in backend.list_keys("u/wiki/_manifest")
+            for k in backend.list_keys("wikis/u/_manifest")
             if backend.get_bytes(k) is not None
         )
 
@@ -138,7 +138,7 @@ def test_manifest_compaction_bounds_delta_count(make_store):
         store.upsert_entity("u", "concept", f"C{i}")
     store.flush()
 
-    deltas = [k for k in backend.list_keys("u/wiki/_manifest/d/") if k.endswith(".json")]
+    deltas = [k for k in backend.list_keys("wikis/u/_manifest/d/") if k.endswith(".json")]
     assert len(deltas) <= COMPACT_MAX_DELTAS
 
 
@@ -158,8 +158,13 @@ def test_cold_read_reconstructs_from_snapshot_plus_deltas(make_store):
 
 
 def test_upsert_costs_one_put(make_store):
-    """The entity file is the only thing that must be written synchronously."""
-    backend, store = make_store(
+    """The entity file is the only thing that must be written synchronously.
+
+    Pinned to frontmatter mode: companion mode deliberately writes a second
+    object per entity, so it costs 2. That trade is measured in
+    test_companion_mode_costs_one_extra_write.
+    """
+    backend, store = make_store(OKF_MODE="frontmatter",
                                 FLUSH_INTERVAL_SECONDS="3600", FLUSH_MAX_PENDING="100000")
     store.upsert_entity("u", "person", "A")
     backend.ops.clear()
@@ -170,7 +175,7 @@ def test_upsert_costs_one_put(make_store):
 def test_read_costs_zero_writes(make_store):
     """touch=True used to trigger a full read-modify-write of the entity
     file on every single GET."""
-    backend, store = make_store(
+    backend, store = make_store(OKF_MODE="frontmatter",
                                 FLUSH_INTERVAL_SECONDS="3600", FLUSH_MAX_PENDING="100000")
     store.upsert_entity("u", "person", "A")
     backend.ops.clear()
@@ -211,7 +216,7 @@ def test_ops_log_compaction_preserves_records(make_store):
     before = store.ops_log.read_day("u", today)
 
     n = store.ops_log.compact_day("u", today)
-    remaining = [k for k in backend.list_keys(f"u/wiki/_ops/{today.isoformat()}/")
+    remaining = [k for k in backend.list_keys(f"wikis/u/_ops/{today.isoformat()}/")
                  if k.endswith(".jsonl")]
 
     assert n == len(before)
@@ -224,7 +229,7 @@ def test_legacy_day_file_still_readable(make_store):
     backend, store = make_store()
     today = datetime.date.today()
     backend.put_bytes(
-        f"u/wiki/_ops/{today.isoformat()}_op.jsonl",
+        f"wikis/u/_ops/{today.isoformat()}_op.jsonl",
         b'{"op_id":"old_1","op":"create","wiki_id":"person/x",'
         b'"created_at":"2020-01-01T00:00:00+00:00"}\n',
     )
@@ -259,8 +264,8 @@ def test_sync_mode_writes_through_immediately(make_store):
 
     # The manifest is log-structured: a sync write emits a delta object,
     # not a rewrite of one file. Assert a delta landed, not a filename.
-    assert [k for k in backend.list_keys("u/wiki/_manifest/") if k.endswith(".json")]
-    assert [k for k in backend.list_keys(f"u/wiki/_ops/{today.isoformat()}/")
+    assert [k for k in backend.list_keys("wikis/u/_manifest/") if k.endswith(".json")]
+    assert [k for k in backend.list_keys(f"wikis/u/_ops/{today.isoformat()}/")
             if k.endswith(".jsonl")]
 
 
@@ -269,9 +274,9 @@ def test_sync_mode_writes_through_immediately(make_store):
 def test_decay_score_survives_unparseable_last_accessed(make_store):
     """This is called unconditionally by the API serializer, so raising
     turned one hand-edited file into a permanent opaque 500."""
-    backend, store = make_store()
+    backend, store = make_store(OKF_MODE="frontmatter")
     store.upsert_entity("u", "person", "Zed")
-    key = "u/wiki/person/zed.md"
+    key = "wikis/u/person/zed.okf.md"
     broken = backend.get_bytes(key).data.decode().replace("last_accessed:", "la_broken:")
     backend.put_bytes(key, broken.encode())
 
@@ -310,6 +315,7 @@ def test_read_repair_evicts_phantom_manifest_entry(make_store):
     (lambda s: s.replace("wiki_id: person/alice-chen", "other_key: x"), "missing wiki_id"),
     (lambda s: __import__("re").sub(r"facts:\n(?:.*\n)*?relations:",
                                     "facts:\n- {nonsense: true}\nrelations:", s), "bad fact entry"),
+    (lambda s: __import__("re").sub(r"metadata:\n(?:  .*\n)*", "metadata: 12345\n", s), "scalar metadata"),
     (lambda s: s[:60], "truncated"),
     (lambda s: "not markdown at all", "no front-matter"),
 ])
@@ -320,12 +326,13 @@ def test_corrupt_entity_file_raises_malformed_not_keyerror(make_store, corrupt, 
     reads, which made it look like the delete endpoints were broken."""
     from app.graph.store import MalformedEntityError
 
-    # The point is that a damaged .md is reported rather
-    # than raising KeyError.
-    backend, store = make_store()
+    # frontmatter mode: the point is that a damaged .md is reported rather
+    # than raising KeyError. In companion mode the JSON would still supply
+    # those fields, so the .md alone is not enough to corrupt the entity.
+    backend, store = make_store(OKF_MODE="frontmatter")
     store.upsert_entity("u", "person", "Alice Chen")
     store.add_fact("u", "person/alice-chen", "a fact")
-    key = "u/wiki/person/alice-chen.md"
+    key = "wikis/u/person/alice-chen.okf.md"
     backend.put_bytes(key, corrupt(backend.get_bytes(key).data.decode()).encode())
 
     with pytest.raises(MalformedEntityError):
@@ -395,14 +402,14 @@ def test_traverse_does_not_abort_on_a_corrupt_entity_file(make_store):
     graph, and fetching it surfaces a 422 naming the file — which is more
     useful than a node vanishing from traversal with no explanation.
     """
-    backend, store = make_store()
+    backend, store = make_store(OKF_MODE="frontmatter")
     store.upsert_entity("u", "person", "Hub")
     for name in ("Good", "Bad"):
         store.upsert_entity("u", "concept", name)
         store.link_entities("u", "person/hub", f"concept/{name.lower()}")
     store.flush()
 
-    key = "u/wiki/concept/bad.md"
+    key = "wikis/u/concept/bad.okf.md"
     backend.put_bytes(key, backend.get_bytes(key).data.decode().replace("wiki_id:", "nope:").encode())
 
     reached = store.traverse("u", ["person/hub"], max_depth=2, max_nodes=100)

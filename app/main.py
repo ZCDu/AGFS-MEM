@@ -22,7 +22,7 @@ from fastapi.responses import FileResponse, JSONResponse
 
 from app.api import (routes_auth, routes_chat, routes_entities, routes_extract,
                      routes_files, routes_health, routes_rawlog, routes_sessions,
-                     routes_verify)
+                     routes_verify, routes_wikis)
 from app.config import get_settings
 from app.storage.backend import ConflictError
 
@@ -34,25 +34,6 @@ if _loaded_env_path:
 else:
     logger.info("No .env file loaded (not found, or python-dotenv not installed) — "
                  "using whatever is already in the environment")
-
-
-def _bootstrap_admin(backend) -> None:
-    """Create a default admin account on first startup if no users exist.
-
-    Credentials: admin / admin. Change the password immediately.
-    The account is only created when the user store is completely empty.
-    """
-    from app.users import UserStore
-    store = UserStore(backend)
-    users = store.list_users()
-    if users:
-        return
-    try:
-        store.create("admin", "admin123456", user_id="admin", is_admin=True)
-        logger.info("Created default admin account (admin / admin123456). "
-                     "Change the password immediately.")
-    except Exception as e:
-        logger.warning("Could not create default admin account: %s", e)
 
 
 @asynccontextmanager
@@ -70,10 +51,6 @@ async def _lifespan(app: FastAPI):
     # the path that actually works.
     from app.deps import get_storage_backend
     backend = get_storage_backend()
-
-    # Bootstrap default admin account if no users exist yet.
-    _bootstrap_admin(backend)
-
     close = getattr(backend, "close", None)
     if callable(close):
         close()
@@ -157,6 +134,7 @@ def create_app() -> FastAPI:
     app.include_router(routes_chat.router)
     app.include_router(routes_sessions.router)
     app.include_router(routes_files.router)
+    app.include_router(routes_wikis.router)
     app.include_router(routes_extract.router)
 
     @app.get("/static/auth.js", include_in_schema=False)

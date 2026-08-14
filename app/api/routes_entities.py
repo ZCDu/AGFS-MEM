@@ -92,6 +92,17 @@ def upsert_entity(
         # Unusable title, bad on_conflict value: the request is well-formed
         # JSON but semantically invalid.
         raise HTTPException(status_code=422, detail=str(e)) from e
+    # Keep the routing hint current. Best-effort: a stale hint is a worse
+    # route, while a raised error here would fail a write that already
+    # succeeded.
+    try:
+        from app.wikis.registry import WikiRegistry
+        ids = store.list_entities(user_id)
+        WikiRegistry(store.backend).refresh_stats(
+            user_id, len(ids),
+            [e.title for e in store.manifest.list_entries(user_id)[:25]])
+    except Exception:
+        logger.debug("could not refresh wiki stats for %s", user_id, exc_info=True)
     return _to_out(entity)
 
 
@@ -120,7 +131,7 @@ def list_entities(
     """
     entries = store.manifest.list_entries(user_id, type_filter=type)
     if not include_deleted:
-        entries = [e for e in entries if e.status != "deprecated"]
+        entries = [e for e in entries if e.status != "deleted"]
     if q:
         needle = q.strip().lower()
         entries = [e for e in entries
@@ -245,26 +256,6 @@ def delete_entity(
     existed = store.delete_entity(user_id, wiki_id, cascade=cascade, hard_delete=hard_delete)
     if not existed:
         raise HTTPException(status_code=404, detail=f"Entity {wiki_id!r} not found")
-
-
-@router.post("/wiki/_merge", response_model=EntityOut)
-def merge_entities(
-    user_id: str,
-    source_wiki_id: str = Query(..., description="wiki_id of the entity to merge FROM"),
-    target_wiki_id: str = Query(..., description="wiki_id of the entity to merge INTO"),
-    store: EntityGraphStore = Depends(get_graph_store),
-):
-    """Merge source entity into target: migrate facts, relations and aliases,
-    then mark source as deprecated with merged_into pointing at target.
-
-    After merge, retrieval automatically follows merged_into, so references
-    to the old entity resolve to the merged target.
-    """
-    try:
-        result = store.merge_entities(user_id, source_wiki_id, target_wiki_id)
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e)) from e
-    return _entity_out(result)
 
 
 @router.post("/wiki/{type}/{title}/facts", response_model=EntityOut)

@@ -36,6 +36,8 @@ Zero, one, or many candidates changes what happens:
 
 from __future__ import annotations
 
+from app.graph.keys import wiki_key, wiki_prefix
+
 import difflib
 import re
 from dataclasses import dataclass, field
@@ -120,7 +122,7 @@ class WikiInbox:
         self._counter = 0
 
     def _key(self, user_id: str, candidate_id: str) -> str:
-        return f"{user_id}/wiki/_inbox/{candidate_id}.json"
+        return wiki_key(user_id, f"_inbox/{candidate_id}.json")
 
     def _next_id(self) -> str:
         self._counter += 1
@@ -151,7 +153,7 @@ class WikiInbox:
 
     def list(self, user_id: str) -> list[InboxCandidate]:
         import json
-        keys = self.backend.list_keys(f"{user_id}/wiki/_inbox/")
+        keys = self.backend.list_keys(wiki_key(user_id, "_inbox") + "/")
         candidates = []
         for key in keys:
             if not key.endswith(".json"):
@@ -177,7 +179,7 @@ class WikiTitleResolver:
     def _find_candidates(self, user_id: str, title: str,
                           type_hint: str | None) -> list[ManifestEntry]:
         entries = self.store.manifest.list_entries(user_id, type_filter=type_hint)
-        entries = [e for e in entries if e.status != "deprecated"]
+        entries = [e for e in entries if e.status != "deleted"]
         norm_title = _normalize(title)
 
         exact = [e for e in entries if _normalize(e.title) == norm_title]

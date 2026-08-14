@@ -54,6 +54,8 @@ the multi-process caveat.
 
 from __future__ import annotations
 
+from app.graph.keys import wiki_key, wiki_prefix
+
 import json
 import os
 import threading
@@ -81,7 +83,7 @@ class ManifestEntry:
     aliases: list[str] = field(default_factory=list)
     path: str = ""
     compact: str = ""
-    status: str = "stable"
+    status: str = "active"
     updated_at: str = ""
     last_accessed: str = ""
     # Adjacency index: this entity's outbound edges, as compact
@@ -101,14 +103,6 @@ class ManifestEntry:
     # Without that split, every manifest written before this feature would
     # silently look like an isolated node.
     edges: list[dict] | None = None
-    # Keywords extracted from title + aliases + compact + facts for
-    # multi-strategy retrieval. Built automatically on upsert/add_fact;
-    # never requires manual curation. Max 20 per entity.
-    keywords: list[str] = field(default_factory=list)
-    # If this entity was merged into another, the target wiki_id.
-    # _link() follows this chain automatically so merged entities
-    # are never lost to retrieval.
-    merged_into: str | None = None
     # Persisted layout coordinates from the graph editor. Purely
     # presentational, and optional — but persisting them means the force
     # simulation runs once rather than on every page load, and a node stays
@@ -129,12 +123,10 @@ class ManifestEntry:
             aliases=list(d.get("aliases", [])),
             path=d.get("path", ""),
             compact=d.get("compact", ""),
-            status=d.get("status", "stable"),
+            status=d.get("status", "active"),
             updated_at=d.get("updated_at", ""),
             last_accessed=d.get("last_accessed", ""),
             edges=d.get("edges"),
-            keywords=list(d.get("keywords", [])),
-            merged_into=d.get("merged_into"),
             x=d.get("x"), y=d.get("y"),
         )
 
@@ -158,13 +150,13 @@ class WikiManifest(FlushBuffer):
     # ---------- keys ----------
 
     def _legacy_key(self, user_id: str) -> str:
-        return f"{user_id}/wiki/_manifest.json"
+        return wiki_key(user_id, "_manifest.json")
 
     def _snapshot_key(self, user_id: str) -> str:
-        return f"{user_id}/wiki/_manifest/snapshot.json"
+        return wiki_key(user_id, "_manifest/snapshot.json")
 
     def _delta_prefix(self, user_id: str) -> str:
-        return f"{user_id}/wiki/_manifest/d/"
+        return wiki_key(user_id, "_manifest/d") + "/"
 
     def _next_seq(self) -> str:
         with self._seq_lock:
@@ -378,13 +370,18 @@ class WikiManifest(FlushBuffer):
         that makes buffering safe. Writes a fresh snapshot and drops deltas."""
         from app.graph.store import EntityGraphStore
         data: dict = {}
-        for key in self.backend.list_keys(f"{user_id}/wiki/"):
-            if not key.endswith(".md"):
+        for key in self.backend.list_keys(wiki_prefix(user_id)):
+            if not key.endswith(".okf.md"):
                 continue
             raw = self.backend.get_bytes(key)
             if raw is None:
                 continue
-            entity = EntityGraphStore._deserialize(raw.data)
+            # In companion mode the markdown holds only the OKF fields, so
+            # rebuilding from it alone would produce entities with no facts,
+            # no relations and no wiki_id — and rebuild is the recovery path.
+            companion = self.backend.get_bytes(key[:-len(".okf.md")] + ".okf.json")
+            entity = EntityGraphStore._deserialize(
+                raw.data, companion.data if companion else None)
             data[entity.wiki_id] = ManifestEntry(
                 wiki_id=entity.wiki_id, type=entity.type, title=entity.title,
                 aliases=entity.aliases, path=key, compact=entity.compact,

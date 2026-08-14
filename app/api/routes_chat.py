@@ -43,6 +43,8 @@ from app.graph.store import EntityGraphStore
 from app.rawlog.files import FileError, FileStore, file_ref, parse_file_ref
 from app.rawlog.sessions import SessionIdError, SessionLog, new_session_id
 from app.verify.assessor import ConversationAssessor
+from app.wikis.registry import ROLE_READ, WikiAccessDenied, WikiNotFound, WikiRegistry
+from app.wikis.router import WikiRouter
 
 logger = logging.getLogger("memory_backend.chat")
 
@@ -79,6 +81,9 @@ class ChatRequest(BaseModel):
         None, description="Omit on the first turn; the id is returned and "
                           "should be sent on subsequent turns so the whole "
                           "conversation lands in one session file.")
+    wiki_id: str | None = Field(
+        None, description="Which knowledge graph to answer from. Omitted, the "
+                          "router picks one and reports which in the response.")
     attachments: list[str] = Field(
         default_factory=list,
         description="File references from POST /files, as 'file:YYYY-MM-DD:id' "
@@ -94,6 +99,8 @@ class ChatResponse(BaseModel):
     context_used: list[dict]
     memory_hit: bool
     session_id: str | None = None
+    wiki_id: str | None = None
+    wiki_reason: str = ""
 
 
 def _client() -> LLMClient:
@@ -159,10 +166,33 @@ def chat(user_id: str, body: ChatRequest,
     if not latest.strip():
         raise HTTPException(status_code=422, detail="No user message to reply to.")
 
-    context, used = ("", [])
-    if body.use_memory:
+    # Resolve which graph answers this. Reads may route freely — a bad read
+    # gives a worse answer, where a bad write corrupts a graph — but the
+    # choice is always reported so it can be corrected.
+    registry = WikiRegistry(get_storage_backend())
+    wiki_id, wiki_reason = body.wiki_id, ""
+    if wiki_id:
         try:
-            context, used = _memory_context(store, user_id, latest)
+            registry.require(wiki_id, user_id, ROLE_READ)
+            wiki_reason = "requested"
+        except WikiNotFound as e:
+            raise HTTPException(status_code=404, detail=str(e)) from e
+        except WikiAccessDenied as e:
+            raise HTTPException(status_code=403, detail=str(e)) from e
+    elif body.use_memory:
+        decision = WikiRouter(registry, store).route(user_id, latest)
+        if decision.action == "use":
+            wiki_id, wiki_reason = decision.wiki_id, decision.reason
+        else:
+            # Ambiguous or no match: answer without memory rather than guess.
+            # A wrong graph is worse than no graph, because the model cannot
+            # tell that what it was given is unrelated.
+            wiki_reason = decision.reason
+
+    context, used = ("", [])
+    if body.use_memory and wiki_id:
+        try:
+            context, used = _memory_context(store, wiki_id, latest)
         except Exception:
             # Retrieval is an enhancement. A memory failure must not cost the
             # user their reply.
@@ -177,15 +207,15 @@ def chat(user_id: str, body: ChatRequest,
             try:
                 parsed = parse_file_ref(ref)
                 if parsed:
-                    session_id, file_id = parsed
+                    day, file_id = parsed
                 else:
                     file_id = ref
-                    session_id = store_files.find(user_id, file_id)
-                if session_id is None:
+                    day = store_files.find(user_id, file_id)
+                if day is None:
                     attachment_blocks.append(f"[Attachment {ref} could not be found.]")
                     continue
-                text, meta = store_files.get_text(user_id, file_id, session_id)
-                attachment_refs.append(file_ref(session_id, file_id))
+                text, meta = store_files.get_text(user_id, file_id, day)
+                attachment_refs.append(file_ref(day, file_id))
                 if text is None:
                     # Say so rather than passing nothing silently: a model that
                     # is not told a file was unreadable will answer as though
@@ -247,4 +277,5 @@ def chat(user_id: str, body: ChatRequest,
                            exc_info=True)
 
     return ChatResponse(reply=reply, context_used=used, memory_hit=bool(used),
-                        session_id=session_id if body.log else None)
+                        session_id=session_id if body.log else None,
+                        wiki_id=wiki_id, wiki_reason=wiki_reason)

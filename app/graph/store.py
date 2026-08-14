@@ -1,65 +1,42 @@
 """
-Entity graph store, conforming to Google's OKF v0.2 specification.
-One markdown file per entity, organized by type, under:
+Entity graph store, rewritten to the OKF schema (PLAN.md §4.5, §14, and the
+schema discussion this migration implements). One JSON file per entity,
+organized by type, under:
 
-    {user_id}/wiki/{type}/{slug}.md
+    wikis/{wiki_id}/{type}/{slug}.okf.json
 
 e.g. user_id=u_123, type=person, title="Alice Chen":
 
-    default/u_123/wiki/person/alice-chen.md
+    wikis/u_123/person/alice-chen.okf.json
 
 wiki_id is the type-scoped identifier used everywhere (relations' `target`,
 traverse() entry points, etc): "person/alice-chen".
 
-Each entity file is a markdown document with YAML frontmatter:
-
-```markdown
----
-type: person
-title: Alice Chen
-description: Staff engineer on the retrieval team.
-tags: [alice, engineer]
-generated:
-  by: memory_backend/1.0
-  at: '2026-08-03T08:51:55+00:00'
-status: stable
-# --- producer extensions below ---
-okf_version: '0.2'
-wiki_id: person/alice-chen
-facts:
-- fact_id: fact_0001
-  text: Works on Project Orion.
-  confidence: 1.0
-  evidence: []
-  created_at: '...'
-  updated_at: '...'
-relations:
-- relation_id: rel_0001
-  target: project/orion
-  category: related_to
-  label: works_on
-  weight: 1.0
-  reason: works on
-  evidence: []
-  fact_ids: [fact_0001]
-  created_at: '...'
-  updated_at: '...'
-merged_into: null
-metadata:
-  significance: 0.5
-  last_accessed: '...'
-  created_at: '...'
-  updated_at: '...'
-  user_id: u_123
----
-# Alice Chen
-
-Software engineer on the Orion team. Based in Taipei.
-
-works on [project/orion](/project/orion.md) (works on).
-
-- Works on Project Orion. (confidence: 1)
-```
+    {
+      "okf_version": "1.0",
+      "wiki_id": "person/alice-chen",
+      "type": "person",
+      "title": "Alice Chen",
+      "aliases": ["Alice"],
+      "compact": "Alice Chen — engineer on Project Orion.",
+      "summary": "Software engineer on the Orion team. Based in Taipei.",
+      "facts": [
+        {"fact_id": "fact_0001", "text": "Works on Project Orion.",
+         "confidence": 1.0, "evidence": [], "created_at": "...", "updated_at": "..."}
+      ],
+      "relations": [
+        {"relation_id": "rel_0001", "target": "project/orion",
+         "category": "related_to", "label": "works_on", "weight": 1.0,
+         "reason": "works on", "evidence": [], "fact_ids": ["fact_0001"],
+         "created_at": "...", "updated_at": "..."}
+      ],
+      "status": "active",
+      "merged_into": null,
+      "metadata": {
+        "significance": 0.5, "last_accessed": "...", "created_at": "...",
+        "updated_at": "...", "user_id": "u_123"
+      }
+    }
 
 Every write also updates the wiki manifest (app/graph/manifest.py — avoids
 directory scans, doubles as a compact-view cache) and appends to the wiki
@@ -74,6 +51,8 @@ known limitation under multi-process concurrent writers to the SAME entity.
 """
 
 from __future__ import annotations
+
+from app.graph.keys import wiki_key, wiki_prefix
 
 import json
 import logging
@@ -113,8 +92,16 @@ def _attach(backend: StorageBackend, attr: str, factory):
 
 MAX_WRITE_RETRIES = 5
 # Tracks the Google Cloud Open Knowledge Format spec version these files
-# target.
-OKF_VERSION = "0.2"
+# target. Was "1.0", which is not a version OKF has ever had.
+OKF_VERSION = "0.1"
+
+# Body sections this serialiser generates. They are regenerated on every
+# write, so _deserialize must strip them before recovering the author's
+# summary — otherwise each round-trip would append them to the prose again.
+_FACTS_HEADING = "Facts"
+_RELATIONS_HEADING = "Relations"
+_CITATIONS_HEADING = "Citations"
+_STATUS_HEADING = "Status"
 
 # Where the structured data lives.
 #
@@ -128,6 +115,7 @@ OKF_VERSION = "0.2"
 #
 # Both are conformant; this is a judgement about what the files are for.
 OKF_MODE_FRONTMATTER = "frontmatter"
+OKF_MODE_COMPANION = "companion"
 
 class MalformedEntityError(ValueError):
     """An entity file on disk could not be parsed into an Entity.
@@ -175,55 +163,6 @@ def _title_key(title: str) -> str:
     """
     text = re.sub(r"\s+", " ", title.strip().lower())
     return text.strip(".,;:!?'\"()[]{}<>-_/\\|`~@*")
-
-
-# Stopwords for keyword extraction — words carrying no topical information.
-_KEYWORD_STOPWORDS = frozenset("""
-a an the and or but if then than so because as at by for from in into of on
-to with without is are was were be been being am do does did doing have has
-had having i you he she it we they me him her us them my your his its our
-their this that these those there here what which who whom when where how
-will would shall should can could may might must just very really quite too
-also only even still yet about over under again more most some any each
-not no never always every all both few many much other such own same
-different new old good bad big small high low long short early late
-""".split())
-
-
-def _extract_keywords(title: str, aliases: list[str], compact: str,
-                      facts: list) -> list[str]:
-    """Extract up to 20 content-bearing keywords from entity fields.
-
-    Used to build a lightweight keyword index in the manifest for
-    multi-strategy retrieval. Runs on every upsert/add_fact — zero
-    extra I/O, zero external dependencies.
-    """
-    seen: set[str] = set()
-    # Always include every word from the title (split on whitespace).
-    for word in re.split(r"\s+", title.lower()):
-        word = word.strip(".,;:!?()[]{}'\"")
-        if len(word) >= 3 and word not in _KEYWORD_STOPWORDS:
-            seen.add(word)
-    # Aliases are deliberate names — include them whole and split.
-    for alias in aliases:
-        low = alias.lower().strip()
-        if len(low) >= 3 and low not in _KEYWORD_STOPWORDS:
-            seen.add(low)
-        for word in re.split(r"\s+", low):
-            word = word.strip(".,;:!?()[]{}'\"")
-            if len(word) >= 3 and word not in _KEYWORD_STOPWORDS:
-                seen.add(word)
-    # Compact summary — first sentence carries the most signal.
-    for word in re.findall(r"[a-z0-9]{3,}", compact.lower()):
-        if word not in _KEYWORD_STOPWORDS:
-            seen.add(word)
-    # Facts — each fact text is a concentrated statement.
-    for fact in facts[:10]:
-        for word in re.findall(r"[a-z0-9]{3,}", fact.text.lower()):
-            if word not in _KEYWORD_STOPWORDS:
-                seen.add(word)
-    # Return sorted, capped at 20.
-    return sorted(seen)[:20]
 
 
 def has_usable_slug(title: str) -> bool:
@@ -376,7 +315,7 @@ class Entity:
     relations: list[Relation]
     metadata: Metadata
     okf_version: str = OKF_VERSION
-    status: str = "stable"
+    status: str = "active"
     merged_into: str | None = None
 
     def decay_score(self, now: datetime | None = None, lam: float = 0.15) -> float:
@@ -403,6 +342,8 @@ class EntityGraphStore:
         # constructing them here directly would reset every buffer on every
         # call and defeat the batching entirely. Memoize them onto the backend
         # instead — buffer lifetime then correctly tracks connection lifetime.
+        from app.config import get_settings
+        self.okf_mode = get_settings().okf_mode
         self.manifest = _attach(backend, "_wiki_manifest", WikiManifest)
         self.ops_log = _attach(backend, "_wiki_ops_log", WikiOpsLog)
 
@@ -422,86 +363,160 @@ class EntityGraphStore:
 
     def _delete_files(self, user_id: str, wiki_id: str) -> None:
         self.backend.delete(self._key(user_id, wiki_id))
+        # Unconditional: deleting a companion that was never written is a
+        # no-op, and leaving one behind would resurrect stale facts if the
+        # slug were reused.
+        try:
+            self.backend.delete(self._companion_key(user_id, wiki_id))
+        except Exception:
+            pass
+
+    def _companion_key(self, user_id: str, wiki_id: str) -> str:
+        return wiki_key(user_id, f"{wiki_id}.okf.json")
 
     def _key(self, user_id: str, wiki_id: str) -> str:
-        return f"{user_id}/wiki/{wiki_id}.md"
+        return wiki_key(user_id, f"{wiki_id}.okf.md")
 
     # ---------- serialization ----------
     #
-    # OKF v0.2 markdown with YAML frontmatter. Spec-defined fields come first
-    # (§4.1, §5), then producer extensions (§4.1 "Extensions") for our internal
-    # data model (facts, relations, metadata). Generic OKF consumers see the
-    # spec fields and ignore the rest; our reconcile/traverse/cascade read
-    # the extensions.
+    # OKF is stored as markdown with YAML front-matter, not raw JSON:
+    #   - Front-matter holds everything cascade/reconcile/the title resolver
+    #     need to parse and filter programmatically (facts, relations,
+    #     metadata, status) — this MUST stay strictly structured, same as
+    #     it was under plain JSON, or those features silently break.
+    #   - The body holds `summary` as plain markdown text, for readability
+    #     and for dropping straight into an LLM prompt without translation.
+    #   - `compact` stays in front-matter (it's a machine-facing field used
+    #     by the manifest cache, not something meant to be read as prose).
 
     @staticmethod
-    def _serialize(entity: Entity) -> bytes:
-        """Serialize an entity to an OKF v0.2 .md document.
-
-        Frontmatter: spec fields (§4.1, §5) first, then producer extensions.
-        Body: free-form markdown with inline relationship links (§6.1).
-        """
+    def _serialize(entity: Entity, mode: str = OKF_MODE_FRONTMATTER) -> bytes:
+        """The .md document. In companion mode the structured extensions are
+        omitted and `resource` points at the sibling JSON instead."""
         import yaml
-        # --- OKF spec fields (§4.1, §5) ---
-        fm: dict = {"type": entity.type}              # REQUIRED by §11
-        if entity.title:
-            fm["title"] = entity.title
-        if entity.compact:
-            fm["description"] = entity.compact        # §4.1 one-line summary
-        if entity.aliases:
-            fm["tags"] = list(entity.aliases)         # §4.1 cross-cutting labels
-        # --- provenance & trust (§5.2) ---
-        if entity.metadata.updated_at:
-            fm["generated"] = {
-                "by": "memory_backend/1.0",
-                "at": entity.metadata.updated_at,
-            }
-        # --- lifecycle (§5.4) ---
-        if entity.status != "stable":
-            fm["status"] = entity.status
-        # --- producer extensions (§4.1 "Extensions") ---
-        fm.update({
+        # Field order follows OKF v0.1 §4.1: the required `type` first, then
+        # the recommended fields in the priority the spec lists them, then
+        # producer extensions. The spec permits extra keys and requires
+        # consumers to tolerate them, so facts/relations/metadata stay in
+        # frontmatter — but everything a generic OKF consumer needs is above
+        # them and in the documented spelling.
+        front_matter = {
+            "type": entity.type,                        # REQUIRED by §9
+            "title": entity.title,
+            "description": entity.compact,              # §4.1 one-line summary
+            # list(...) not the same object: yaml.safe_dump emits an anchor
+            # and alias (&id001 / *id001) when two keys share one list, which
+            # is valid YAML but not something every consumer resolves — and
+            # OKF's whole promise is that any parser can read the file.
+            "tags": list(entity.aliases),               # §4.1 cross-cutting labels
+            "timestamp": entity.metadata.updated_at,    # §4.1 ISO 8601 last change
+        }
+        if mode == OKF_MODE_COMPANION:
+            # §4.1: "a URI that uniquely identifies the underlying asset the
+            # concept describes". With the structured data in a sibling file,
+            # `resource` finally has something true to point at — which is
+            # exactly the pattern the spec's own BigQuery example uses.
+            front_matter["resource"] = f"/{entity.wiki_id}.okf.json"
+            front_matter["okf_version"] = entity.okf_version
+        else:
+            front_matter.update({
+            # --- producer extensions (§4.1 "Extensions") ---
+            # `aliases` and `compact` were dropped: they said exactly what
+            # `tags` and `description` now say, and duplicating them made the
+            # frontmatter look more like a database dump than the index card
+            # §4.1 describes. _deserialize still reads the old names, so files
+            # written before this change load unchanged.
             "okf_version": entity.okf_version,
             "wiki_id": entity.wiki_id,
             "facts": [f.to_dict() for f in entity.facts],
             "relations": [r.to_dict() for r in entity.relations],
+            "status": entity.status,
             "merged_into": entity.merged_into,
             "metadata": entity.metadata.to_dict(),
-        })
-        yaml_block = yaml.safe_dump(fm, sort_keys=False, allow_unicode=True)
+            })
+        yaml_block = yaml.safe_dump(front_matter, sort_keys=False, allow_unicode=True)
 
-        # --- body: free-form markdown ---
         parts = [f"---\n{yaml_block}---\n", f"# {entity.title}\n"]
         body = entity.summary.strip()
         if body:
             parts.append(f"{body}\n")
 
-        # Inline relationship links (§6.1): bundle-relative form.
+        if entity.facts:
+            # A table rather than a bare list: §4.2 asks producers to favour
+            # structural markdown, and confidence is meaningless to a reader
+            # if it only exists in the frontmatter they were not meant to read.
+            parts.append("## " + _FACTS_HEADING + "\n")
+            parts.append("| Fact | Confidence | Source |")
+            parts.append("| --- | --- | --- |")
+            rows = []
+            for f in entity.facts:
+                cite = ", ".join(f.evidence) if f.evidence else "—"
+                text = f.text.replace("|", "\\|")
+                rows.append(f"| {text} | {f.confidence:g} | {cite} |")
+            parts.append("\n".join(rows) + "\n")
+
         if entity.relations:
-            parts.append("\n")
+            # OKF §5: relationships are expressed as ordinary markdown links
+            # in the BODY, and §5.3 says a consumer building a graph treats
+            # links as edges. Keeping the graph only in frontmatter would make
+            # it invisible to every generic OKF consumer, which is most of the
+            # point of adopting the format. Bundle-relative form per §5.1,
+            # which the spec recommends because it survives file moves.
+            parts.append("## " + _RELATIONS_HEADING + "\n")
+            lines = []
             for r in entity.relations:
                 verb = (r.label or r.category).replace("_", " ")
-                note = f" ({r.reason})" if r.reason else ""
-                parts.append(f"{verb} [{r.target}](/{r.target}.md){note}.  \n")
+                note = f" — {r.reason}" if r.reason else ""
+                lines.append(f"- **{verb}** [{r.target}](/{r.target}.md){note}")
+            parts.append("\n".join(lines) + "\n")
 
-        if entity.merged_into:
-            parts.append(f"\nMerged into [{entity.merged_into}](/{entity.merged_into}.md).\n")
+        if entity.status != "active" or entity.merged_into:
+            parts.append("## Status\n")
+            if entity.merged_into:
+                parts.append(f"Merged into [{entity.merged_into}]"
+                             f"(/{entity.merged_into}.md).\n")
+            else:
+                parts.append(f"{entity.status.capitalize()} as of "
+                             f"{entity.metadata.updated_at[:10]}.\n")
 
-        # Facts as bullet list (§4.2 favours structural markdown).
-        if entity.facts:
-            parts.append("\n")
-            for f in entity.facts:
-                text = f.text.replace("|", "\\|")
-                parts.append(f"- {text} (confidence: {f.confidence:g})\n")
+        citations = []
+        for f in entity.facts:
+            for ev in f.evidence:
+                if ev not in citations:
+                    citations.append(ev)
+        if citations:
+            # §8: sources backing claims in the body, numbered, at the bottom.
+            parts.append("## " + _CITATIONS_HEADING + "\n")
+            parts.append("\n".join(f"[{i}] {c}" for i, c in enumerate(citations, 1)) + "\n")
 
         return "\n".join(parts).encode("utf-8")
 
     @staticmethod
-    def _deserialize(raw: bytes) -> Entity:
-        """Deserialize an entity from its .md file.
+    def _serialize_companion(entity: Entity) -> bytes:
+        """The structured data that companion mode keeps out of the markdown.
 
-        Frontmatter carries both spec fields and producer extensions.
+        Everything needed to reconstruct the Entity exactly — fact ids,
+        timestamps, relation weights. Recovering these by parsing the body
+        table back would be lossy and brittle; a stray pipe character in a
+        fact would corrupt a row.
         """
+        payload = {
+            "okf_version": entity.okf_version,
+            "wiki_id": entity.wiki_id,
+            "type": entity.type,
+            "title": entity.title,
+            "aliases": list(entity.aliases),
+            "compact": entity.compact,
+            "facts": [f.to_dict() for f in entity.facts],
+            "relations": [r.to_dict() for r in entity.relations],
+            "status": entity.status,
+            "merged_into": entity.merged_into,
+            "metadata": entity.metadata.to_dict(),
+        }
+        return json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")
+
+    @staticmethod
+    def _deserialize(raw: bytes, companion: bytes | None = None) -> Entity:
         import re
         import yaml
         text = raw.decode("utf-8")
@@ -509,46 +524,55 @@ class EntityGraphStore:
         if not m:
             raise MalformedEntityError("Malformed OKF markdown: missing front-matter block")
         d = yaml.safe_load(m.group(1)) or {}
+        if isinstance(d, dict) and companion is not None:
+            # Companion wins: in this mode the markdown deliberately carries
+            # only the spec's fields, so anything structured must come from
+            # the JSON. `description`/`tags` stay readable from either.
+            try:
+                extra = json.loads(companion.decode("utf-8"))
+                if isinstance(extra, dict):
+                    d = {**d, **extra}
+            except json.JSONDecodeError as e:
+                raise MalformedEntityError(
+                    f"Companion JSON is unreadable: {e}") from e
         if not isinstance(d, dict):
             raise MalformedEntityError(
                 f"Malformed OKF front-matter: expected a mapping, got {type(d).__name__}"
             )
         body = m.group(2)
+        # Drop the sections _serialize generates from structured data. They
+        # are rebuilt on every write, so leaving them in the summary would
+        # append a fresh copy on each round-trip until the file was mostly
+        # duplicated headings.
+        body = re.split(
+            rf"^##\s+(?:{_FACTS_HEADING}|{_RELATIONS_HEADING}|{_CITATIONS_HEADING}"rf"|{_STATUS_HEADING})\s*$",
+            body, maxsplit=1, flags=re.MULTILINE)[0]
         # strip the leading "# Title" heading — it's derived/redundant with
         # front-matter's `title`, kept only for human readability
         body = re.sub(r"^#\s*.+\n+", "", body, count=1)
-
-        # Resolve `generated.at` from the spec field, fall back to metadata.
-        generated = d.get("generated", {})
-        if isinstance(generated, dict):
-            updated_at = generated.get("at", "")
-        else:
-            updated_at = ""
-        meta = d.get("metadata", {})
-        if isinstance(meta, dict) and not meta.get("updated_at") and updated_at:
-            meta = {**meta, "updated_at": updated_at}
-
+        # Everything below indexes into parsed YAML. A file that is valid
+        # YAML but structurally wrong (missing wiki_id, a fact entry without
+        # its keys, metadata replaced by a scalar) raises KeyError /
+        # AttributeError / TypeError from here — none of which are
+        # ValueError, so they used to escape every route's `except
+        # ValueError` and surface as an opaque 500 on reads AND on deletes.
+        # Normalise them into one error type that carries the actual cause.
         try:
-            wiki_id = d.get("wiki_id", "")
-            if not wiki_id:
-                raise MalformedEntityError("Missing wiki_id in front-matter")
-            entity_type = d.get("type", "")
-            if not entity_type:
-                raise MalformedEntityError("Missing type in front-matter")
             return Entity(
-                wiki_id=wiki_id,
-                type=entity_type,
-                title=d.get("title", wiki_id),
-                # Accept both spellings for backward compat with old files.
-                aliases=list(d.get("tags") or d.get("aliases") or []),
-                compact=d.get("description") or d.get("compact", ""),
+                wiki_id=d["wiki_id"], type=d.get("type", "concept"),
+                title=d.get("title", d.get("wiki_id", "")),
+                # Accept both spellings: `aliases`/`compact` are this
+                # producer's extensions, `tags`/`description` are the OKF
+                # names. Reading both means a file written by another OKF
+                # producer round-trips rather than losing its summary.
+                aliases=list(d.get("aliases") or d.get("tags") or []),
+                compact=d.get("compact") or d.get("description", ""),
                 summary=body.strip(),
                 facts=[Fact.from_dict(f) for f in d.get("facts", [])],
                 relations=[Relation.from_dict(r) for r in d.get("relations", [])],
-                metadata=Metadata.from_dict(meta),
+                metadata=Metadata.from_dict(d.get("metadata", {})),
                 okf_version=d.get("okf_version", OKF_VERSION),
-                status=d.get("status", "stable"),
-                merged_into=d.get("merged_into"),
+                status=d.get("status", "active"), merged_into=d.get("merged_into"),
             )
         except MalformedEntityError:
             raise
@@ -564,11 +588,20 @@ class EntityGraphStore:
         return self.backend.get_bytes(self._key(user_id, wiki_id))
 
     def _read_entity(self, user_id: str, wiki_id: str, raw=None):
-        """Deserialise an entity from its .md file."""
+        """Deserialise, pulling in the companion JSON if one exists.
+
+        Always attempts the companion regardless of the configured mode, so a
+        bundle written in one mode reads correctly under the other and a
+        switch needs no migration.
+        """
         raw = raw if raw is not None else self._read_raw(user_id, wiki_id)
         if raw is None:
             return None
-        return self._deserialize(raw.data)
+        companion = None
+        if self.okf_mode == OKF_MODE_COMPANION:
+            got = self.backend.get_bytes(self._companion_key(user_id, wiki_id))
+            companion = got.data if got else None
+        return self._deserialize(raw.data, companion)
 
     def _mutate(self, user_id: str, wiki_id: str, mutator) -> Entity:
         """
@@ -584,8 +617,16 @@ class EntityGraphStore:
             new_entity = mutator(entity)
             etag = current.etag if current else ""
             try:
+                if self.okf_mode == OKF_MODE_COMPANION:
+                    # Companion first: a markdown file whose `resource` points
+                    # at a JSON that does not exist yet is worse than a JSON
+                    # nothing points at. The markdown keeps the conditional
+                    # write, so it remains the concurrency control point.
+                    self.backend.put_bytes(
+                        self._companion_key(user_id, wiki_id),
+                        self._serialize_companion(new_entity))
                 self.backend.put_bytes(
-                    key, self._serialize(new_entity), if_match=etag)
+                    key, self._serialize(new_entity, self.okf_mode), if_match=etag)
                 return new_entity
             except ConflictError as e:
                 last_error = e
@@ -600,7 +641,7 @@ class EntityGraphStore:
         nothing on the hot path — the index is normally already in memory.
         """
         entry = self.manifest.get_entry(user_id, wiki_id)
-        if entry is None or entry.status != "stable":
+        if entry is None or entry.status != "active":
             return wiki_id, None
 
         if _title_key(entry.title) == _title_key(title):
@@ -642,8 +683,6 @@ class EntityGraphStore:
             # never has to open entity files. The entity file remains the
             # source of truth; this is derived and rebuildable.
             edges=[{"t": r.target, "c": r.category} for r in entity.relations],
-            keywords=_extract_keywords(entity.title, entity.aliases,
-                                       entity.compact, entity.facts),
         ))
 
     def _log_op(self, user_id: str, op: str, wiki_id: str, reason: str = "",
@@ -676,7 +715,7 @@ class EntityGraphStore:
                 self.manifest.remove_entry(user_id, wiki_id)
             return None
         entity = self._read_entity(user_id, wiki_id, raw)
-        if entity.status == "deprecated" and not include_deleted:
+        if entity.status == "deleted" and not include_deleted:
             # Tombstoned — treat exactly like a missing file. This is what
             # makes delete_entity()'s status flip instantly authoritative
             # everywhere, even before the file is physically removed or the
@@ -779,7 +818,7 @@ class EntityGraphStore:
                 entity.aliases = sorted(set(entity.aliases) | set(aliases))
             if significance is not None:
                 entity.metadata.significance = significance
-            entity.status = "stable"  # revives a tombstone if this (type, title) was deprecated
+            entity.status = "active"  # revives a tombstone if this (type, title) was deleted
             entity.metadata.last_accessed = now
             entity.metadata.updated_at = now
             return entity
@@ -1014,13 +1053,13 @@ class EntityGraphStore:
         entities (status=='deleted') are excluded by default, same as get_entity()."""
         entries = self.manifest.list_entries(user_id, type_filter=type_filter)
         if not include_deleted:
-            entries = [e for e in entries if e.status != "deprecated"]
+            entries = [e for e in entries if e.status != "deleted"]
         return [e.wiki_id for e in entries]
 
     def delete_entity(self, user_id: str, wiki_id: str, cascade: bool = True,
                        hard_delete: bool = True) -> bool:
         """
-        Marks the entity as deprecated (status='deprecated'), as a single atomic
+        Tombstones the entity first (status='deleted'), as a single atomic
         write — this is the fix for the previously-documented race: instead
         of "delete the file, then separately cascade-clean other entities"
         (a two-step process with a real gap in the middle), the FIRST thing
@@ -1031,21 +1070,21 @@ class EntityGraphStore:
         file removal — can happen at whatever pace, crash partway, or even
         be skipped (hard_delete=False), and it no longer matters for
         correctness: no reader can ever observe this entity as "existing"
-        again once the deprecation write lands.
+        again once the tombstone write lands.
 
         cascade=False skips cleaning up other entities' dangling relations —
         useful for bulk deletes where you'd rather run cascade_orphaned_relations()
         or the /wiki/_reconcile sweep once at the end.
 
-        hard_delete=False leaves the deprecated file in place permanently
-        (an audit trail — this is what the OKF spec's `status` field is
+        hard_delete=False leaves the tombstoned file in place permanently
+        (an audit trail — this is what the OKF schema's `status` field is
         for) instead of reclaiming storage. Defaults to True to preserve
         prior behavior (the file is actually removed).
         """
         def mutator(entity: Entity | None) -> Entity:
-            if entity is None or entity.status == "deprecated":
+            if entity is None or entity.status == "deleted":
                 raise ValueError(f"Entity {wiki_id!r} not found")
-            entity.status = "deprecated"
+            entity.status = "deleted"
             entity.metadata.updated_at = _now_iso()
             return entity
 
@@ -1084,103 +1123,6 @@ class EntityGraphStore:
             self.manifest.remove_entry(user_id, wiki_id)
 
         return True
-
-    def merge_entities(self, user_id: str, source_wiki_id: str,
-                       target_wiki_id: str) -> Entity:
-        """Merge source entity into target: migrate facts and relations,
-        mark source as deprecated with merged_into pointing at target.
-
-        After merge, _link() automatically follows merged_into, so any
-        reference to the old entity resolves to the merged target.
-        Idempotent: merging the same pair twice is a no-op on the second
-        call (source is already deprecated).
-        """
-        if source_wiki_id == target_wiki_id:
-            raise ValueError("Cannot merge an entity into itself")
-
-        # Read both entities.
-        source = self.get_entity(user_id, source_wiki_id, touch=False)
-        target = self.get_entity(user_id, target_wiki_id, touch=False)
-        if source is None:
-            raise ValueError(f"Source entity {source_wiki_id!r} not found")
-        if target is None:
-            raise ValueError(f"Target entity {target_wiki_id!r} not found")
-        if source.status == "deprecated" and source.merged_into == target_wiki_id:
-            # Already merged — idempotent.
-            return target
-
-        now = _now_iso()
-
-        # Migrate facts: append source facts not already present in target.
-        existing_texts = {f.text.strip().lower() for f in target.facts}
-        migrated_facts = 0
-        for fact in source.facts:
-            if fact.text.strip().lower() not in existing_texts:
-                fact.fact_id = _next_seq_id("fact", [f.fact_id for f in target.facts + [fact]])
-                fact.created_at = now
-                fact.updated_at = now
-                target.facts.append(fact)
-                existing_texts.add(fact.text.strip().lower())
-                migrated_facts += 1
-
-        # Migrate relations: append source relations not already present.
-        existing_rels = {(r.target, r.label) for r in target.relations}
-        migrated_rels = 0
-        for rel in source.relations:
-            if rel.target == target_wiki_id:
-                continue  # self-referencing after merge
-            if (rel.target, rel.label) not in existing_rels:
-                rel.relation_id = _next_seq_id("rel", [r.relation_id for r in target.relations + [rel]])
-                rel.created_at = now
-                rel.updated_at = now
-                target.relations.append(rel)
-                existing_rels.add((rel.target, rel.label))
-                migrated_rels += 1
-
-        # Merge aliases.
-        for alias in source.aliases:
-            if alias not in target.aliases:
-                target.aliases.append(alias)
-
-        # Append source summary to target if it adds new content.
-        if source.summary and source.summary.strip() not in target.summary:
-            sep = "\n\n" if target.summary else ""
-            target.summary = f"{target.summary}{sep}[Merged from {source.title}]: {source.summary.strip()}"
-            if not target.compact:
-                target.compact = _default_compact(target.summary)
-
-        target.metadata.updated_at = now
-
-        # Write the updated target.
-        def target_mutator(_: Entity | None) -> Entity:
-            return target
-        result = self._mutate(user_id, target_wiki_id, target_mutator)
-        self._sync_manifest(user_id, result)
-        self._log_op(user_id, "merge", target_wiki_id,
-                     reason=f"merged {source_wiki_id} into {target_wiki_id} "
-                            f"({migrated_facts} facts, {migrated_rels} relations)")
-
-        # Mark source as deprecated.
-        def source_mutator(e: Entity | None) -> Entity:
-            if e is None:
-                raise ValueError(f"Source entity {source_wiki_id!r} disappeared mid-merge")
-            e.status = "deprecated"
-            e.merged_into = target_wiki_id
-            e.metadata.updated_at = now
-            return e
-        self._mutate(user_id, source_wiki_id, source_mutator)
-        # Update manifest: source is now deprecated, pointing at target.
-        self.manifest.upsert_entry(user_id, ManifestEntry(
-            wiki_id=source_wiki_id, type=source.type, title=source.title,
-            aliases=source.aliases, path=self._key(user_id, source_wiki_id),
-            compact=source.compact, status="deprecated",
-            updated_at=now, last_accessed=source.metadata.last_accessed,
-            keywords=[], merged_into=target_wiki_id,
-        ))
-        self._log_op(user_id, "merge", source_wiki_id,
-                     reason=f"deprecated: merged into {target_wiki_id}")
-
-        return result
 
     def cascade_orphaned_relations(self, user_id: str, deleted_wiki_id: str) -> dict:
         """
@@ -1375,7 +1317,7 @@ class EntityGraphStore:
 
         def exists(wiki_id: str) -> bool:
             entry = entries.get(wiki_id)
-            return entry is not None and entry.status == "stable"
+            return entry is not None and entry.status == "active"
 
         depth_of: dict[str, int] = {wid: 0 for wid in entry_wiki_ids}
         processed: set[str] = set()
@@ -1432,7 +1374,7 @@ class EntityGraphStore:
     # matters more for finding things again than frame rate does.
 
     def _layout_key(self, user_id: str) -> str:
-        return f"{user_id}/wiki/_layout.json"
+        return wiki_key(user_id, "_layout.json")
 
     def get_layout(self, user_id: str) -> dict:
         raw = self.backend.get_bytes(self._layout_key(user_id))
@@ -1492,7 +1434,7 @@ class EntityGraphStore:
         """
         wanted = set(categories) if categories is not None else None
         entries = {e.wiki_id: e for e in self.manifest.list_entries(user_id)
-                   if e.status == "stable"}
+                   if e.status == "active"}
 
         # Undirected adjacency over active nodes only, so a tombstoned entity
         # breaks the path through it rather than being silently traversed.
@@ -1565,7 +1507,7 @@ class EntityGraphStore:
         normally in memory. Only entries predating the index (edges=None)
         still need a file read, and those are batched.
         """
-        entries = [e for e in self.manifest.list_entries(user_id) if e.status == "stable"]
+        entries = [e for e in self.manifest.list_entries(user_id) if e.status == "active"]
         total_edges = 0
         unindexed = []
         for entry in entries:

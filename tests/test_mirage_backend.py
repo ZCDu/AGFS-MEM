@@ -118,15 +118,15 @@ def test_listings_are_not_stale_across_processes(tmp_path):
     root = str(tmp_path / "bucket")
     backend = MirageBackend.from_disk(root=root)
     try:
-        backend.put_bytes("u/wiki/_manifest/d/001.json", b'{"upsert":{}}')
-        assert len(backend.list_keys("u/wiki/_manifest/d/")) == 1
+        backend.put_bytes("wikis/u/_manifest/d/001.json", b'{"upsert":{}}')
+        assert len(backend.list_keys("wikis/u/_manifest/d/")) == 1
 
         # Simulate a second worker writing straight to the same bucket.
-        os.makedirs(os.path.join(root, "u", "wiki", "_manifest", "d"), exist_ok=True)
-        with open(os.path.join(root, "u", "wiki", "_manifest", "d", "002.json"), "wb") as f:
+        os.makedirs(os.path.join(root, "wikis", "u", "_manifest", "d"), exist_ok=True)
+        with open(os.path.join(root, "wikis", "u", "_manifest", "d", "002.json"), "wb") as f:
             f.write(b'{"upsert":{}}')
 
-        keys = backend.list_keys("u/wiki/_manifest/d/")
+        keys = backend.list_keys("wikis/u/_manifest/d/")
         assert len(keys) == 2, f"stale listing: index cache TTL must be 0, got {keys}"
     finally:
         backend.close()
