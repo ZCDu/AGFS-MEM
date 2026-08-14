@@ -46,9 +46,6 @@ def context(**updates) -> SessionMemoryCompactContext:
         "token_estimator": FieldEstimator(),
         "history_turns": 1,
         "auto_compact_threshold": 100_000,
-        "summary_formatter": lambda content: SessionCompressionMessage(
-            role="user", content=content, test_tokens=500, is_compact_summary=True
-        ),
         "clock": lambda: NOW,
     }
     values.update(updates)
@@ -90,7 +87,7 @@ async def test_in_progress_extraction_completing_is_used_with_claude_wait_limits
     )
 
     assert result is not None
-    assert result.summary_messages[0].content == "fresh memory"
+    assert "fresh memory" in str(result.summary_messages[0].content)
     assert calls == ["waited"]
 
 
@@ -113,7 +110,7 @@ async def test_extraction_older_than_sixty_seconds_is_ignored() -> None:
     )
 
     assert result is not None
-    assert result.summary_messages[0].content == "stable memory"
+    assert "stable memory" in str(result.summary_messages[0].content)
     assert called is False
 
 

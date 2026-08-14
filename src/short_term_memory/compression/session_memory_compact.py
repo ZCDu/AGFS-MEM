@@ -7,6 +7,9 @@ from datetime import datetime, timezone
 import uuid
 
 from short_term_memory.compression.context_messages import to_provider_messages
+from short_term_memory.compression.compact_prompt import (
+    get_compact_user_summary_message,
+)
 from short_term_memory.compression.message_rounds import (
     DEFAULT_MAX_TOKENS,
     DEFAULT_MIN_TEXT_BLOCK_MESSAGES,
@@ -30,14 +33,7 @@ SM_MAX_TOKENS = DEFAULT_MAX_TOKENS
 SM_WAIT_SECONDS = 15.0
 SM_STALE_SECONDS = 60.0
 
-SummaryFormatter = Callable[[str], SessionCompressionMessage]
 ExtractionWaiter = Callable[[], Awaitable[SessionMemoryRevision | None]]
-
-
-def _default_summary_formatter(content: str) -> SessionCompressionMessage:
-    return SessionCompressionMessage(
-        role="user", content=content, is_compact_summary=True
-    )
 
 
 @dataclass(frozen=True)
@@ -57,7 +53,6 @@ class SessionMemoryCompactContext:
     token_estimator: TokenEstimator
     history_turns: int
     auto_compact_threshold: int | None = None
-    summary_formatter: SummaryFormatter = _default_summary_formatter
     extraction_started_at: datetime | None = None
     extraction_waiter: ExtractionWaiter | None = None
     attachments: tuple[SessionCompressionMessage, ...] = field(default_factory=tuple)
@@ -168,7 +163,11 @@ def _create_result(
     compact_memory, was_truncated = truncate_session_memory_for_compact(
         memory.content
     )
-    summary = context.summary_formatter(compact_memory)
+    summary = get_compact_user_summary_message(
+        compact_memory,
+        suppress_follow_up_questions=True,
+        recent_messages_preserved=True,
+    )
     if was_truncated and isinstance(summary.content, str):
         summary = summary.model_copy(
             update={
