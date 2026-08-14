@@ -181,3 +181,41 @@ def build_session_memory_update_prompt(
         {"currentNotes": current_memory, "memoryPath": memory_path},
     )
     return prompt + _size_reminders(current_memory)
+
+
+def truncate_session_memory_for_compact(content: str) -> tuple[str, bool]:
+    """Port ``truncateSessionMemoryForCompact`` and its line-boundary flush."""
+
+    max_chars_per_section = MAX_SESSION_MEMORY_SECTION_TOKENS * 4
+    output: list[str] = []
+    section_header = ""
+    section_lines: list[str] = []
+    was_truncated = False
+
+    def flush(header: str, lines: list[str]) -> tuple[list[str], bool]:
+        if not header:
+            return list(lines), False
+        if len("\n".join(lines)) <= max_chars_per_section:
+            return [header, *lines], False
+        kept = [header]
+        char_count = 0
+        for line in lines:
+            if char_count + len(line) + 1 > max_chars_per_section:
+                break
+            kept.append(line)
+            char_count += len(line) + 1
+        kept.append("\n[... section truncated for length ...]")
+        return kept, True
+
+    for line in content.split("\n"):
+        if line.startswith("# "):
+            rendered, truncated = flush(section_header, section_lines)
+            output.extend(rendered)
+            was_truncated = was_truncated or truncated
+            section_header = line
+            section_lines = []
+        else:
+            section_lines.append(line)
+    rendered, truncated = flush(section_header, section_lines)
+    output.extend(rendered)
+    return "\n".join(output), was_truncated or truncated
