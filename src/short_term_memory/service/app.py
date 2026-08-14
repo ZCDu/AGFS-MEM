@@ -23,6 +23,7 @@ from short_term_memory.service.auth import (
 )
 from short_term_memory.service.memory_service import (
     MemoryReadUnavailableError,
+    MemoryTranscriptScopeError,
     RetryableWriteError,
 )
 from short_term_memory.service.metrics import ApiMetrics
@@ -31,15 +32,30 @@ from short_term_memory.service.schemas import (
     MemoryReadResponse,
     MemoryRecallRequest,
     MemoryRecallResponse,
+    MemoryTranscriptGrepRequest,
+    MemoryTranscriptGrepResponse,
+    MemoryTranscriptReadRequest,
+    MemoryTranscriptReadResponse,
     MemoryWriteRequest,
     MemoryWriteResponse,
 )
 from short_term_memory.storage.async_redis_memory_store import EventConflictError
 from short_term_memory.storage.journal_store import JournalConflictError
+from short_term_memory.transcript.grep_tool import TranscriptPatternError
+from short_term_memory.transcript.read_tool import (
+    TranscriptOffsetError,
+    TranscriptResultTooLargeError,
+)
 
 
 _BUSINESS_PATHS = frozenset(
-    {"/v1/memories/write", "/v1/memories/read", "/v1/memories/recall"}
+    {
+        "/v1/memories/write",
+        "/v1/memories/read",
+        "/v1/memories/recall",
+        "/v1/memories/transcript/grep",
+        "/v1/memories/transcript/read",
+    }
 )
 _REQUEST_ID_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\Z")
 
@@ -254,6 +270,8 @@ class HttpControlMiddleware:
 
 _ERROR_RESPONSES = {
     401: {"model": ErrorResponse, "description": "Authentication failed."},
+    403: {"model": ErrorResponse, "description": "Session scope mismatch."},
+    404: {"model": ErrorResponse, "description": "Transcript range not found."},
     409: {"model": ErrorResponse, "description": "Event ID conflict."},
     413: {"model": ErrorResponse, "description": "Request body too large."},
     422: {"model": ErrorResponse, "description": "Request validation failed."},
@@ -348,6 +366,38 @@ def create_app(
     ) -> JSONResponse:
         return error_response(
             request, status.HTTP_422_UNPROCESSABLE_CONTENT, "validation_error"
+        )
+
+    @app.exception_handler(MemoryTranscriptScopeError)
+    async def transcript_scope_error(
+        request: Request, _error: MemoryTranscriptScopeError
+    ) -> JSONResponse:
+        return error_response(
+            request, status.HTTP_403_FORBIDDEN, "scope_forbidden"
+        )
+
+    @app.exception_handler(TranscriptPatternError)
+    async def transcript_pattern_error(
+        request: Request, _error: TranscriptPatternError
+    ) -> JSONResponse:
+        return error_response(
+            request, status.HTTP_422_UNPROCESSABLE_CONTENT, "invalid_pattern"
+        )
+
+    @app.exception_handler(TranscriptOffsetError)
+    async def transcript_offset_error(
+        request: Request, _error: TranscriptOffsetError
+    ) -> JSONResponse:
+        return error_response(
+            request, status.HTTP_404_NOT_FOUND, "transcript_not_found"
+        )
+
+    @app.exception_handler(TranscriptResultTooLargeError)
+    async def transcript_result_too_large_error(
+        request: Request, _error: TranscriptResultTooLargeError
+    ) -> JSONResponse:
+        return error_response(
+            request, status.HTTP_413_CONTENT_TOO_LARGE, "result_too_large"
         )
 
     async def conflict_error(request: Request, _error: Exception) -> JSONResponse:
@@ -450,5 +500,35 @@ def create_app(
     )
     async def recall_memory(request: Request, body: MemoryRecallRequest) -> Any:
         return await app.state.memory_service.recall(body, request.state.request_id)
+
+    @app.post(
+        "/v1/memories/transcript/grep",
+        response_model=MemoryTranscriptGrepResponse,
+        responses=_ERROR_RESPONSES,
+        dependencies=[Depends(authenticate)],
+    )
+    async def grep_memory_transcript(
+        request: Request, body: MemoryTranscriptGrepRequest
+    ) -> Any:
+        return await app.state.memory_service.grep_transcript(
+            body,
+            request.state.request_id,
+            session_scope=request.headers.get("x-memory-session-scope", ""),
+        )
+
+    @app.post(
+        "/v1/memories/transcript/read",
+        response_model=MemoryTranscriptReadResponse,
+        responses=_ERROR_RESPONSES,
+        dependencies=[Depends(authenticate)],
+    )
+    async def read_memory_transcript(
+        request: Request, body: MemoryTranscriptReadRequest
+    ) -> Any:
+        return await app.state.memory_service.read_transcript(
+            body,
+            request.state.request_id,
+            session_scope=request.headers.get("x-memory-session-scope", ""),
+        )
 
     return app

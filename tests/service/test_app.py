@@ -10,6 +10,7 @@ from short_term_memory.config import ShortTermMemorySettings
 from short_term_memory.service.app import create_app
 from short_term_memory.service.memory_service import (
     MemoryReadUnavailableError,
+    MemoryTranscriptScopeError,
     RetryableWriteError,
 )
 from short_term_memory.service.metrics import ApiMetrics
@@ -17,12 +18,19 @@ from short_term_memory.service.schemas import (
     HeadroomProxyContext,
     MemoryReadResponse,
     MemoryReadState,
+    MemoryTranscriptGrepResponse,
+    MemoryTranscriptReadResponse,
     MemoryWriteResponse,
     ReadTiming,
     WriteTiming,
 )
 from short_term_memory.storage.async_redis_memory_store import EventConflictError
 from short_term_memory.storage.journal_store import JournalConflictError
+from short_term_memory.transcript.grep_tool import TranscriptPatternError
+from short_term_memory.transcript.read_tool import (
+    TranscriptOffsetError,
+    TranscriptResultTooLargeError,
+)
 from tests.factories import read_payload, write_payload
 
 
@@ -32,6 +40,7 @@ class RecordingMemoryService:
         self.next_error: BaseException | None = None
         self.entered = asyncio.Event()
         self.release: asyncio.Event | None = None
+        self.transcript_calls: list[tuple[str, object, str, str]] = []
 
     async def write(self, request, request_id):
         self.calls.append(("write", request, request_id))
@@ -89,6 +98,36 @@ class RecordingMemoryService:
                 for h in request.hashes
             ],
         }
+
+    async def grep_transcript(self, request, request_id, *, session_scope):
+        self.transcript_calls.append(
+            ("grep", request, request_id, session_scope)
+        )
+        if self.next_error is not None:
+            raise self.next_error
+        return MemoryTranscriptGrepResponse(
+            request_id=request_id,
+            mode="content",
+            matches=[{"sequence": 87, "text": "TTL", "is_match": True}],
+            content="87\tTTL",
+            num_lines=1,
+            num_matches=1,
+        )
+
+    async def read_transcript(self, request, request_id, *, session_scope):
+        self.transcript_calls.append(
+            ("read", request, request_id, session_scope)
+        )
+        if self.next_error is not None:
+            raise self.next_error
+        return MemoryTranscriptReadResponse(
+            request_id=request_id,
+            content="87\tTTL",
+            sequence_from=87,
+            sequence_through=87,
+            num_lines=1,
+            total_lines=1,
+        )
 
 
 def settings(
@@ -150,7 +189,7 @@ async def call_asgi(app, scope, receive):
 
 
 @pytest.mark.asyncio
-async def test_only_three_business_routes_exist_and_openapi_documents_auth() -> None:
+async def test_only_five_business_routes_exist_and_openapi_documents_auth() -> None:
     app = app_for(RecordingMemoryService())
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app), base_url="http://test"
@@ -163,6 +202,8 @@ async def test_only_three_business_routes_exist_and_openapi_documents_auth() -> 
     assert business == [
         "/v1/memories/read",
         "/v1/memories/recall",
+        "/v1/memories/transcript/grep",
+        "/v1/memories/transcript/read",
         "/v1/memories/write",
     ]
     for path in business:
@@ -217,6 +258,120 @@ async def test_recall_contract_calls_only_the_injected_memory_service() -> None:
     assert body["results"][0]["hash"] == "abc123def456"
     assert body["results"][0]["recovered"] is True
     assert [call[0] for call in service.calls] == ["recall"]
+
+
+@pytest.mark.asyncio
+async def test_transcript_routes_bind_scope_and_propagate_request_id() -> None:
+    service = RecordingMemoryService()
+    app = app_for(service)
+    headers = auth_headers(
+        **{"x-memory-session-scope": "opaque-current-session"}
+    )
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        grep = await client.post(
+            "/v1/memories/transcript/grep",
+            headers={**headers, "x-request-id": "grep-request"},
+            json={
+                "user_id": "u",
+                "session_id": "s",
+                "path": "journal://current-session",
+                "pattern": "TTL",
+                "output_mode": "content",
+            },
+        )
+        read = await client.post(
+            "/v1/memories/transcript/read",
+            headers={**headers, "x-request-id": "read-request"},
+            json={
+                "user_id": "u",
+                "session_id": "s",
+                "file_path": "journal://current-session",
+                "offset": 87,
+                "limit": 1,
+            },
+        )
+
+    assert grep.status_code == read.status_code == 200
+    assert grep.json()["matches"][0]["sequence"] == 87
+    assert read.json()["sequence_from"] == 87
+    assert [call[0] for call in service.transcript_calls] == ["grep", "read"]
+    assert all(call[3] == "opaque-current-session" for call in service.transcript_calls)
+    assert service.transcript_calls[0][2] == "grep-request"
+    assert service.transcript_calls[1][2] == "read-request"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("error", "path", "status_code", "error_code"),
+    [
+        (
+            MemoryTranscriptScopeError("private scope"),
+            "/v1/memories/transcript/grep",
+            403,
+            "scope_forbidden",
+        ),
+        (
+            TranscriptPatternError("private pattern"),
+            "/v1/memories/transcript/grep",
+            422,
+            "invalid_pattern",
+        ),
+        (
+            TranscriptOffsetError("/private/journal/path"),
+            "/v1/memories/transcript/read",
+            404,
+            "transcript_not_found",
+        ),
+        (
+            TranscriptResultTooLargeError("private transcript"),
+            "/v1/memories/transcript/read",
+            413,
+            "result_too_large",
+        ),
+        (
+            OSError("/private/journal/path"),
+            "/v1/memories/transcript/read",
+            503,
+            "service_unavailable",
+        ),
+    ],
+)
+async def test_transcript_errors_are_stable_and_sanitized(
+    error, path, status_code, error_code
+) -> None:
+    service = RecordingMemoryService()
+    service.next_error = error
+    app = app_for(service)
+    payload = {
+        "user_id": "u",
+        "session_id": "s",
+        "path": "journal://current-session",
+        "pattern": "TTL",
+    }
+    if path.endswith("/read"):
+        payload = {
+            "user_id": "u",
+            "session_id": "s",
+            "file_path": "journal://current-session",
+        }
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app, raise_app_exceptions=False),
+        base_url="http://test",
+    ) as client:
+        response = await client.post(
+            path,
+            headers=auth_headers(
+                **{"x-memory-session-scope": "opaque-current-session"}
+            ),
+            json=payload,
+        )
+
+    assert response.status_code == status_code
+    assert response.json()["error"] == error_code
+    assert "/private" not in response.text
+    assert "private" not in response.text
 
 
 @pytest.mark.asyncio

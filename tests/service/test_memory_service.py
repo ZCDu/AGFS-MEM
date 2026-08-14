@@ -11,7 +11,12 @@ from short_term_memory.models import CompressionGeneration, EventReservation
 from short_term_memory.service.memory_service import (
     MemoryReadUnavailableError,
     MemoryService,
+    MemoryTranscriptScopeError,
     RetryableWriteError,
+)
+from short_term_memory.service.schemas import (
+    MemoryTranscriptGrepRequest,
+    MemoryTranscriptReadRequest,
 )
 from short_term_memory.storage.async_redis_memory_store import (
     AsyncRedisMemoryStore,
@@ -87,6 +92,7 @@ class RecordingJournals:
     def __init__(self, calls):
         self.calls = calls
         self.events = []
+        self.read_error = None
 
     def append_event(self, user_id, session_id, event):
         self.calls.append("journal_fsync")
@@ -103,6 +109,16 @@ class RecordingJournals:
 
     def read_recent_originals(self, user_id, session_id, history_turns):
         return tuple(self.events[-(history_turns * 2):])
+
+    def read_original_range(self, user_id, session_id, from_sequence, through_sequence):
+        self.calls.append("journal_transcript_read")
+        if self.read_error is not None:
+            raise self.read_error
+        return tuple(
+            event
+            for event in self.events
+            if from_sequence <= event.sequence <= through_sequence
+        )
 
 
 class RecordingQueue:
@@ -174,6 +190,62 @@ async def test_write_reserves_journals_commits_then_queues(service):
     assert response.accepted is True
     assert response.sequence_from == response.sequence_through == 1
     assert service.journals.events[0].content == "original"
+
+
+@pytest.mark.asyncio
+async def test_grep_transcript_validates_scope_and_reads_bound_session(service):
+    service.journals.events.append(
+        memory_event(sequence=87, event_id="ttl", content="TTL is 43200")
+    )
+    scope = service.scope_factory.for_session("u", "s").session_scope
+    response = await service.grep_transcript(
+        MemoryTranscriptGrepRequest(
+            user_id="u",
+            session_id="s",
+            path="journal://current-session",
+            pattern="TTL",
+            output_mode="content",
+        ),
+        "req-grep",
+        session_scope=scope,
+    )
+
+    assert response.request_id == "req-grep"
+    assert response.matches[0].sequence == 87
+    assert "journal_transcript_read" in service.journals.calls
+
+
+@pytest.mark.asyncio
+async def test_transcript_scope_mismatch_is_rejected_before_journal_access(service):
+    request = MemoryTranscriptReadRequest(
+        user_id="u",
+        session_id="s",
+        file_path="journal://current-session",
+    )
+
+    with pytest.raises(MemoryTranscriptScopeError):
+        await service.read_transcript(
+            request, "req-read", session_scope="wrong-private-scope"
+        )
+
+    assert "journal_transcript_read" not in service.journals.calls
+
+
+@pytest.mark.asyncio
+async def test_read_transcript_propagates_journal_failure(service):
+    service.journals.read_error = OSError("/private/journal/path")
+    scope = service.scope_factory.for_session("u", "s").session_scope
+
+    with pytest.raises(OSError):
+        await service.read_transcript(
+            MemoryTranscriptReadRequest(
+                user_id="u",
+                session_id="s",
+                file_path="journal://current-session",
+            ),
+            "req-read",
+            session_scope=scope,
+        )
 
 
 @pytest.mark.asyncio

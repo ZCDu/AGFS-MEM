@@ -6,10 +6,17 @@ from short_term_memory.service.schemas import (
     MemoryReadResponse,
     MemoryReadState,
     MemoryReadRequest,
+    MemoryTranscriptGrepRequest,
+    MemoryTranscriptGrepResponse,
+    MemoryTranscriptReadRequest,
+    MemoryTranscriptReadResponse,
     MemoryWriteResponse,
     MemoryWriteRequest,
     ReadTiming,
     WriteTiming,
+)
+from short_term_memory.transcript.tool_definitions import (
+    TRANSCRIPT_TOOL_DEFINITIONS,
 )
 
 
@@ -68,6 +75,58 @@ def test_read_request_accepts_optional_effective_config() -> None:
     )
 
     assert request.include_effective_config is True
+
+
+def test_transcript_schemas_bind_session_outside_model_tool_arguments() -> None:
+    grep = MemoryTranscriptGrepRequest(
+        user_id="u1",
+        session_id="s1",
+        path="journal://current-session",
+        pattern="TTL",
+        output_mode="content",
+    )
+    read = MemoryTranscriptReadRequest(
+        user_id="u1",
+        session_id="s1",
+        file_path="journal://current-session",
+        offset=87,
+        limit=3,
+    )
+
+    assert grep.user_id == read.user_id == "u1"
+    assert grep.session_id == read.session_id == "s1"
+    assert [tool["function"]["name"] for tool in TRANSCRIPT_TOOL_DEFINITIONS] == [
+        "Grep",
+        "Read",
+    ]
+    for tool in TRANSCRIPT_TOOL_DEFINITIONS:
+        properties = tool["function"]["parameters"]["properties"]
+        assert "user_id" not in properties
+        assert "session_id" not in properties
+
+
+def test_transcript_response_schemas_preserve_request_id_and_tool_content() -> None:
+    grep = MemoryTranscriptGrepResponse(
+        request_id="req-grep",
+        mode="content",
+        matches=[{"sequence": 87, "text": "TTL", "is_match": True}],
+        content="87\tTTL",
+        num_lines=1,
+        num_matches=1,
+    )
+    read = MemoryTranscriptReadResponse(
+        request_id="req-read",
+        content="87\tTTL",
+        sequence_from=87,
+        sequence_through=87,
+        num_lines=1,
+        total_lines=100,
+    )
+
+    assert grep.request_id == "req-grep"
+    assert grep.matches[0].sequence == 87
+    assert read.request_id == "req-read"
+    assert read.sequence_through == 87
 
 
 def test_effective_config_never_contains_secrets() -> None:

@@ -3,6 +3,7 @@
 import asyncio
 from datetime import datetime, timedelta, timezone
 from hashlib import sha256
+import secrets
 import time
 from typing import Any, Callable
 from uuid import uuid5, NAMESPACE_URL
@@ -31,6 +32,10 @@ from short_term_memory.service.schemas import (
     MemoryRecallRequest,
     MemoryRecallResponse,
     MemoryRecallResult,
+    MemoryTranscriptGrepRequest,
+    MemoryTranscriptGrepResponse,
+    MemoryTranscriptReadRequest,
+    MemoryTranscriptReadResponse,
     MemoryWriteRequest,
     MemoryWriteResponse,
     ReadTiming,
@@ -38,6 +43,12 @@ from short_term_memory.service.schemas import (
 )
 from short_term_memory.storage.async_redis_memory_store import EventConflictError
 from short_term_memory.storage.journal_store import JournalConflictError, JournalStore
+from short_term_memory.transcript.grep_tool import grep_transcript
+from short_term_memory.transcript.journal_transcript import JournalTranscript
+from short_term_memory.transcript.read_tool import read_transcript
+
+
+TRANSCRIPT_MAX_RESPONSE_CHARS = 20_000
 
 
 class RetryableWriteError(RuntimeError):
@@ -51,6 +62,10 @@ class RetryableWriteError(RuntimeError):
 
 class MemoryReadUnavailableError(RuntimeError):
     """Neither Redis nor the durable journal can provide a safe read context."""
+
+
+class MemoryTranscriptScopeError(PermissionError):
+    """The supplied opaque scope does not belong to the requested session."""
 
 
 class MemoryService:
@@ -413,6 +428,65 @@ class MemoryService:
                 assembly=assembly_seconds * 1_000,
             ),
         )
+
+    async def grep_transcript(
+        self,
+        request: MemoryTranscriptGrepRequest,
+        request_id: str,
+        *,
+        session_scope: str,
+    ) -> MemoryTranscriptGrepResponse:
+        """Run Claude-style Grep against the authenticated session Journal."""
+
+        self._validate_transcript_scope(
+            request.user_id, request.session_id, session_scope
+        )
+        transcript_lines = await anyio.to_thread.run_sync(
+            JournalTranscript(self.journals).lines,
+            request.user_id,
+            request.session_id,
+        )
+        result = grep_transcript(
+            transcript_lines,
+            request,
+            max_response_chars=TRANSCRIPT_MAX_RESPONSE_CHARS,
+        )
+        return MemoryTranscriptGrepResponse(
+            request_id=request_id, **result.model_dump()
+        )
+
+    async def read_transcript(
+        self,
+        request: MemoryTranscriptReadRequest,
+        request_id: str,
+        *,
+        session_scope: str,
+    ) -> MemoryTranscriptReadResponse:
+        """Run Claude-style Read against the authenticated session Journal."""
+
+        self._validate_transcript_scope(
+            request.user_id, request.session_id, session_scope
+        )
+        transcript_lines = await anyio.to_thread.run_sync(
+            JournalTranscript(self.journals).lines,
+            request.user_id,
+            request.session_id,
+        )
+        result = read_transcript(
+            transcript_lines,
+            request,
+            max_response_chars=TRANSCRIPT_MAX_RESPONSE_CHARS,
+        )
+        return MemoryTranscriptReadResponse(
+            request_id=request_id, **result.model_dump()
+        )
+
+    def _validate_transcript_scope(
+        self, user_id: str, session_id: str, session_scope: str
+    ) -> None:
+        expected = self.scope_factory.for_session(user_id, session_id).session_scope
+        if not secrets.compare_digest(session_scope, expected):
+            raise MemoryTranscriptScopeError("session scope does not match")
 
     async def recall(
         self, request: MemoryRecallRequest, request_id: str

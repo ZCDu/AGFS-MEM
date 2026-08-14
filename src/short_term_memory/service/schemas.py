@@ -9,6 +9,14 @@ from short_term_memory.models import (
     MemoryContentType,
     SessionCompressionMessage,
 )
+from short_term_memory.transcript.grep_tool import (
+    TranscriptGrepRequest,
+    TranscriptGrepResult,
+)
+from short_term_memory.transcript.read_tool import (
+    TranscriptReadRequest,
+    TranscriptReadResult,
+)
 
 
 class MemoryEventInput(BaseModel):
@@ -111,6 +119,24 @@ class MemoryReadResponse(BaseModel):
     ccr_markers: list[str] = Field(default_factory=list)
     effective_config: EffectiveMemoryConfig | None
     timing_ms: ReadTiming
+
+
+class MemoryTranscriptGrepRequest(TranscriptGrepRequest):
+    user_id: str = Field(min_length=1)
+    session_id: str = Field(min_length=1)
+
+
+class MemoryTranscriptGrepResponse(TranscriptGrepResult):
+    request_id: str = Field(min_length=1)
+
+
+class MemoryTranscriptReadRequest(TranscriptReadRequest):
+    user_id: str = Field(min_length=1)
+    session_id: str = Field(min_length=1)
+
+
+class MemoryTranscriptReadResponse(TranscriptReadResult):
+    request_id: str = Field(min_length=1)
 
 
 class MemoryRecallRequest(BaseModel):
