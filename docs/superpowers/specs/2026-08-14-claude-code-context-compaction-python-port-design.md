@@ -528,7 +528,165 @@ messages_for_query += compaction_result.summary_messages
 - Headroom Proxy 只压缩并转发 Agent 当前请求，不拥有 Redis 活动上下文。
 - Journal 不因 compact 被修改。
 
-### 9.2 generation 可见性
+### 9.2 Headroom generation 融入 Claude 递进摘要的完整时序
+
+Headroom generation 是 L3/L4 活动摘要的上游细节压缩资产，但新消息不会一写入就
+立即变成 generation。必须保持“最近完整轮次优先”的顺序：
+
+```text
+新 user/assistant/tool 消息
+  ↓
+先逐字写入 Redis recent originals 和 Journal
+  ↓
+位于最近 N 轮/retain token 保护区
+  ├─ 是：保持原文，不提交 Headroom
+  └─ 否：成为 Headroom compression candidate
+           ↓
+        /v1/compress(originals only)
+           ↓
+        CompressionGeneration + CCR marker
+           ↓
+活动上下文达到 Claude L2 阈值
+  ↓
+优先 L4；L4 不可用或结果仍过长时调用 L3
+  ↓
+旧 L3/L4 summary + 尚未覆盖 generations + 待压缩的较旧原文
+  ↓
+新 L3/L4 summary + 最近完整尾部原文
+```
+
+常规路径应尽量让离开保护区的原文先变成 Headroom generation，再由 L3/L4 把
+generation 折叠进连续性摘要：
+
+```text
+原文 → Headroom generation → L4/L3 activity summary
+```
+
+这形成两个职责不同的压缩级别：
+
+| 级别 | 输入 | 输出 | 职责 |
+|---|---|---|---|
+| Headroom | 离开最近保护区的原文 | generation + CCR marker | 压缩细节并保持精确召回入口 |
+| L4/L3 | 旧摘要 + 未覆盖 generation + 必要的较旧原文 | 新活动摘要 | 折叠整个活动上下文并允许后续再次压缩 |
+
+#### 9.2.1 第一次递进压缩
+
+假设 A、B 已经离开最近保护区，尾部消息仍需逐字保留：
+
+```text
+原文 A + 原文 B
+       ↓ Headroom 后台压缩
+generation A + generation B
+       ↓ L2 达阈值，L4 优先、L3 兜底
+summary AB
+```
+
+compact 前活动上下文：
+
+```text
+generation A
++ generation B
++ 最近尾部原文
+```
+
+compact 后活动上下文：
+
+```text
+CompactBoundary(covered_through_sequence=B.through_sequence)
++ summary AB
++ 最近尾部原文
+```
+
+generation A、B 退出活动 prompt，但仍按现有策略保存在 Redis；CCR marker 和 Journal
+原文继续可召回。
+
+#### 9.2.2 第二次递进压缩
+
+继续聊天产生 C、D 时，C、D 首先保持为最近原文：
+
+```text
+summary AB + 原文 C + 原文 D + 最近尾部原文
+```
+
+当 C、D 离开最近保护区后，Headroom 生成新的未覆盖 generation：
+
+```text
+原文 C + 原文 D
+       ↓ Headroom
+generation CD
+```
+
+下一次 L2 达阈值时，L3/L4 看到的是最近 boundary 之后的有效活动上下文：
+
+```text
+summary AB + generation CD + 最近尾部原文
+                    ↓
+summary ABCD + 最近尾部原文
+```
+
+新 boundary 推进到 `generation CD.through_sequence`。旧 summary AB 参与生成新摘要，
+但不会与 summary ABCD 一起继续留在活动 prompt。
+
+#### 9.2.3 后续继续压缩
+
+E 同样先保持为最近原文，离开保护区后成为 generation E：
+
+```text
+summary ABCD + generation E + 最近尾部原文
+                     ↓
+summary ABCDE + 最近尾部原文
+```
+
+该过程可继续重复：
+
+```text
+summary(1..N) + new generations + old eligible originals
+                          ↓
+summary(1..N+M) + recent verbatim tail
+```
+
+这就是本项目对 Claude 同链 recompaction 的等价实现。
+
+#### 9.2.4 Headroom 尚未完成时的紧急路径
+
+L3 不得为了等待 Headroom worker 而让 Agent 请求超过硬上下文上限。如果 L2 已达到
+阈值，而部分已经离开最近保护区的原文尚未来得及生成 generation，L3 可以直接压缩
+当前活动上下文中的混合输入：
+
+```text
+上一版 summary
++ 已完成的 Headroom generations
++ 尚未完成 Headroom 压缩、但已离开保护区的较旧原文
++ 最近尾部原文（只保留，不纳入被替换前缀）
+```
+
+生成：
+
+```text
+新 summary + 最近尾部原文
+```
+
+约束如下：
+
+- 这是 Claude L3 对“当前有效上下文”执行 compact 的自然结果，不是另一套摘要算法。
+- 最近 N 轮/保尾算法选中的消息仍逐字保留，不能为了压缩率全部摘要掉。
+- 未完成的 Headroom job 可以继续执行；若返回时其 sequence 已被更新 boundary 覆盖，
+  generation 仍可作为 CCR/存储资产写入，但不得重新进入活动 prompt。
+- L3 摘要及旧 generation 永远不能作为 Headroom `/v1/compress` 的输入。
+- CAS 检查必须防止迟到的 Headroom 或 L3 结果回退最新 boundary/coverage。
+
+#### 9.2.5 L4 与 generation 的关系
+
+L4 Session Memory 同样消费当前活动上下文中的信息，包括旧活动摘要、尚未覆盖的
+Headroom generations 和必要的原文尾部。L4 在后台提前更新十章节工作记忆；L2 真正
+触发时，`try_session_memory_compaction()` 使用已完成的 Session Memory 快速创建新
+boundary，并保留 coverage 之后的安全尾部。
+
+因此 L4 并不是“把每个 generation 单独再摘要一次”，而是持续维护整个 session 的
+连续工作状态；generation 是它可观察的输入之一。L4 结果必须经过完整 post-compact
+token 复核，不足时仍回退 L3。
+
+### 9.3 generation 可见性
 
 不必修改 `CompressionGeneration` 的原始消息。活动组装时依据 boundary 计算可见性：
 
@@ -554,7 +712,7 @@ def generation_is_visible(
 `_execute_recompress()` 重命名为明确的 `_execute_evict_oldest_generation()`。
 generation 淘汰是存储降级，不再冒充 Claude compact。
 
-### 9.3 组装顺序
+### 9.4 组装顺序
 
 ```text
 CompactBoundary（内部状态，可投影为 system metadata）
@@ -814,6 +972,13 @@ Headroom generation 存储超预算
 ### 18.2 Headroom 融合测试
 
 - 正常 generation 输入仍然只包含 Journal/Redis 原文。
+- 新消息位于最近 N 轮/retain token 保护区时保持原文，不立即提交 Headroom。
+- 消息离开保护区后才成为 Headroom candidate，并生成未覆盖 generation。
+- 常规第二次 compact 的输入明确为上一版 summary + 新 generation + 最近原文尾部。
+- L2 已达阈值但 Headroom 尚未完成时，L3 能压缩旧 summary、已完成 generation 和
+  已离开保护区的较旧原文，同时逐字保留最近尾部。
+- 迟到的 Headroom generation 若已被新 boundary 覆盖，可以保存为 CCR 资产，但不会
+  再次进入活动 prompt，也不会回退 coverage。
 - L3/L4 summary 永不发送到 Headroom `/v1/compress`。
 - boundary 覆盖后的 generation 不再进入活动 prompt。
 - generation 退出活动 prompt 后仍保留 CCR marker 和 Redis 元数据。
@@ -851,13 +1016,17 @@ Headroom generation 存储超预算
 
 使 A+B+C+recent 超过 L2 阈值，验收：
 
-1. L4 命中时生成 boundary 并替换活动上下文，而不是删除 A。
-2. L4 不可用时 L3 生成 summary ABC。
-3. 新增 D 后再次超限，L3 输入为 summary ABC + D + recent，输出 summary ABCD。
-4. 活动 prompt token 确实降到阈值以下。
-5. 用户询问 A 中的精确内容时，Agent 自动 Grep→Read Journal 并正确回答。
-6. Journal A 原文逐字不变。
-7. Headroom generation/CCR 原有测试继续通过。
+1. A、B、C 在最近保护区内时保持原文；离开后才依次生成 Headroom generations。
+2. L4 命中时生成 boundary 并替换活动上下文，而不是删除 A。
+3. L4 不可用时 L3 生成 summary ABC。
+4. 新增 D 时先以最近原文存在；D 离开保护区并生成 generation D 后再次超限，L3
+   输入为 summary ABC + generation D + recent，输出 summary ABCD。
+5. 模拟 generation D 尚未生成但上下文已经超限，L3 仍能处理 summary ABC + D 原文，
+   并保留最近尾部；迟到的 generation D 不会重新进入活动 prompt。
+6. 活动 prompt token 确实降到阈值以下。
+7. 用户询问 A 中的精确内容时，Agent 自动 Grep→Read Journal 并正确回答。
+8. Journal A 原文逐字不变。
+9. Headroom generation/CCR 原有测试继续通过。
 
 ## 19. 分阶段实施
 
