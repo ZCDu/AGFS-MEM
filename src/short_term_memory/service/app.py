@@ -26,10 +26,15 @@ from short_term_memory.service.memory_service import (
     MemoryTranscriptScopeError,
     RetryableWriteError,
 )
+from short_term_memory.service.context_coordinator import (
+    ContextCompactionUnavailableError,
+)
 from short_term_memory.service.metrics import ApiMetrics
 from short_term_memory.service.schemas import (
     MemoryReadRequest,
     MemoryReadResponse,
+    MemoryPrepareRequest,
+    MemoryPrepareResponse,
     MemoryRecallRequest,
     MemoryRecallResponse,
     MemoryTranscriptGrepRequest,
@@ -52,6 +57,7 @@ _BUSINESS_PATHS = frozenset(
     {
         "/v1/memories/write",
         "/v1/memories/read",
+        "/v1/memories/prepare",
         "/v1/memories/recall",
         "/v1/memories/transcript/grep",
         "/v1/memories/transcript/read",
@@ -421,6 +427,16 @@ def create_app(
     ):
         app.add_exception_handler(error_type, unavailable_error)
 
+    @app.exception_handler(ContextCompactionUnavailableError)
+    async def context_compaction_unavailable(
+        request: Request, _error: ContextCompactionUnavailableError
+    ) -> JSONResponse:
+        return error_response(
+            request,
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "context_compaction_unavailable",
+        )
+
     @app.exception_handler(Exception)
     async def internal_error(request: Request, _error: Exception) -> JSONResponse:
         return error_response(
@@ -491,6 +507,41 @@ def create_app(
         response = await app.state.memory_service.read(body, request.state.request_id)
         observe_phases(response.timing_ms)
         return response
+
+    @app.post(
+        "/v1/memories/prepare",
+        response_model=MemoryPrepareResponse,
+        responses=_ERROR_RESPONSES,
+        dependencies=[Depends(authenticate)],
+    )
+    async def prepare_memory(request: Request, body: MemoryPrepareRequest) -> Any:
+        coordinator = getattr(
+            app.state,
+            "context_coordinator",
+            getattr(app.state.memory_service, "context_coordinator", None),
+        )
+        if coordinator is None:
+            prepare = getattr(app.state.memory_service, "prepare", None)
+            if prepare is None:
+                raise ContextCompactionUnavailableError(
+                    "context coordinator is unavailable"
+                )
+            return await prepare(body, request.state.request_id)
+        prepared = await coordinator.prepare(
+            user_id=body.user_id,
+            session_id=body.session_id,
+            model_profile=body.model_profile,
+            query_source=body.query_source,
+            history_turns=body.history_turns,
+        )
+        return MemoryPrepareResponse(
+            request_id=request.state.request_id,
+            messages=list(prepared.messages),
+            tools=list(prepared.tools),
+            headroom=prepared.headroom,
+            compacted=prepared.was_compacted,
+            boundary=prepared.boundary,
+        )
 
     @app.post(
         "/v1/memories/recall",

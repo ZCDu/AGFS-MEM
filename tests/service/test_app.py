@@ -18,6 +18,7 @@ from short_term_memory.service.schemas import (
     HeadroomProxyContext,
     MemoryReadResponse,
     MemoryReadState,
+    MemoryPrepareResponse,
     MemoryTranscriptGrepResponse,
     MemoryTranscriptReadResponse,
     MemoryWriteResponse,
@@ -82,6 +83,21 @@ class RecordingMemoryService:
             ),
             effective_config=None,
             timing_ms=ReadTiming(total=3.0, redis=1.0, recovery=0.0, assembly=0.5),
+        )
+
+    async def prepare(self, request, request_id):
+        self.calls.append(("prepare", request, request_id))
+        if self.next_error is not None:
+            raise self.next_error
+        return MemoryPrepareResponse(
+            request_id=request_id,
+            messages=[{"role": "user", "content": "prepared"}],
+            tools=[],
+            headroom=HeadroomProxyContext(
+                proxy_url="http://headroom:8787/v1", scope_headers={}
+            ),
+            compacted=False,
+            boundary=None,
         )
 
     async def recall(self, request, request_id):
@@ -189,7 +205,7 @@ async def call_asgi(app, scope, receive):
 
 
 @pytest.mark.asyncio
-async def test_only_five_business_routes_exist_and_openapi_documents_auth() -> None:
+async def test_only_approved_business_routes_exist_and_openapi_documents_auth() -> None:
     app = app_for(RecordingMemoryService())
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app), base_url="http://test"
@@ -200,6 +216,7 @@ async def test_only_five_business_routes_exist_and_openapi_documents_auth() -> N
         path for path in schema["paths"] if path.startswith("/v1/memories/")
     )
     assert business == [
+        "/v1/memories/prepare",
         "/v1/memories/read",
         "/v1/memories/recall",
         "/v1/memories/transcript/grep",
@@ -258,6 +275,32 @@ async def test_recall_contract_calls_only_the_injected_memory_service() -> None:
     assert body["results"][0]["hash"] == "abc123def456"
     assert body["results"][0]["recovered"] is True
     assert [call[0] for call in service.calls] == ["recall"]
+
+
+@pytest.mark.asyncio
+async def test_prepare_contract_returns_model_context_and_request_id() -> None:
+    service = RecordingMemoryService()
+    app = app_for(service)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        response = await client.post(
+            "/v1/memories/prepare",
+            headers=auth_headers(**{"x-request-id": "prepare-request"}),
+            json={
+                "user_id": "u",
+                "session_id": "s",
+                "model_profile": {
+                    "context_window_tokens": 200_000,
+                    "max_output_tokens": 32_000,
+                },
+            },
+        )
+
+    assert response.status_code == 200
+    assert response.json()["request_id"] == "prepare-request"
+    assert response.json()["messages"][0]["content"] == "prepared"
+    assert [call[0] for call in service.calls] == ["prepare"]
 
 
 @pytest.mark.asyncio

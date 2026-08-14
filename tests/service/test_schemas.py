@@ -6,6 +6,7 @@ from short_term_memory.service.schemas import (
     MemoryReadResponse,
     MemoryReadState,
     MemoryReadRequest,
+    MemoryPrepareRequest,
     MemoryTranscriptGrepRequest,
     MemoryTranscriptGrepResponse,
     MemoryTranscriptReadRequest,
@@ -15,6 +16,7 @@ from short_term_memory.service.schemas import (
     ReadTiming,
     WriteTiming,
 )
+from short_term_memory.compression.auto_compact import ModelProfile
 from short_term_memory.transcript.tool_definitions import (
     TRANSCRIPT_TOOL_DEFINITIONS,
 )
@@ -75,6 +77,22 @@ def test_read_request_accepts_optional_effective_config() -> None:
     )
 
     assert request.include_effective_config is True
+
+
+def test_prepare_schema_rejects_unknown_fields_and_embeds_model_profile() -> None:
+    request = MemoryPrepareRequest(
+        user_id="u",
+        session_id="s",
+        model_profile=ModelProfile(
+            context_window_tokens=200_000, max_output_tokens=32_000
+        ),
+    )
+    assert request.query_source == "main"
+    assert request.model_profile.context_window_tokens == 200_000
+    with pytest.raises(ValueError):
+        MemoryPrepareRequest.model_validate(
+            {**request.model_dump(), "unexpected": True}
+        )
 
 
 def test_transcript_schemas_bind_session_outside_model_tool_arguments() -> None:

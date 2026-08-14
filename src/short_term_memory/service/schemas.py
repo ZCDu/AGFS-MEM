@@ -1,14 +1,16 @@
 """Pydantic contracts for the two HTTP memory-service APIs."""
 
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
 from short_term_memory.models import (
+    CompactBoundary,
     JournalRole,
     MemoryContentType,
     SessionCompressionMessage,
 )
+from short_term_memory.compression.auto_compact import ModelProfile
 from short_term_memory.transcript.grep_tool import (
     TranscriptGrepRequest,
     TranscriptGrepResult,
@@ -119,6 +121,27 @@ class MemoryReadResponse(BaseModel):
     ccr_markers: list[str] = Field(default_factory=list)
     effective_config: EffectiveMemoryConfig | None
     timing_ms: ReadTiming
+
+
+class MemoryPrepareRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    user_id: str = Field(min_length=1)
+    session_id: str = Field(min_length=1)
+    model_profile: ModelProfile
+    query_source: Literal["main", "compact", "session_memory"] = "main"
+    history_turns: int | None = Field(default=None, ge=1)
+
+
+class MemoryPrepareResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    request_id: str = Field(min_length=1)
+    messages: list[SessionCompressionMessage]
+    tools: list[dict[str, Any]]
+    headroom: HeadroomProxyContext
+    compacted: bool
+    boundary: CompactBoundary | None = None
 
 
 class MemoryTranscriptGrepRequest(TranscriptGrepRequest):

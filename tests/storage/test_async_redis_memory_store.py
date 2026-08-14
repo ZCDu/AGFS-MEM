@@ -190,6 +190,18 @@ async def test_session_memory_extraction_release_compares_owner_token(
 
 
 @pytest.mark.asyncio
+async def test_context_compaction_lease_is_session_scoped_and_token_owned(
+    redis: AsyncFakeRedis,
+    memory_store: AsyncRedisMemoryStore,
+) -> None:
+    assert await memory_store.acquire_context_compaction_lease("u", "s", "one")
+    assert not await memory_store.acquire_context_compaction_lease("u", "s", "two")
+    assert not await memory_store.release_context_compaction_lease("u", "s", "two")
+    assert await memory_store.release_context_compaction_lease("u", "s", "one")
+    assert redis.ttls.get("dream:session:u:s:context-compaction-lock") is None
+
+
+@pytest.mark.asyncio
 async def test_commit_rejects_different_digest_for_reserved_event(
     memory_store: AsyncRedisMemoryStore,
 ) -> None:

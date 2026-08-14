@@ -458,6 +458,32 @@ class AsyncRedisMemoryStore:
         )
         return self._result(result)[0] == "1"
 
+    async def acquire_context_compaction_lease(
+        self, user_id: str, session_id: str, token: str
+    ) -> bool:
+        if not token:
+            raise ValueError("context lease token must not be blank")
+        result = await self.client.set(
+            self._keys(user_id, session_id).context_compaction_lock,
+            token,
+            nx=True,
+            px=300_000,
+        )
+        return bool(result)
+
+    async def release_context_compaction_lease(
+        self, user_id: str, session_id: str, token: str
+    ) -> bool:
+        if not token:
+            raise ValueError("context lease token must not be blank")
+        result = await self.client.eval(
+            RELEASE_LEASE_SCRIPT,
+            1,
+            self._keys(user_id, session_id).context_compaction_lock,
+            token,
+        )
+        return self._result(result)[0] == "1"
+
     @staticmethod
     def _events(values: list[Any]) -> tuple[MemoryEvent, ...]:
         return tuple(
@@ -489,6 +515,7 @@ class AsyncRedisMemoryStore:
             ),
             compression_lock=f"{prefix}:compression-lock",
             session_memory_extraction=f"{prefix}:session-memory-extraction",
+            context_compaction_lock=f"{prefix}:context-compaction-lock",
             pending_reservations=f"{prefix}:pending-reservations",
             ccr_summaries=f"{prefix}:ccr-summaries",
         )
@@ -504,6 +531,7 @@ class _Keys:
         event: str,
         compression_lock: str,
         session_memory_extraction: str,
+        context_compaction_lock: str,
         pending_reservations: str,
         ccr_summaries: str,
     ) -> None:
@@ -513,5 +541,6 @@ class _Keys:
         self.event = event
         self.compression_lock = compression_lock
         self.session_memory_extraction = session_memory_extraction
+        self.context_compaction_lock = context_compaction_lock
         self.pending_reservations = pending_reservations
         self.ccr_summaries = ccr_summaries
