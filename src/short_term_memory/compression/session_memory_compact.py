@@ -6,7 +6,10 @@ from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 import uuid
 
-from short_term_memory.compression.context_messages import to_provider_messages
+from short_term_memory.compression.context_messages import (
+    annotate_active_message,
+    to_provider_messages,
+)
 from short_term_memory.compression.compact_prompt import (
     get_compact_user_summary_message,
 )
@@ -23,6 +26,8 @@ from short_term_memory.compression.session_memory_prompt import (
 )
 from short_term_memory.models import (
     CompactBoundary,
+    ContextRevision,
+    MemoryEvent,
     SessionCompressionMessage,
     SessionMemoryRevision,
 )
@@ -188,6 +193,53 @@ def _create_result(
         post_compact_token_count=context.token_estimator.estimate(
             to_provider_messages((summary,))
         ),
+    )
+
+
+def materialize_session_memory_recovery_revision(
+    *,
+    session_memory: SessionMemoryRevision,
+    recent_originals: tuple[MemoryEvent, ...],
+    now: datetime,
+) -> ContextRevision:
+    """Materialize Claude's L4 compact projection without another model call."""
+
+    keep = tuple(
+        annotate_active_message(
+            SessionCompressionMessage(
+                role=event.role.value,
+                content=event.content,
+                stm_timestamp=event.created_at,
+            ),
+            from_sequence=event.sequence,
+            through_sequence=event.sequence,
+            group_id=f"event:{event.sequence}",
+        )
+        for event in recent_originals
+        if event.sequence > session_memory.covered_through_sequence
+    )
+    boundary = CompactBoundary(
+        boundary_id=(
+            f"recovery:{session_memory.version}:"
+            f"{session_memory.covered_through_sequence}"
+        ),
+        trigger="reactive",
+        strategy="session_memory",
+        covered_through_sequence=session_memory.covered_through_sequence,
+        pre_compact_tokens=session_memory.token_count,
+        true_post_compact_tokens=session_memory.token_count,
+        created_at=now.isoformat(),
+    )
+    return ContextRevision(
+        version=1,
+        boundary=boundary,
+        summary_message=get_compact_user_summary_message(
+            session_memory.content,
+            suppress_follow_up_questions=True,
+            recent_messages_preserved=bool(keep),
+        ),
+        messages_to_keep=keep,
+        updated_at=now.isoformat(),
     )
 
 

@@ -6,10 +6,12 @@ from short_term_memory.compression.session_memory_compact import (
     SessionMemoryCompactContext,
     build_post_compact_messages,
     find_coverage_index,
+    materialize_session_memory_recovery_revision,
     try_session_memory_compaction,
 )
 from short_term_memory.compression.session_memory_prompt import EMPTY_SESSION_MEMORY
 from short_term_memory.models import SessionCompressionMessage, SessionMemoryRevision
+from tests.factories import memory_event
 
 
 NOW = datetime(2026, 8, 14, 9, 0, tzinfo=timezone.utc)
@@ -61,6 +63,25 @@ def ordinary_messages(count: int = 8, *, tokens: int = 2_000):
         )
         for index in range(1, count + 1)
     )
+
+
+def test_materialize_l4_recovery_revision_needs_no_model_and_keeps_recent_tail():
+    recovered = materialize_session_memory_recovery_revision(
+        session_memory=revision(through=80, content="session memory facts"),
+        recent_originals=(
+            memory_event(sequence=79, event_id="old", content="old"),
+            memory_event(sequence=80, event_id="covered", content="covered"),
+            memory_event(sequence=81, event_id="tail", content="new tail"),
+        ),
+        now=NOW,
+    )
+
+    assert recovered.boundary.strategy == "session_memory"
+    assert recovered.boundary.trigger == "reactive"
+    assert recovered.boundary.covered_through_sequence == 80
+    assert "session memory facts" in str(recovered.summary_message.content)
+    assert [item.content for item in recovered.messages_to_keep] == ["new tail"]
+    assert recovered.messages_to_keep[0].model_extra["stm_sequence_through"] == 81
 
 
 @pytest.mark.asyncio
