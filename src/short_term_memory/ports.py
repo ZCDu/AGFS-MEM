@@ -32,6 +32,8 @@ class AsyncMemoryStore(Protocol):
         self, user_id: str, session_id: str, history_turns: int
     ) -> tuple[MemoryEvent, ...]: ...
 
+    async def read_latest_sequence(self, user_id: str, session_id: str) -> int: ...
+
     async def read_envelope(
         self, user_id: str, session_id: str
     ) -> MemorySummaryEnvelope | None: ...
@@ -67,4 +69,22 @@ class AsyncMemoryStore(Protocol):
         user_id: str,
         session_id: str,
         originals: tuple[MemoryEvent, ...],
+    ) -> bool: ...
+
+    async def restore_session_projection(
+        self,
+        user_id: str,
+        session_id: str,
+        *,
+        latest_sequence: int,
+        originals: tuple[MemoryEvent, ...],
+        envelope: MemorySummaryEnvelope | None,
+    ) -> bool: ...
+
+    async def acquire_session_activation_lease(
+        self, user_id: str, session_id: str, token: str
+    ) -> bool: ...
+
+    async def release_session_activation_lease(
+        self, user_id: str, session_id: str, token: str
     ) -> bool: ...

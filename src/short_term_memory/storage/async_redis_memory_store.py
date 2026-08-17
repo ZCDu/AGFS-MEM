@@ -92,6 +92,30 @@ redis.call('EXPIRE', KEYS[2], ttl)
 return {'restored'}
 """
 
+RESTORE_SESSION_PROJECTION_SCRIPT = """
+-- dream:restore-session-projection-v1
+if redis.call('EXISTS', KEYS[1]) == 1
+  or redis.call('LLEN', KEYS[2]) > 0
+  or redis.call('EXISTS', KEYS[3]) == 1
+  or redis.call('SCARD', KEYS[4]) > 0 then
+  return {'not_restored'}
+end
+local originals = cjson.decode(ARGV[1])
+for _, event in ipairs(originals) do
+  local event_key = ARGV[2] .. event.event_id
+  redis.call('HSET', event_key, 'digest', event.sha256, 'status', 'committed',
+    'sequence', tostring(event.sequence))
+  redis.call('EXPIRE', event_key, ARGV[3])
+  redis.call('RPUSH', KEYS[2], cjson.encode(event))
+end
+redis.call('SET', KEYS[1], ARGV[4], 'EX', ARGV[3])
+if #originals > 0 then redis.call('EXPIRE', KEYS[2], ARGV[3]) end
+if ARGV[5] ~= '' then
+  redis.call('SET', KEYS[3], ARGV[5], 'EX', ARGV[3])
+end
+return {'restored'}
+"""
+
 CAS_ENVELOPE_SCRIPT = """
 -- dream:compare-and-set-envelope
 local current = redis.call('GET', KEYS[1])
@@ -277,6 +301,54 @@ class AsyncRedisMemoryStore:
             raise EventConflictError("journal originals conflict with Redis reservation")
         raise ValueError("unexpected restore result")
 
+    async def restore_session_projection(
+        self,
+        user_id: str,
+        session_id: str,
+        *,
+        latest_sequence: int,
+        originals: tuple[MemoryEvent, ...],
+        envelope: MemorySummaryEnvelope | None,
+    ) -> bool:
+        """Atomically restore a cold session's bounded Redis projection."""
+
+        if latest_sequence < 0:
+            raise ValueError("latest_sequence must not be negative")
+        ordered = tuple(sorted(originals, key=lambda event: event.sequence))
+        if ordered != originals or len({event.event_id for event in originals}) != len(
+            originals
+        ):
+            raise ValueError("originals must have ordered unique event IDs")
+        if len({event.sequence for event in originals}) != len(originals):
+            raise ValueError("originals must have unique sequences")
+        if originals and latest_sequence < originals[-1].sequence:
+            raise ValueError("latest_sequence must cover all restored originals")
+
+        keys = self._keys(user_id, session_id)
+        result = await self.client.eval(
+            RESTORE_SESSION_PROJECTION_SCRIPT,
+            4,
+            keys.sequence,
+            keys.messages,
+            keys.summary,
+            keys.pending_reservations,
+            json.dumps(
+                [event.model_dump(mode="json") for event in originals],
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ),
+            f"{keys.sequence.rsplit(':sequence', 1)[0]}:event:",
+            str(self.ttl_seconds),
+            str(latest_sequence),
+            envelope.model_dump_json() if envelope is not None else "",
+        )
+        state = self._result(result)[0]
+        if state == "restored":
+            return True
+        if state == "not_restored":
+            return False
+        raise ValueError("unexpected session projection restore result")
+
     async def read_recent_originals(
         self, user_id: str, session_id: str, history_turns: int
     ) -> tuple[MemoryEvent, ...]:
@@ -286,6 +358,10 @@ class AsyncRedisMemoryStore:
         return select_recent_turns(
             self._events(await self.client.lrange(keys.messages, 0, -1)), history_turns
         )
+
+    async def read_latest_sequence(self, user_id: str, session_id: str) -> int:
+        value = await self.client.get(self._keys(user_id, session_id).sequence)
+        return 0 if value is None else int(self._text(value))
 
     async def read_originals_after(
         self, user_id: str, session_id: str, sequence: int
@@ -484,6 +560,32 @@ class AsyncRedisMemoryStore:
         )
         return self._result(result)[0] == "1"
 
+    async def acquire_session_activation_lease(
+        self, user_id: str, session_id: str, token: str
+    ) -> bool:
+        if not token:
+            raise ValueError("activation lease token must not be blank")
+        result = await self.client.set(
+            self._keys(user_id, session_id).activation_lock,
+            token,
+            nx=True,
+            px=60_000,
+        )
+        return bool(result)
+
+    async def release_session_activation_lease(
+        self, user_id: str, session_id: str, token: str
+    ) -> bool:
+        if not token:
+            raise ValueError("activation lease token must not be blank")
+        result = await self.client.eval(
+            RELEASE_LEASE_SCRIPT,
+            1,
+            self._keys(user_id, session_id).activation_lock,
+            token,
+        )
+        return self._result(result)[0] == "1"
+
     @staticmethod
     def _events(values: list[Any]) -> tuple[MemoryEvent, ...]:
         return tuple(
@@ -516,6 +618,7 @@ class AsyncRedisMemoryStore:
             compression_lock=f"{prefix}:compression-lock",
             session_memory_extraction=f"{prefix}:session-memory-extraction",
             context_compaction_lock=f"{prefix}:context-compaction-lock",
+            activation_lock=f"{prefix}:activation-lock",
             pending_reservations=f"{prefix}:pending-reservations",
             ccr_summaries=f"{prefix}:ccr-summaries",
         )
@@ -532,6 +635,7 @@ class _Keys:
         compression_lock: str,
         session_memory_extraction: str,
         context_compaction_lock: str,
+        activation_lock: str,
         pending_reservations: str,
         ccr_summaries: str,
     ) -> None:
@@ -542,5 +646,6 @@ class _Keys:
         self.compression_lock = compression_lock
         self.session_memory_extraction = session_memory_extraction
         self.context_compaction_lock = context_compaction_lock
+        self.activation_lock = activation_lock
         self.pending_reservations = pending_reservations
         self.ccr_summaries = ccr_summaries

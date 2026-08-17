@@ -176,6 +176,39 @@ class AsyncFakeRedis:
                 self.ttls[sequence_key] = int(ttl)
                 self.ttls[messages_key] = int(ttl)
                 return ["restored"]
+            if "dream:restore-session-projection-v1" in script:
+                import json
+
+                assert numkeys == 4 and len(args) == 9
+                sequence_key, messages_key, summary_key, pending_key = keys
+                originals = json.loads(values[0])
+                event_prefix, ttl, latest_sequence, serialized_envelope = values[1:]
+                if (
+                    sequence_key in self.values
+                    or self.lists.get(messages_key)
+                    or summary_key in self.values
+                    or self.sets.get(pending_key)
+                ):
+                    return ["not_restored"]
+                for event in originals:
+                    event_key = f"{event_prefix}{event['event_id']}"
+                    self.hashes[event_key] = {
+                        "digest": event["sha256"],
+                        "status": "committed",
+                        "sequence": str(event["sequence"]),
+                    }
+                    self.ttls[event_key] = int(ttl)
+                    self.lists.setdefault(messages_key, []).append(
+                        json.dumps(event, separators=(",", ":"))
+                    )
+                self.values[sequence_key] = latest_sequence
+                self.ttls[sequence_key] = int(ttl)
+                if originals:
+                    self.ttls[messages_key] = int(ttl)
+                if serialized_envelope:
+                    self.values[summary_key] = serialized_envelope
+                    self.ttls[summary_key] = int(ttl)
+                return ["restored"]
             if "dream:compare-and-set-envelope" in script:
                 assert numkeys == 1 and len(args) == 4
                 summary_key = keys[0]

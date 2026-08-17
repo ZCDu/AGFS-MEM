@@ -265,6 +265,74 @@ async def test_restore_originals_preserves_sequences_and_advances_next_reservati
 
 
 @pytest.mark.asyncio
+async def test_restore_session_projection_sets_history_max_not_tail_max(
+    memory_store: AsyncRedisMemoryStore,
+) -> None:
+    tail = tuple(
+        memory_event(sequence=sequence, event_id=f"event-{sequence}")
+        for sequence in range(91, 101)
+    )
+    restored_envelope = envelope(version=7)
+
+    assert await memory_store.restore_session_projection(
+        "u",
+        "s",
+        latest_sequence=180,
+        originals=tail,
+        envelope=restored_envelope,
+    )
+    assert await memory_store.read_latest_sequence("u", "s") == 180
+    assert await memory_store.read_recent_originals("u", "s", 10) == tail
+    assert await memory_store.read_envelope("u", "s") == restored_envelope
+    assert (
+        await memory_store.reserve_event("u", "s", "event-181", "a" * 64)
+    ).sequence == 181
+
+
+@pytest.mark.asyncio
+async def test_restore_session_projection_refuses_live_or_pending_state(
+    memory_store: AsyncRedisMemoryStore,
+) -> None:
+    await memory_store.reserve_event("u", "s", "live", "a" * 64)
+
+    assert not await memory_store.restore_session_projection(
+        "u",
+        "s",
+        latest_sequence=100,
+        originals=(memory_event(sequence=100, event_id="history"),),
+        envelope=None,
+    )
+    assert await memory_store.read_latest_sequence("u", "s") == 1
+
+
+@pytest.mark.asyncio
+async def test_restore_session_projection_validates_history_sequence(
+    memory_store: AsyncRedisMemoryStore,
+) -> None:
+    with pytest.raises(ValueError, match="latest_sequence"):
+        await memory_store.restore_session_projection(
+            "u",
+            "s",
+            latest_sequence=99,
+            originals=(memory_event(sequence=100, event_id="history"),),
+            envelope=None,
+        )
+
+
+@pytest.mark.asyncio
+async def test_session_activation_lease_is_exclusive_and_token_scoped(
+    redis: AsyncFakeRedis,
+    memory_store: AsyncRedisMemoryStore,
+) -> None:
+    assert await memory_store.acquire_session_activation_lease("u", "s", "one")
+    assert not await memory_store.acquire_session_activation_lease("u", "s", "two")
+    assert not await memory_store.release_session_activation_lease("u", "s", "two")
+    assert await memory_store.release_session_activation_lease("u", "s", "one")
+    assert await memory_store.acquire_session_activation_lease("u", "s", "two")
+    assert redis.ttls["dream:session:u:s:activation-lock"] == 60
+
+
+@pytest.mark.asyncio
 async def test_restore_refuses_any_live_sequence_counter_or_reservation(
     memory_store: AsyncRedisMemoryStore,
 ) -> None:
