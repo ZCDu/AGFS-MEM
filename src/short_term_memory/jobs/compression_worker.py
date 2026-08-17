@@ -12,6 +12,7 @@ from short_term_memory.compression.ccr_recall import extract_marker_hashes
 from short_term_memory.compression.generations import CompressionCandidate, GenerationPlanner
 from short_term_memory.compression.scope import OptimizationScopeFactory
 from short_term_memory.jobs.redis_compression_queue import (
+    CompressionJob,
     CompressionJobLease,
     RedisCompressionQueue,
 )
@@ -139,7 +140,7 @@ class CompressionWorker:
         envelope = await self.store.read_envelope(job.user_id, job.session_id)
         current_version = envelope.version if envelope is not None else 0
         if current_version != job.expected_version:
-            return await self._ack(lease, "stale")
+            return await self._ack_stale_rebuild(lease, envelope, now)
 
         # Storage-pressure eviction is deliberately separate from Claude L2/L3/L4.
         if job.evict_oldest_generation:
@@ -147,7 +148,8 @@ class CompressionWorker:
 
         candidate = await self._candidate(job, envelope, now)
         if candidate is None or candidate.expected_version != job.expected_version:
-            return await self._ack(lease, "stale")
+            latest = await self.store.read_envelope(job.user_id, job.session_id)
+            return await self._ack_stale_rebuild(lease, latest, now)
         if not candidate.originals:
             return await self._ack(lease, "acked")
 
@@ -176,7 +178,8 @@ class CompressionWorker:
             job.user_id, job.session_id, job.expected_version, next_envelope
         )
         if not written:
-            return await self._ack(lease, "stale")
+            latest = await self.store.read_envelope(job.user_id, job.session_id)
+            return await self._ack_stale_rebuild(lease, latest, self._now())
         # Record hash -> content summary for each marker so recall can match by query.
         try:
             await self._record_ccr_summaries(
@@ -339,6 +342,37 @@ class CompressionWorker:
         if result == "lost":
             return CompressionWorkerResult("lost", lease.job.job_id)
         return CompressionWorkerResult(state, lease.job.job_id)
+
+    async def _ack_stale_rebuild(
+        self,
+        lease: CompressionJobLease,
+        envelope: MemorySummaryEnvelope | None,
+        now: datetime,
+    ) -> CompressionWorkerResult:
+        job = lease.job
+        if (
+            job.rebuild
+            and not job.evict_oldest_generation
+            and not self._has_fresh_rebuild_coverage(envelope, job, now)
+        ):
+            current_version = envelope.version if envelope is not None else 0
+            await self.queue.enqueue(job.rebased(expected_version=current_version))
+        return await self._ack(lease, "stale")
+
+    def _has_fresh_rebuild_coverage(
+        self,
+        envelope: MemorySummaryEnvelope | None,
+        job: CompressionJob,
+        now: datetime,
+    ) -> bool:
+        if envelope is None:
+            return False
+        return any(
+            generation.from_sequence == 1
+            and generation.through_sequence >= job.requested_through_sequence
+            and self._aware_datetime(generation.ccr_expires_at) > now
+            for generation in envelope.compression_generations
+        )
 
     async def _return_cancelled_lease(
         self, lease: CompressionJobLease, session_token: str

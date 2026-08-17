@@ -603,6 +603,48 @@ async def test_stale_worker_is_acked_without_overwrite(worker):
 
 
 @pytest.mark.asyncio
+async def test_stale_activation_rebuild_requeues_against_new_envelope_version(worker):
+    worker, store, _ = worker
+    assert await store.compare_and_set_envelope("u", "s", 0, envelope(version=2))
+    job = compression_job(through_sequence=10, expected_version=1).model_copy(
+        update={"rebuild": True}
+    )
+    await worker.queue.enqueue(job)
+    original_enqueue = worker.queue.enqueue
+    worker.queue.enqueue = AsyncMock(wraps=original_enqueue)
+
+    result = await worker.run_once()
+
+    assert result.state == "stale"
+    worker.queue.enqueue.assert_awaited_once()
+    replacement = worker.queue.enqueue.await_args.args[0]
+    assert replacement.expected_version == 2
+    assert replacement.requested_through_sequence == 10
+    assert replacement.rebuild is True
+    assert replacement.job_id != job.job_id
+
+
+@pytest.mark.asyncio
+async def test_stale_rebuild_does_not_requeue_when_fresh_generation_covers_range(worker):
+    worker, store, _ = worker
+    now = datetime(2026, 8, 6, tzinfo=timezone.utc)
+    worker.clock = lambda: now
+    covered = envelope(version=2, through=10, generations=(generation(1, 1, 10, "fresh"),))
+    assert await store.compare_and_set_envelope("u", "s", 0, covered)
+    job = compression_job(through_sequence=10, expected_version=1).model_copy(
+        update={"rebuild": True}
+    )
+    await worker.queue.enqueue(job)
+    original_enqueue = worker.queue.enqueue
+    worker.queue.enqueue = AsyncMock(wraps=original_enqueue)
+
+    result = await worker.run_once()
+
+    assert result.state == "stale"
+    worker.queue.enqueue.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_worker_reports_lost_when_successful_cas_cannot_ack(worker):
     worker, store, _ = worker
     worker.queue.ack = AsyncMock(return_value=False)

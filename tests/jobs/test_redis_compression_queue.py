@@ -208,6 +208,21 @@ def test_legacy_recompress_job_lazily_migrates_to_generation_eviction() -> None:
     assert "recompress" not in migrated.model_dump(mode="json")
 
 
+def test_rebased_rebuild_preserves_scope_and_coverage_but_changes_identity() -> None:
+    old = compression_job(
+        job_id="old", through_sequence=180, expected_version=2
+    ).model_copy(update={"rebuild": True})
+
+    new = old.rebased(expected_version=3)
+
+    assert new.user_id == old.user_id
+    assert new.session_id == old.session_id
+    assert new.expected_version == 3
+    assert new.requested_through_sequence == 180
+    assert new.rebuild is True
+    assert new.job_id != old.job_id
+
+
 @pytest.mark.asyncio
 async def test_rebuild_intent_survives_queue_round_trip_and_wins_same_coverage():
     redis = QueueRedis()

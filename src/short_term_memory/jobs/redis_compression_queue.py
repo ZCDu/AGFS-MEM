@@ -2,6 +2,7 @@
 
 from dataclasses import dataclass
 from typing import Any, Mapping, Protocol
+from uuid import NAMESPACE_URL, uuid5
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -40,6 +41,25 @@ class CompressionJob(BaseModel):
         if "evict_oldest_generation" not in migrated or legacy is True:
             migrated["evict_oldest_generation"] = legacy
         return migrated
+
+    def rebased(self, *, expected_version: int) -> "CompressionJob":
+        """Retarget a durable full rebuild after an envelope-version race."""
+
+        if not self.rebuild:
+            raise ValueError("only rebuild jobs can be rebased")
+        if expected_version < 0:
+            raise ValueError("expected_version must not be negative")
+        identity = (
+            f"{self.user_id}\n{self.session_id}\n{expected_version}\n"
+            f"{self.requested_through_sequence}\nTrue\n"
+            f"{self.evict_oldest_generation}"
+        )
+        return self.model_copy(
+            update={
+                "job_id": f"memory-{uuid5(NAMESPACE_URL, identity).hex}",
+                "expected_version": expected_version,
+            }
+        )
 
 
 @dataclass(frozen=True)
