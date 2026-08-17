@@ -15,6 +15,7 @@ from short_term_memory.service.memory_service import (
     RetryableWriteError,
 )
 from short_term_memory.service.schemas import (
+    MemoryReadRequest,
     MemoryTranscriptGrepRequest,
     MemoryTranscriptReadRequest,
 )
@@ -353,6 +354,42 @@ async def test_read_recovers_recent_originals_from_journal_when_redis_is_empty(s
     assert response.memory.latest_sequence == 1
     assert response.messages[-1].content == "journal-original"
     assert service.store.events == [recovered]
+
+
+@pytest.mark.asyncio
+async def test_read_history_mode_returns_compressed_view_not_journal_originals(service):
+    """history=true must return the compressed summary only, never restore journal
+    originals (so opening a historical session cannot fill the context)."""
+    now = datetime(2026, 8, 6, tzinfo=timezone.utc)
+    generation = CompressionGeneration(
+        generation=1,
+        from_sequence=1,
+        through_sequence=1,
+        messages=({"role": "system", "content": "HR-COMPRESSED-SEGMENT"},),
+        tokens_before=100,
+        tokens_after=50,
+        created_at=now.isoformat(),
+        ccr_expires_at=(now + timedelta(hours=1)).isoformat(),
+    )
+    service.store.seed_envelope(envelope(through=1, generations=[generation]))
+    # Journal has originals that must NOT be restored in history mode.
+    service.journals.events.append(
+        memory_event(sequence=1, event_id="event-1", content="journal-original-not-for-history")
+    )
+
+    request = MemoryReadRequest(
+        user_id="u",
+        session_id="s",
+        history_turns=10,
+        include_effective_config=True,
+        history=True,
+    )
+    response = await service.read(request, "req-2")
+
+    # Compressed segment present; journal original absent.
+    assert any("HR-COMPRESSED-SEGMENT" in str(m.content) for m in response.messages)
+    assert not any("journal-original-not-for-history" in str(m.content) for m in response.messages)
+    assert response.memory.source != "journal_rebuild"
 
 
 @pytest.mark.asyncio

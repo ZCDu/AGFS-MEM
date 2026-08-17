@@ -105,6 +105,49 @@ async def test_agent_chat_handles_recall_tool_call_loop() -> None:
     )
 
 
+@pytest.mark.asyncio
+async def test_preview_history_returns_compressed_view() -> None:
+    client = AgentChatClient(
+        memory_api_url="http://test",
+        model_call=lambda **kw: {"content": "x", "tool_calls": []},
+        http_client=httpx.AsyncClient(transport=httpx.MockTransport(_recall_handler)),
+    )
+    try:
+        preview = await client.preview_history("u-1", "s-1")
+    finally:
+        await client.aclose()
+
+    assert preview["user_id"] == "u-1"
+    assert preview["session_id"] == "s-1"
+    assert len(preview["messages"]) > 0
+    assert preview["ccr_markers"] == ["abc123"]
+
+
+def test_format_history_preview_shows_full_content() -> None:
+    long_content = "X" * 500
+    preview = {
+        "session_id": "s-1",
+        "messages": [
+            {"role": "user", "content": long_content},
+            {"role": "assistant", "content": "short"},
+        ],
+        "ccr_markers": ["abc123"],
+    }
+    text = AgentChatClient.format_history_preview(preview)
+    # Full content present, no truncation.
+    assert long_content in text
+    assert "…" not in text
+    assert "[user]" in text
+    assert "[assistant]" in text
+
+
+def test_format_history_preview_empty() -> None:
+    text = AgentChatClient.format_history_preview(
+        {"session_id": "s-1", "messages": [], "ccr_markers": []}
+    )
+    assert "无历史记忆" in text
+
+
 def tool_call(call_id: str, name: str, arguments: dict) -> dict:
     return {
         "content": None,

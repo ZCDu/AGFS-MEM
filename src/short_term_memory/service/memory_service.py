@@ -348,12 +348,12 @@ class MemoryService:
         recovery_seconds = 0.0
         source = "redis"
 
-        # If Redis originals are gone but a compressed summary exists, prefer the
-        # compressed context (per design doc 5.1: when switching back to a historical
-        # session, pull Headroom's compressed content, not the full original journal,
-        # which would be too long). Only restore journal originals when there is no
-        # compressed summary at all.
-        if not originals and envelope is None:
+        # History view: when the caller opens a historical session (history=true),
+        # return only the compressed summary (semantic summary + marker segments),
+        # never restore the full original journal, so history cannot fill the context.
+        if request.history:
+            originals = ()
+        elif not originals and envelope is None:
             recovery_started = time.perf_counter()
             originals = await anyio.to_thread.run_sync(
                 self.journals.read_recent_originals,

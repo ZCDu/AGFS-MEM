@@ -199,6 +199,64 @@ class AgentChatClient:
         )
         return answer
 
+    async def preview_history(
+        self,
+        user_id: str,
+        session_id: str,
+        *,
+        history_turns: int | None = None,
+    ) -> dict[str, Any]:
+        """Preview a historical session's compressed view without restoring originals.
+
+        Calls read with ``history=true`` so it returns only the compressed summary
+        (semantic summary + compressed segments with markers), never the full
+        original journal — opening a historical session cannot fill the context.
+        """
+        memory = await self._post(
+            "/v1/memories/read",
+            {
+                "user_id": user_id,
+                "session_id": session_id,
+                "history_turns": history_turns,
+                "history": True,
+            },
+        )
+        messages = list(memory.get("messages") or [])
+        ccr_markers = list(memory.get("ccr_markers") or [])
+        memory_state = memory.get("memory") or {}
+        return {
+            "user_id": user_id,
+            "session_id": session_id,
+            "messages": messages,
+            "ccr_markers": ccr_markers,
+            "compressed_through_sequence": memory_state.get("compressed_through_sequence"),
+            "compression_segments": memory_state.get("compression_segments"),
+            "source": memory_state.get("source"),
+        }
+
+    @staticmethod
+    def format_history_preview(preview: Mapping[str, Any]) -> str:
+        """Render a history preview as full (untruncated) text for display."""
+        messages = preview.get("messages") or []
+        markers = preview.get("ccr_markers") or []
+        if not messages:
+            return f"[history] 会话 {preview.get('session_id')} 无历史记忆（新会话）"
+        lines: list[str] = [
+            f"[history] 历史会话 {preview.get('session_id')} 的压缩上下文 "
+            f"（{len(messages)} 条，{len(markers)} 个可召回标记）：",
+            "─" * 60,
+        ]
+        for m in messages:
+            role = m.get("role", "?")
+            content = m.get("content", "")
+            if isinstance(content, str):
+                lines.append(f"  [{role}]")
+                lines.append(f"  {content}")
+            else:
+                lines.append(f"  [{role}] (非文本内容: {type(content).__name__})")
+        lines.append("─" * 60)
+        return "\n".join(lines)
+
     async def _ask(
         self,
         messages: list[dict[str, Any]],

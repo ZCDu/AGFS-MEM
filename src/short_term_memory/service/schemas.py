@@ -89,6 +89,7 @@ class MemoryReadRequest(BaseModel):
     session_id: str = Field(min_length=1)
     history_turns: int | None = Field(default=None, ge=1)
     include_effective_config: bool = False
+    history: bool = False
 
 
 class MemoryReadState(BaseModel):

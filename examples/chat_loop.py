@@ -119,6 +119,13 @@ def main() -> None:
     )
 
     async def run() -> None:
+        # Preview the historical session's compressed view on open.
+        try:
+            preview = await client.preview_history(args.user_id, args.session_id)
+            print(AgentChatClient.format_history_preview(preview))
+        except Exception as exc:  # noqa: BLE001
+            print(f"[history] 预览历史失败: {type(exc).__name__}: {exc}")
+
         # If --file is given, send it as the first user turn.
         if args.file:
             from pathlib import Path
