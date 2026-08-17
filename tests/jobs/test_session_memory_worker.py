@@ -128,6 +128,9 @@ async def test_worker_updates_memory_and_coverage_only_after_valid_output(tmp_pa
         {"role": "assistant", "content": "new answer"},
     )
     assert model.update_calls[0]["query_source"] == "session_memory"
+    checkpoint = worker.journals.read_latest_compaction_checkpoint("u", "s")
+    assert checkpoint is not None
+    assert checkpoint.session_memory == saved.session_memory
 
 
 @pytest.mark.asyncio
@@ -190,3 +193,4 @@ async def test_cas_conflict_after_model_update_returns_stale_without_advancing(t
     assert queue.acked
     assert saved is not None and saved.version == 2
     assert saved.session_memory is None
+    assert worker.journals.read_latest_compaction_checkpoint("u", "s") is None

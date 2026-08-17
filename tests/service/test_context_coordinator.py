@@ -81,6 +81,15 @@ class Store:
         return True
 
 
+class RecordingCheckpointJournal:
+    def __init__(self) -> None:
+        self.checkpoints = []
+
+    def append_compaction_checkpoint(self, user_id, session_id, checkpoint):
+        assert (user_id, session_id) == ("u", "s")
+        self.checkpoints.append(checkpoint)
+
+
 def event(sequence, content):
     return MemoryEvent(
         sequence=sequence,
@@ -125,7 +134,15 @@ def result(summary="new summary"):
     )
 
 
-def coordinator(store, *, tokens, compact=None, calls=None, microcompact_config=None):
+def coordinator(
+    store,
+    *,
+    tokens,
+    compact=None,
+    calls=None,
+    microcompact_config=None,
+    checkpoint_journal=None,
+):
     calls = calls if calls is not None else []
     estimator = Estimator(tokens)
 
@@ -152,6 +169,7 @@ def coordinator(store, *, tokens, compact=None, calls=None, microcompact_config=
 
     return ContextCoordinator(
         store=store,
+        checkpoint_journal=checkpoint_journal or RecordingCheckpointJournal(),
         token_estimator=estimator,
         auto_context_factory=factory,
         history_turns=10,
@@ -168,7 +186,13 @@ PROFILE = ModelProfile(context_window_tokens=200_000, max_output_tokens=32_000)
 @pytest.mark.asyncio
 async def test_prepare_persists_replacement_and_returns_only_post_compact_messages() -> None:
     store = Store(envelope(), (event(1, "old generation"),))
-    prepared = await coordinator(store, tokens=180_000, compact=result()).prepare(
+    checkpoint_journal = RecordingCheckpointJournal()
+    prepared = await coordinator(
+        store,
+        tokens=180_000,
+        compact=result(),
+        checkpoint_journal=checkpoint_journal,
+    ).prepare(
         user_id="u", session_id="s", model_profile=PROFILE
     )
     assert prepared.was_compacted
@@ -176,6 +200,8 @@ async def test_prepare_persists_replacement_and_returns_only_post_compact_messag
     assert [item.content for item in prepared.messages].count("new summary") == 1
     assert "old generation" not in [item.content for item in prepared.messages]
     assert store.envelope.active_revision.summary_message.content == "new summary"
+    assert len(checkpoint_journal.checkpoints) == 1
+    assert checkpoint_journal.checkpoints[0].active_revision == store.envelope.active_revision
 
 
 @pytest.mark.asyncio
@@ -249,14 +275,20 @@ async def test_l1_clears_only_request_projection_before_l2_without_mutating_stor
 @pytest.mark.asyncio
 async def test_cas_conflict_reloads_once_without_second_model_call() -> None:
     calls = []
+    checkpoint_journal = RecordingCheckpointJournal()
     store = Store(envelope(), (event(1, "recent"),))
     store.cas_conflict = True
     prepared = await coordinator(
-        store, tokens=180_000, compact=result(), calls=calls
+        store,
+        tokens=180_000,
+        compact=result(),
+        calls=calls,
+        checkpoint_journal=checkpoint_journal,
     ).prepare(user_id="u", session_id="s", model_profile=PROFILE)
     assert calls == ["l4"]
     assert not prepared.was_compacted
     assert store.envelope.active_revision is None
+    assert checkpoint_journal.checkpoints == []
 
 
 @pytest.mark.asyncio

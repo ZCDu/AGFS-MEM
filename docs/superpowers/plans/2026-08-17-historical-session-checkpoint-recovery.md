@@ -47,7 +47,7 @@
 - `src/short_term_memory/agent/agent_chat.py`: 新问题写入前调用 activation。
 - `tests/storage/test_journal_store.py`、`tests/storage/test_async_redis_memory_store.py`、`tests/storage/fake_redis.py`: 新持久化与 Lua 语义。
 - `tests/service/test_context_coordinator.py`、`tests/jobs/test_session_memory_worker.py`、`tests/jobs/test_compression_worker.py`: checkpoint 写穿和 rebuild rebase。
-- `tests/service/test_app.py`、`tests/agent/test_agent_chat.py`、`tests/service/test_runtime.py`: HTTP、Agent 顺序和 runtime wiring。
+- `tests/service/test_app.py`、`tests/agent/test_agent_chat.py`、`tests/service/test_runtime_lifecycle.py`: HTTP、Agent 顺序和 runtime wiring。
 - `docs/记忆服务-业务接口文档.md`: 补充内部 activation API 和恢复语义。
 
 ---
@@ -239,7 +239,7 @@ git commit -m "feat: persist immutable compaction checkpoints"
 - Modify: `src/short_term_memory/service/runtime.py`
 - Modify: `tests/service/test_context_coordinator.py`
 - Modify: `tests/jobs/test_session_memory_worker.py`
-- Modify: `tests/service/test_runtime.py`
+- Modify: `tests/service/test_runtime_lifecycle.py`
 
 **Interfaces:**
 - Consumes: `JournalStore.append_compaction_checkpoint()` and `checkpoint_from_envelope()` from Task 1.
@@ -344,14 +344,14 @@ return await self._ack(lease, "acked")
 
 Modify `ServiceRuntime.create()` so `ContextCoordinator(..., checkpoint_journal=journals)` and the existing `SessionMemoryWorker(..., journals=journals)` use the same service-owned store.
 
-Run: `uv run python -m pytest tests/service/test_context_coordinator.py tests/jobs/test_session_memory_worker.py tests/service/test_runtime.py -q`
+Run: `uv run python -m pytest tests/service/test_context_coordinator.py tests/jobs/test_session_memory_worker.py tests/service/test_runtime_lifecycle.py -q`
 
 Expected: all selected tests pass.
 
 - [ ] **Step 9: Commit Task 2**
 
 ```bash
-git add src/short_term_memory/service/context_coordinator.py src/short_term_memory/jobs/session_memory_worker.py src/short_term_memory/service/runtime.py tests/service/test_context_coordinator.py tests/jobs/test_session_memory_worker.py tests/service/test_runtime.py
+git add src/short_term_memory/service/context_coordinator.py src/short_term_memory/jobs/session_memory_worker.py src/short_term_memory/service/runtime.py tests/service/test_context_coordinator.py tests/jobs/test_session_memory_worker.py tests/service/test_runtime_lifecycle.py
 git commit -m "feat: write through L3 and L4 checkpoints"
 ```
 
@@ -778,7 +778,7 @@ git commit -m "fix: preserve cold rebuild across envelope races"
 - Modify: `src/short_term_memory/service/runtime.py`
 - Modify: `src/short_term_memory/agent/agent_chat.py`
 - Modify: `tests/service/test_app.py`
-- Modify: `tests/service/test_runtime.py`
+- Modify: `tests/service/test_runtime_lifecycle.py`
 - Modify: `tests/agent/test_agent_chat.py`
 
 **Interfaces:**
@@ -845,7 +845,7 @@ Create it from the existing `store`, `journals`, `queue`, settings and the same 
 
 - [ ] **Step 5: Run API/runtime tests and verify GREEN**
 
-Run: `uv run python -m pytest tests/service/test_app.py tests/service/test_runtime.py -q`
+Run: `uv run python -m pytest tests/service/test_app.py tests/service/test_runtime_lifecycle.py -q`
 
 Expected: all selected tests pass.
 
@@ -887,7 +887,7 @@ Keep the existing preview method untouched. If activation raises, do not issue `
 
 - [ ] **Step 9: Run Agent and service suites and verify GREEN**
 
-Run: `uv run python -m pytest tests/agent/test_agent_chat.py tests/service/test_app.py tests/service/test_runtime.py -q`
+Run: `uv run python -m pytest tests/agent/test_agent_chat.py tests/service/test_app.py tests/service/test_runtime_lifecycle.py -q`
 
 Expected: all selected tests pass.
 
@@ -898,7 +898,7 @@ Because `schemas.py`, `agent_chat.py` and the Agent tests already contain user c
 ```bash
 git add src/short_term_memory/service/app.py src/short_term_memory/service/runtime.py
 git add -p src/short_term_memory/service/schemas.py src/short_term_memory/agent/agent_chat.py tests/agent/test_agent_chat.py
-git add tests/service/test_app.py tests/service/test_runtime.py
+git add tests/service/test_app.py tests/service/test_runtime_lifecycle.py
 git diff --cached --check
 git commit -m "feat: activate sessions before agent writes"
 ```

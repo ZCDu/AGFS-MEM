@@ -6,6 +6,8 @@ from datetime import datetime, timezone
 import uuid
 from typing import Any
 
+import anyio
+
 from short_term_memory.compression.auto_compact import (
     AutoCompactContext,
     ModelProfile,
@@ -29,6 +31,7 @@ from short_term_memory.models import (
     SessionCompressionMessage,
 )
 from short_term_memory.service.schemas import HeadroomProxyContext
+from short_term_memory.storage.compaction_checkpoint import checkpoint_from_envelope
 from short_term_memory.transcript.tool_definitions import TRANSCRIPT_TOOL_DEFINITIONS
 
 
@@ -50,6 +53,7 @@ class ContextCoordinator:
         self,
         *,
         store: Any,
+        checkpoint_journal: Any,
         token_estimator: Any,
         auto_context_factory: Callable[
             [ModelProfile, str, object | None], AutoCompactContext
@@ -65,6 +69,7 @@ class ContextCoordinator:
         if not headroom_proxy_url:
             raise ValueError("headroom_proxy_url must not be blank")
         self.store = store
+        self.checkpoint_journal = checkpoint_journal
         self.token_estimator = token_estimator
         self.auto_context_factory = auto_context_factory
         self.history_turns = history_turns
@@ -141,6 +146,16 @@ class ContextCoordinator:
                 ).messages
                 return self._prepared(
                     safe, model_profile, user_id, session_id, False
+                )
+            if compacted.compaction_result is not None:
+                checkpoint = checkpoint_from_envelope(
+                    user_id, session_id, next_envelope
+                )
+                await anyio.to_thread.run_sync(
+                    self.checkpoint_journal.append_compaction_checkpoint,
+                    user_id,
+                    session_id,
+                    checkpoint,
                 )
             messages = (
                 apply_compaction_result(current, compacted.compaction_result)

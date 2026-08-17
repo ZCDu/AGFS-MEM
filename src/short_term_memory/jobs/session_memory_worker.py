@@ -6,6 +6,8 @@ from datetime import datetime, timezone
 import uuid
 from typing import Callable
 
+import anyio
+
 from short_term_memory.compression.continuity_model import ContinuityCompactionModel
 from short_term_memory.compression.session_memory import extract_session_memory_revision
 from short_term_memory.compression.session_memory_prompt import EMPTY_SESSION_MEMORY
@@ -16,6 +18,7 @@ from short_term_memory.jobs.session_memory_queue import (
 from short_term_memory.models import MemoryEvent, SessionCompressionMessage
 from short_term_memory.ports import AsyncMemoryStore
 from short_term_memory.storage.journal_store import JournalStore
+from short_term_memory.storage.compaction_checkpoint import checkpoint_from_envelope
 
 
 @dataclass(frozen=True)
@@ -168,6 +171,15 @@ class SessionMemoryWorker:
         )
         if not written:
             return await self._ack(lease, "stale")
+        checkpoint = checkpoint_from_envelope(
+            job.user_id, job.session_id, next_envelope
+        )
+        await anyio.to_thread.run_sync(
+            self.journals.append_compaction_checkpoint,
+            job.user_id,
+            job.session_id,
+            checkpoint,
+        )
         return await self._ack(lease, "acked")
 
     async def _ack(

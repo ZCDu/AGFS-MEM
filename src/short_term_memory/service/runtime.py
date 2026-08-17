@@ -233,6 +233,7 @@ class ServiceRuntime:
 
             context_coordinator = ContextCoordinator(
                 store=store,
+                checkpoint_journal=journals,
                 token_estimator=estimator,
                 auto_context_factory=auto_context_factory,
                 history_turns=settings.redis_session.history_turns,

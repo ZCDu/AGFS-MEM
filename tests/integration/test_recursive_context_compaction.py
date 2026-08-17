@@ -170,6 +170,11 @@ async def test_context_compacts_ab_to_abcd_to_abcde_and_hides_late_generation(
 
     coordinator = ContextCoordinator(
         store=store,
+        checkpoint_journal=type(
+            "CheckpointJournal",
+            (),
+            {"append_compaction_checkpoint": lambda self, *args: None},
+        )(),
         token_estimator=estimator,
         auto_context_factory=factory,
         history_turns=10,
