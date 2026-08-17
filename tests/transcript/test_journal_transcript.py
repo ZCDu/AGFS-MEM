@@ -1,12 +1,13 @@
 from datetime import datetime, timezone
 
+from short_term_memory.storage.compaction_checkpoint import checkpoint_from_envelope
 from short_term_memory.storage.journal_store import JournalStore
 from short_term_memory.storage.vfs_adapter import VFSAdapter
 from short_term_memory.transcript.journal_transcript import (
     JOURNAL_TRANSCRIPT_URI,
     JournalTranscript,
 )
-from tests.factories import memory_event
+from tests.factories import envelope, memory_event
 
 
 def test_virtual_transcript_sorts_sequences_and_escapes_newlines_across_days(
@@ -68,3 +69,16 @@ def test_virtual_transcript_empty_session_is_empty(tmp_path) -> None:
 
     assert transcript.lines("u", "missing") == ()
     assert transcript.render("u", "missing") == ""
+
+
+def test_virtual_transcript_excludes_compaction_checkpoints(tmp_path) -> None:
+    store = JournalStore(VFSAdapter(tmp_path))
+    store.append_event("u", "s", memory_event(sequence=1, event_id="one"))
+    store.append_compaction_checkpoint(
+        "u", "s", checkpoint_from_envelope("u", "s", envelope(through=1))
+    )
+
+    transcript = JournalTranscript(store)
+
+    assert [line.sequence for line in transcript.lines("u", "s")] == [1]
+    assert "compaction_checkpoint" not in transcript.render("u", "s")

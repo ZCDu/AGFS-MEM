@@ -13,6 +13,7 @@ from typing import Iterator, Literal
 from pydantic import BaseModel, Field
 
 from short_term_memory.models import MemoryContentType, MemoryEvent
+from short_term_memory.storage.compaction_checkpoint import CompactionCheckpoint
 from short_term_memory.storage.recent_originals import select_recent_turns
 from short_term_memory.storage.vfs_adapter import VFSAdapter, safe_component
 
@@ -47,7 +48,7 @@ class JournalFileEvent(JournalEvent):
     local_path: str
 
 
-JournalRecord = JournalMessageEvent | JournalFileEvent
+JournalRecord = JournalMessageEvent | JournalFileEvent | CompactionCheckpoint
 
 
 class JournalConflictError(ValueError):
@@ -173,6 +174,64 @@ class JournalStore:
             entry = self._find_event_entry_unlocked(user_id, session_id, event_id)
             return entry[0] if entry is not None else None
 
+    def append_compaction_checkpoint(
+        self,
+        user_id: str,
+        session_id: str,
+        checkpoint: CompactionCheckpoint,
+    ) -> JournalAppendResult:
+        """Idempotently append one immutable L3/L4 recovery checkpoint."""
+
+        if checkpoint.user_id != user_id or checkpoint.session_id != session_id:
+            raise ValueError("checkpoint scope does not match Journal session")
+        at = _parse_timestamp(checkpoint.created_at)
+        with self._session_lock(user_id, session_id):
+            for record, path in self._read_session_entries_unlocked(
+                user_id, session_id
+            ):
+                if (
+                    isinstance(record, CompactionCheckpoint)
+                    and record.checkpoint_id == checkpoint.checkpoint_id
+                ):
+                    return JournalAppendResult(appended=False, path=path)
+            path = self._append_unlocked(user_id, session_id, at, checkpoint)
+            return JournalAppendResult(appended=True, path=path)
+
+    def read_latest_compaction_checkpoint(
+        self, user_id: str, session_id: str
+    ) -> CompactionCheckpoint | None:
+        """Return the strongest immutable checkpoint across all session days."""
+
+        with self._session_lock(user_id, session_id):
+            checkpoints = tuple(
+                record
+                for record, _ in self._read_session_entries_unlocked(
+                    user_id, session_id
+                )
+                if isinstance(record, CompactionCheckpoint)
+            )
+        return max(
+            checkpoints,
+            key=lambda item: (item.envelope_version, item.created_at),
+            default=None,
+        )
+
+    def latest_original_sequence(self, user_id: str, session_id: str) -> int:
+        """Return the maximum durable original sequence, ignoring checkpoints."""
+
+        with self._session_lock(user_id, session_id):
+            return max(
+                (
+                    record.sequence
+                    for record, _ in self._read_session_entries_unlocked(
+                        user_id, session_id
+                    )
+                    if isinstance(record, JournalMessageEvent)
+                    and record.sequence is not None
+                ),
+                default=0,
+            )
+
     def read_original_range(
         self,
         user_id: str,
@@ -220,7 +279,7 @@ class JournalStore:
                         record = JournalMessageEvent.model_validate(raw)
                         if record.sequence is not None:
                             originals.append(self._memory_event(record))
-                    elif raw.get("type") != "file":
+                    elif raw.get("type") not in {"file", "compaction_checkpoint"}:
                         raise ValueError(f"unknown journal event type in {path.name}")
             return select_recent_turns(originals, history_turns)
 
@@ -331,6 +390,8 @@ class JournalStore:
                     records.append((JournalMessageEvent.model_validate(raw), path))
                 elif raw.get("type") == "file":
                     records.append((JournalFileEvent.model_validate(raw), path))
+                elif raw.get("type") == "compaction_checkpoint":
+                    records.append((CompactionCheckpoint.model_validate(raw), path))
                 else:
                     raise ValueError(f"unknown journal event type in {path.name}")
         return tuple(records)

@@ -8,8 +8,9 @@ from pathlib import Path
 
 import pytest
 
-from tests.factories import memory_event
+from tests.factories import envelope, memory_event
 from short_term_memory.models import JournalRole
+from short_term_memory.storage.compaction_checkpoint import checkpoint_from_envelope
 from short_term_memory.storage.journal_store import (
     JournalConflictError,
     JournalFileEvent,
@@ -273,6 +274,43 @@ def test_session_locks_are_released_after_operations(tmp_path: Path) -> None:
         )
 
     assert store.session_lock_count == 0
+
+
+def test_append_checkpoint_is_idempotent_and_latest_crosses_days(
+    tmp_path: Path,
+) -> None:
+    store = JournalStore(VFSAdapter(tmp_path))
+    old = checkpoint_from_envelope(
+        "u",
+        "s",
+        envelope(version=2).model_copy(
+            update={"updated_at": "2026-08-16T23:00:00+00:00"}
+        ),
+    )
+    new = checkpoint_from_envelope(
+        "u",
+        "s",
+        envelope(version=3).model_copy(
+            update={"updated_at": "2026-08-17T01:00:00+00:00"}
+        ),
+    )
+
+    assert store.append_compaction_checkpoint("u", "s", old).appended
+    assert not store.append_compaction_checkpoint("u", "s", old).appended
+    assert store.append_compaction_checkpoint("u", "s", new).appended
+
+    assert store.read_latest_compaction_checkpoint("u", "s") == new
+
+
+def test_latest_original_sequence_ignores_checkpoint(tmp_path: Path) -> None:
+    store = JournalStore(VFSAdapter(tmp_path))
+    store.append_event("u", "s", memory_event(sequence=41, event_id="e41"))
+    checkpoint = checkpoint_from_envelope(
+        "u", "s", envelope(version=7, through=41)
+    )
+    store.append_compaction_checkpoint("u", "s", checkpoint)
+
+    assert store.latest_original_sequence("u", "s") == 41
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="fcntl journals require POSIX")
