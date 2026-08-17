@@ -72,7 +72,7 @@ Journal 新增一种记录类型，不伪装成用户或助手消息，也不出
 - `checkpoint_id` 由 session 身份、envelope version、L3/L4 revision version、coverage 和内容摘要确定性生成，用于幂等追加。
 - `active_revision` 保存完整 `ContextRevision`，包括 boundary、summary message 和 `messages_to_keep`。
 - `session_memory` 保存完整 `SessionMemoryRevision`。
-- `generation_versions` 仅保存恢复和诊断所需的 generation ID；Headroom 压缩原文不写入 checkpoint。
+- `generation_versions` 仅保存恢复和诊断所需的 generation ID；不用它们恢复旧 marker。Headroom generation messages、CCR 原文和 hash 索引都不写入 checkpoint。
 - checkpoint 必须包含 `compressed_through_sequence`，用于识别 Journal 增量尾部。
 - 对旧 schema 只读兼容；不原地覆盖旧 checkpoint。
 
@@ -122,11 +122,25 @@ activate(session)
 3. 读取最近 N 个完整轮次，但不读入 LLM 全量上下文。
 4. 原子恢复 Redis sequence 和最近原文尾部。sequence 设为 Journal 最大 sequence，不是尾部第一条或消息数量。
 5. 若 checkpoint 存在，将其 L3/L4 状态恢复为新的 Redis envelope。若只有 L4 `session_memory` 而没有 `active_revision`，使用现有 Claude L4 结果构造逻辑在本地生成 recovery `ContextRevision`，不调用模型。恢复是新的在线投影，不修改 Journal checkpoint。
-6. 释放 activation lease，允许写入新问题。
+6. 使用现有 `_compression_job(..., rebuild=True)` 向 Headroom 压缩队列提交截至 Journal 历史最大 sequence 的 cold rebuild。
+7. 释放 activation lease，允许写入新问题。
 
-恢复时不等待 Headroom 或 continuity model 新请求。Headroom generation/CCR 可在后台使用现有 `rebuild=True` 任务重建。
+恢复时不等待 Headroom 或 continuity model 新请求。第一次请求使用 checkpoint L3/L4 + 最近 N 轮；Headroom generation/CCR 由已存在的 `rebuild=True` 工作者链路在后台重建。
 
-### 5.4 无 checkpoint 的旧 session
+### 5.4 复用现有 Headroom cold rebuild 与 CCR
+
+历史 session 不从 checkpoint 恢复 Headroom generation，而是直接复用项目已有逻辑：
+
+1. `GenerationPlanner.plan_rebuild()` 从 Journal 读取 `1..requested_through_sequence` 的完整连续原文。
+2. `CompressionWorker` 只把这些 Journal originals 发给 Headroom，不把 L3/L4 摘要或旧 generation 再次压缩。
+3. rebuild 成功后使用一个全新 generation 替换旧 generation 列表，并生成新 `ccr_expires_at`、marker 和 Headroom CCR 内容。
+4. 后续 `prepare()` 通过现有 `load_active_messages()` 只注入未过期、且没被 compact boundary 覆盖的 generation。
+5. Agent 看到 marker 后可调用现有 `headroom_retrieve(hash)`；该调用继续使用历史 `user_id/session_id` 生成的 Headroom scope。
+6. CCR 返回 `not found` 或尚未重建时，Agent 仍使用同一 session 的 `Grep → Read` 从 Journal 召回。
+
+不延长 checkpoint 中记录的旧 `ccr_expires_at`，不恢复可能已失效的 marker，也不访问 Headroom 内部存储。
+
+### 5.5 无 checkpoint 的旧 session
 
 不得阻塞用户等待新摘要。activation 恢复 Journal 最近 N 轮和 sequence，然后允许写入新问题；Headroom/L3/L4 依现有策略在后续 prepare/工作者中重建。
 
@@ -180,6 +194,9 @@ Agent 调用 `Grep`/`Read` 时：
 
 - Redis 全空时恢复 checkpoint、最近 N 轮和历史最大 sequence。
 - 新问题 sequence 严格等于历史最大 sequence + 1。
+- Redis 全空时向现有队列提交一个 `rebuild=True` 任务，coverage 到达历史最大 sequence。
+- Headroom rebuild 只接收 Journal originals，不接收 checkpoint L3/L4 或旧 generation。
+- rebuild 成功后的下一次 prepare 能看到新 generation 和 marker，并能通过 `headroom_retrieve` 召回。
 - Redis 命中时 activation 不覆盖在线 envelope。
 - 无 checkpoint 时恢复最近 N 轮，不读全量 Journal 到活动上下文。
 - Journal 读取失败时不执行新消息 reserve。
@@ -195,8 +212,8 @@ Agent 调用 `Grep`/`Read` 时：
 ## 10. 验收标准
 
 1. Redis 全过期后切回历史 session，不会返回空上下文，也不会把 Journal 全量原文注入 LLM。
-2. 有 checkpoint 时，无需等待 Headroom 或 continuity model 即可恢复 L3/L4 状态和最近 N 轮。
+2. 有 checkpoint 时，无需等待 Headroom 或 continuity model 即可恢复 L3/L4 状态和最近 N 轮；现有 Headroom cold rebuild 同时在后台恢复 generation/CCR。
 3. 无 checkpoint 时，至少恢复最近 N 轮，并保证新 sequence 连续。
 4. L3/L4 每次成功变更都有幂等、不可变的 Journal checkpoint。
-5. CCR 不可用时，Agent 仍能通过绑定当前历史 session 的 Grep/Read 召回 Journal 精确内容。
+5. Headroom rebuild 完成后，Agent 可使用新 marker 和现有 `headroom_retrieve` 召回 CCR；CCR 不可用时，Agent 仍能通过绑定当前历史 session 的 Grep/Read 召回 Journal 精确内容。
 6. 新增定向测试、原有全量测试、Ruff 和构建全部通过。
