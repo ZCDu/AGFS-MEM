@@ -7,6 +7,7 @@ from short_term_memory.service.schemas import (
     MemoryReadState,
     MemoryReadRequest,
     MemoryPrepareRequest,
+    MemoryRecallResult,
     MemoryTranscriptGrepRequest,
     MemoryTranscriptGrepResponse,
     MemoryTranscriptReadRequest,
@@ -217,3 +218,10 @@ def test_read_response_dumps_the_approved_optional_config_contract() -> None:
         "effective_config": None,
         "timing_ms": {"total": 31.5, "redis": 12.2, "recovery": 0.0, "assembly": 3.1},
     }
+
+
+def test_unrecovered_ccr_result_allows_empty_content_for_tool_fallback() -> None:
+    result = MemoryRecallResult(hash="abc123def456", content="", recovered=False)
+
+    assert result.content == ""
+    assert result.recovered is False

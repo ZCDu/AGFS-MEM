@@ -197,7 +197,7 @@ class MemoryRecallResult(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     hash: str = Field(min_length=1)
-    content: str = Field(min_length=1)
+    content: str
     recovered: bool
 
 

@@ -57,6 +57,10 @@ class Transport:
 
     def __call__(self, request: httpx.Request) -> httpx.Response:
         self.paths.append(request.url.path)
+        if request.url.path == "/v1/memories/activate":
+            return httpx.Response(
+                200, json={"recovered": False, "latest_sequence": 0}
+            )
         if request.url.path == "/v1/memories/write":
             return httpx.Response(200, json={"accepted": True})
         if request.url.path == "/v1/memories/prepare":
