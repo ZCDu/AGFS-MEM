@@ -16,6 +16,8 @@ from short_term_memory.agent.agent_chat import (
 def _recall_handler(request: httpx.Request) -> httpx.Response:
     """Mock memory API handler: read returns markers, recall returns original."""
     path = request.url.path
+    if path == "/v1/memories/activate":
+        return httpx.Response(200, json={"recovered": False, "latest_sequence": 0})
     if path in {"/v1/memories/read", "/v1/memories/prepare"}:
         return httpx.Response(
             200,
@@ -137,6 +139,8 @@ class RecordingTranscriptTransport:
     def __call__(self, request: httpx.Request) -> httpx.Response:
         self.paths.append(request.url.path)
         self.requests.append(request)
+        if request.url.path == "/v1/memories/activate":
+            return httpx.Response(200, json={"recovered": False, "latest_sequence": 0})
         if request.url.path == "/v1/memories/prepare":
             return httpx.Response(
                 200,
@@ -221,3 +225,28 @@ async def test_agent_autonomously_greps_then_reads_before_answering() -> None:
     for request in transport.requests:
         if request.url.path.startswith("/v1/memories/transcript/"):
             assert request.headers["x-memory-session-scope"] == "opaque-session"
+
+
+@pytest.mark.asyncio
+async def test_turn_activates_historical_session_before_user_write() -> None:
+    transport = RecordingTranscriptTransport()
+    model = ScriptedModel([{"content": "continued", "tool_calls": []}])
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(transport)
+    ) as http:
+        client = AgentChatClient(
+            memory_api_url="http://memory", model_call=model, http_client=http
+        )
+        await client.turn("u", "historical", "continue", history_turns=5)
+
+    assert transport.paths[:3] == [
+        "/v1/memories/activate",
+        "/v1/memories/write",
+        "/v1/memories/prepare",
+    ]
+    activation = json.loads(transport.requests[0].content)
+    assert activation == {
+        "user_id": "u",
+        "session_id": "historical",
+        "history_turns": 5,
+    }

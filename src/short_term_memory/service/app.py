@@ -2,6 +2,7 @@
 
 from collections.abc import Awaitable, Callable
 from contextlib import suppress
+from dataclasses import asdict
 import re
 import time
 from typing import Annotated, Any
@@ -26,11 +27,16 @@ from short_term_memory.service.memory_service import (
     MemoryTranscriptScopeError,
     RetryableWriteError,
 )
+from short_term_memory.service.session_activation import (
+    SessionActivationUnavailableError,
+)
 from short_term_memory.service.context_coordinator import (
     ContextCompactionUnavailableError,
 )
 from short_term_memory.service.metrics import ApiMetrics
 from short_term_memory.service.schemas import (
+    MemoryActivateRequest,
+    MemoryActivateResponse,
     MemoryReadRequest,
     MemoryReadResponse,
     MemoryPrepareRequest,
@@ -56,6 +62,7 @@ from short_term_memory.transcript.read_tool import (
 _BUSINESS_PATHS = frozenset(
     {
         "/v1/memories/write",
+        "/v1/memories/activate",
         "/v1/memories/read",
         "/v1/memories/prepare",
         "/v1/memories/recall",
@@ -310,6 +317,7 @@ def create_app(
         title="Short-Term Memory API", version="1.0.0", lifespan=lifespan
     )
     app.state.memory_service = memory_service
+    app.state.session_activator = getattr(memory_service, "session_activator", None)
     app.state.metrics = api_metrics
     app.add_middleware(
         HttpControlMiddleware,
@@ -424,6 +432,7 @@ def create_app(
         OSError,
         TimeoutError,
         ConnectionError,
+        SessionActivationUnavailableError,
     ):
         app.add_exception_handler(error_type, unavailable_error)
 
@@ -483,6 +492,28 @@ def create_app(
     def observe_phases(timing: BaseModel) -> None:
         for stage, duration_ms in timing.model_dump().items():
             api_metrics.observe_phase(stage, float(duration_ms))
+
+    @app.post(
+        "/v1/memories/activate",
+        response_model=MemoryActivateResponse,
+        responses=_ERROR_RESPONSES,
+        dependencies=[Depends(authenticate)],
+    )
+    async def activate_memory(
+        request: Request, body: MemoryActivateRequest
+    ) -> MemoryActivateResponse:
+        activator = app.state.session_activator
+        if activator is None:
+            raise SessionActivationUnavailableError(
+                "historical session activation is unavailable"
+            )
+        result = await activator.activate(
+            body.user_id, body.session_id, body.history_turns
+        )
+        return MemoryActivateResponse(
+            request_id=request.state.request_id,
+            **asdict(result),
+        )
 
     @app.post(
         "/v1/memories/write",

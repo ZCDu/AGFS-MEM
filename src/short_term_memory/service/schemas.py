@@ -64,6 +64,24 @@ class MemoryWriteResponse(BaseModel):
     timing_ms: WriteTiming
 
 
+class MemoryActivateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    user_id: str = Field(min_length=1)
+    session_id: str = Field(min_length=1)
+    history_turns: int | None = Field(default=None, ge=1)
+
+
+class MemoryActivateResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    request_id: str = Field(min_length=1)
+    recovered: bool
+    latest_sequence: int = Field(ge=0)
+    checkpoint_id: str | None = None
+    rebuild_queued: bool
+
+
 class MemoryReadRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 

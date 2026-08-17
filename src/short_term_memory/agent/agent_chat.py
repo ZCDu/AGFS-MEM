@@ -3,7 +3,7 @@
 This is the "方案2" deliverable: instead of each integrator copying chat_loop,
 they can import :class:`AgentChatClient` and get the full loop:
 
-  write user message -> read context -> call model -> execute memory tools
+  activate session -> write user message -> read context -> call model -> execute memory tools
   -> append tool results -> call the same model -> write assistant answer
 
 The memory API is called over HTTP (httpx). The model provider is injected via
@@ -118,10 +118,20 @@ class AgentChatClient:
         event_id: str | None = None,
         history_turns: int | None = None,
     ) -> str:
-        """One full turn: persist user msg -> read memory -> model -> recall loop -> persist reply."""
+        """Activate, persist the user message, prepare, run tools, and persist reply."""
         from uuid import uuid4
 
-        # 1. write the user message.
+        # 1. Restore a bounded historical projection before reserving a sequence.
+        await self._post(
+            "/v1/memories/activate",
+            {
+                "user_id": user_id,
+                "session_id": session_id,
+                "history_turns": history_turns,
+            },
+        )
+
+        # 2. write the user message.
         await self._post(
             "/v1/memories/write",
             {
@@ -139,7 +149,7 @@ class AgentChatClient:
             },
         )
 
-        # 2. prepare the current context, including request-time L2/L3/L4 compact.
+        # 3. prepare the current context, including request-time L2/L3/L4 compact.
         memory = await self._post(
             "/v1/memories/prepare",
             {
@@ -159,7 +169,7 @@ class AgentChatClient:
             HEADROOM_RETRIEVE_TOOL_DEFINITION,
         )
 
-        # 3. call the model (may loop on tool calls).
+        # 4. call the model (may loop on tool calls).
         answer = await self._ask(
             messages,
             proxy_url,
@@ -170,7 +180,7 @@ class AgentChatClient:
             tools,
         )
 
-        # 4. write the assistant answer back.
+        # 5. write the assistant answer back.
         await self._post(
             "/v1/memories/write",
             {

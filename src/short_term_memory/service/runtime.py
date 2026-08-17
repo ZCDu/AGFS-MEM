@@ -36,6 +36,7 @@ from short_term_memory.jobs.session_memory_worker import SessionMemoryWorker
 from short_term_memory.jobs.redis_rebuild_completion import RedisRebuildCompletion
 from short_term_memory.service.app import create_app
 from short_term_memory.service.memory_service import MemoryService
+from short_term_memory.service.session_activation import SessionActivator
 from short_term_memory.service.context_coordinator import ContextCoordinator
 from short_term_memory.storage.async_redis_memory_store import AsyncRedisMemoryStore
 from short_term_memory.storage.journal_store import JournalStore
@@ -63,6 +64,7 @@ class ServiceRuntime:
     session_memory_worker: SessionMemoryWorker | None
     memory_service: MemoryService
     context_coordinator: ContextCoordinator
+    session_activator: SessionActivator
     _owns_redis: bool
     _owns_headroom_http: bool
     _closed: bool = False
@@ -243,6 +245,13 @@ class ServiceRuntime:
                 ).as_headroom_headers(),
                 microcompact_config=settings.time_based_microcompact,
             )
+            session_activator = SessionActivator(
+                store=store,
+                journals=journals,
+                compression_queue=queue,
+                history_turns=settings.redis_session.history_turns,
+                activation_timeout_seconds=settings.api.request_timeout_seconds,
+            )
             session_memory_worker = (
                 SessionMemoryWorker(
                     queue=session_memory_queue,
@@ -266,6 +275,7 @@ class ServiceRuntime:
                 session_memory_worker=session_memory_worker,
                 memory_service=memory_service,
                 context_coordinator=context_coordinator,
+                session_activator=session_activator,
                 _owns_redis=owns_redis,
                 _owns_headroom_http=owns_http,
             )
@@ -356,6 +366,7 @@ def create_runtime_app(
         runtime = await runtime_start(effective_settings)
         app.state.service_runtime = runtime
         app.state.memory_service = runtime.memory_service
+        app.state.session_activator = runtime.session_activator
         if context_coordinator := getattr(runtime, "context_coordinator", None):
             app.state.context_coordinator = context_coordinator
         try:

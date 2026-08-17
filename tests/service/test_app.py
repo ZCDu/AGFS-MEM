@@ -14,6 +14,7 @@ from short_term_memory.service.memory_service import (
     RetryableWriteError,
 )
 from short_term_memory.service.metrics import ApiMetrics
+from short_term_memory.service.session_activation import SessionActivationResult
 from short_term_memory.service.schemas import (
     HeadroomProxyContext,
     MemoryReadResponse,
@@ -146,6 +147,20 @@ class RecordingMemoryService:
         )
 
 
+class RecordingSessionActivator:
+    def __init__(self) -> None:
+        self.calls = []
+
+    async def activate(self, user_id, session_id, history_turns=None):
+        self.calls.append((user_id, session_id, history_turns))
+        return SessionActivationResult(
+            recovered=True,
+            latest_sequence=180,
+            checkpoint_id="sha256:" + "a" * 64,
+            rebuild_queued=True,
+        )
+
+
 def settings(
     *,
     token: str = "test-token",
@@ -165,12 +180,14 @@ def settings(
     )
 
 
-def app_for(service: RecordingMemoryService, **setting_overrides):
-    return create_app(
+def app_for(service: RecordingMemoryService, *, activator=None, **setting_overrides):
+    app = create_app(
         lambda: service,
         settings=settings(**setting_overrides),
         metrics=ApiMetrics(),
     )
+    app.state.session_activator = activator or RecordingSessionActivator()
+    return app
 
 
 def auth_headers(**extra: str) -> dict[str, str]:
@@ -216,6 +233,7 @@ async def test_only_approved_business_routes_exist_and_openapi_documents_auth() 
         path for path in schema["paths"] if path.startswith("/v1/memories/")
     )
     assert business == [
+        "/v1/memories/activate",
         "/v1/memories/prepare",
         "/v1/memories/read",
         "/v1/memories/recall",
@@ -230,6 +248,34 @@ async def test_only_approved_business_routes_exist_and_openapi_documents_auth() 
         assert operation["responses"]["422"]["content"]["application/json"]["schema"][
             "$ref"
         ].endswith("/ErrorResponse")
+
+
+@pytest.mark.asyncio
+async def test_activate_endpoint_is_authenticated_and_returns_recovery_state() -> None:
+    activator = RecordingSessionActivator()
+    app = app_for(RecordingMemoryService(), activator=activator)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        response = await client.post(
+            "/v1/memories/activate",
+            headers=auth_headers(**{"x-request-id": "activation-request"}),
+            json={
+                "user_id": "u",
+                "session_id": "historical",
+                "history_turns": 5,
+            },
+        )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "request_id": "activation-request",
+        "recovered": True,
+        "latest_sequence": 180,
+        "checkpoint_id": "sha256:" + "a" * 64,
+        "rebuild_queued": True,
+    }
+    assert activator.calls == [("u", "historical", 5)]
 
 
 @pytest.mark.asyncio

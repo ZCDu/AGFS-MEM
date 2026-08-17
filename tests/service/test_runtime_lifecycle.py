@@ -147,6 +147,9 @@ async def test_runtime_reuses_one_redis_and_one_headroom_http_client(tmp_path) -
     assert runtime.queue.client is runtime.redis
     assert runtime.completion.client is runtime.redis
     assert runtime.worker.headroom.http is runtime.headroom_http
+    assert runtime.session_activator.store is runtime.store
+    assert runtime.session_activator.journals is runtime.memory_service.journals
+    assert runtime.session_activator.compression_queue is runtime.queue
 
     await runtime.close()
     await runtime.close()
@@ -278,6 +281,7 @@ async def test_owned_redis_pool_has_connect_and_socket_timeouts(
 class FakeRuntime:
     def __init__(self) -> None:
         self.memory_service = object()
+        self.session_activator = object()
         self.closed = False
 
     async def readiness(self):
@@ -300,6 +304,7 @@ async def test_fastapi_lifespan_owns_runtime_and_ready_status(tmp_path) -> None:
     app = create_runtime_app(settings(tmp_path), runtime_start=start)
     async with app.router.lifespan_context(app):
         assert app.state.memory_service is runtime.memory_service
+        assert app.state.session_activator is runtime.session_activator
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(app=app), base_url="http://test"
         ) as client:
