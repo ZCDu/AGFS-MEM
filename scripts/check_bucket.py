@@ -3,7 +3,7 @@ Scan a local_bucket for entity files that cannot be parsed.
 
 Run:  python scripts/check_bucket.py [--root ./local_bucket] [--fix]
 
-Why this exists: a corrupt .md file used to surface as an opaque HTTP
+Why this exists: a corrupt .okf.md file used to surface as an opaque HTTP
 500 on any route that touched it, including deletes — which made it look
 like the delete endpoints were broken rather than one file being bad. The
 API now returns 422 naming the entity, but if several are broken you want
@@ -60,14 +60,14 @@ def find_buckets(max_depth: int = 4) -> list[Path]:
         if not base.is_dir():
             continue
         try:
-            for f in base.rglob("*.md"):
+            for f in base.rglob("*.okf.md"):
                 try:
                     depth = len(f.relative_to(base).parts)
                 except ValueError:
                     continue
                 if depth > max_depth + 4:
                     continue
-                # Entity files live at <root>/<user>/wiki/<type>/<slug>.md,
+                # Entity files live at <root>/<user>/wiki/<type>/<slug>.okf.md,
                 # so the bucket root is four levels up from the file — type,
                 # wiki, user, root. Three lands on the user directory and
                 # sends the operator to a --root that will not work.
@@ -98,15 +98,15 @@ def main() -> None:
             print("  Found entity files elsewhere — the server was probably started")
             print("  from a different working directory. Try one of these:\n")
             for c in candidates:
-                n = len(list(c.rglob("*.md")))
+                n = len(list(c.rglob("*.okf.md")))
                 print(f"    --root \"{c}\"   ({n} entity file(s))")
         else:
-            print("  No *.md files found nearby either. Either nothing has been")
+            print("  No *.okf.md files found nearby either. Either nothing has been")
             print("  written yet, or STORAGE_BACKEND is not 'local'. Check with:")
             print("    Invoke-RestMethod -Uri http://localhost:8000/healthz")
         sys.exit(1)
 
-    files = sorted(root.rglob("*.md"))
+    files = sorted(root.rglob("*.okf.md"))
     if not files:
         print(f"No entity files found under {root}")
         return

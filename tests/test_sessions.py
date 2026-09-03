@@ -8,7 +8,7 @@ fact can be traced back to the conversation that produced it.
 from __future__ import annotations
 
 import tempfile
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 
 import pytest
 
@@ -23,6 +23,15 @@ def log():
     backend = MirageBackend.from_disk(root=tempfile.mkdtemp())
     yield SessionLog(backend)
     backend.close()
+
+
+def _utc_today() -> date:
+    """SessionLog.append() shards by the UTC date of the write (see
+    sessions.py) whenever `when` is omitted, as every call below does. A
+    naive date.today() (local date) is wrong for part of the day in any
+    timezone ahead of UTC, so any test that writes then reads back must use
+    this instead."""
+    return datetime.now(timezone.utc).date()
 
 
 def test_a_session_is_one_file_not_one_per_turn(log):
@@ -65,7 +74,7 @@ def test_list_day_summarises_without_returning_whole_conversations(log):
     log.append("u", a, [{"role": "user", "content": "first conversation"}])
     log.append("u", b, [{"role": "user", "content": "second conversation"}])
 
-    rows = log.list_day("u", date.today())
+    rows = log.list_day("u", _utc_today())
     assert {r["session_id"] for r in rows} == {a, b}
     assert all("preview" in r and "messages" in r for r in rows)
 
@@ -78,12 +87,12 @@ def test_reading_an_absent_session_is_empty_not_an_error(log):
 def test_one_corrupt_line_does_not_lose_the_conversation(log):
     sid = new_session_id()
     log.append("u", sid, [{"role": "user", "content": "keep me"}])
-    key = log._key("u", date.today(), sid)
+    key = log._key("u", _utc_today(), sid)
     raw = log.backend.get_bytes(key).data.decode()
     log.backend.put_bytes(key, (raw + "{ not json\n" +
                                 '{"role":"user","content":"keep me too"}\n').encode())
 
-    contents = [m["content"] for m in log.read("u", sid, day=date.today())]
+    contents = [m["content"] for m in log.read("u", sid, day=_utc_today())]
     assert contents == ["keep me", "keep me too"]
 
 
@@ -129,7 +138,7 @@ def test_a_stored_fact_traces_back_to_its_conversation(log, monkeypatch):
                 "relations": [], "discarded": []})
 
     store = EntityGraphStore(log.backend)
-    ref = evidence_ref(date.today(), sid)
+    ref = evidence_ref(_utc_today(), sid)
     extractor = ConversationExtractor(store, Stub())
     plan = extractor.plan("u", "We decided today that Alice Chen leads the "
                                "retrieval workstream, deadline 2026-08-15.",

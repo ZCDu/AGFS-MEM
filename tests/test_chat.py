@@ -23,6 +23,49 @@ def seeded(client):
     return client
 
 
+def test_aggregate_query_detection():
+    from app.api.routes_chat import _is_aggregate_query
+    assert _is_aggregate_query("What deadlines are open across all projects?")
+    assert _is_aggregate_query("Give me an overview of everything we're tracking")
+    assert _is_aggregate_query("what's on our plate right now?")
+    # A single-topic question is NOT aggregate.
+    assert not _is_aggregate_query("What did we decide about the onboarding flow?")
+    assert not _is_aggregate_query("Who is Alice Chen?")
+
+
+def test_aggregate_memory_context_spans_wikis(client):
+    """An overview question with no single dominant wiki reads across all of
+    the user's wikis instead of returning empty.
+
+    Two separate topic wikis, each with one entity. The aggregate helper must
+    surface BOTH, so a "what's open across projects" question gets a real
+    cross-wiki picture rather than an empty memory miss."""
+    from app.api.routes_chat import _aggregate_memory_context
+    from app.deps import get_storage_backend, get_graph_store
+    from app.wikis.registry import WikiRegistry
+
+    reg = WikiRegistry(get_storage_backend())
+    reg.create("Alpha Project", "demo",
+               description="First project, distinct topic")
+    reg.create("Beta Project", "demo",
+               description="Second project, unrelated topic")
+    store = get_graph_store()
+    store.upsert_entity("alpha-project", "project", "Alpha",
+                        summary_append="Alpha deadline is March 1.")
+    store.upsert_entity("beta-project", "project", "Beta",
+                        summary_append="Beta deadline is April 1.")
+    store.flush()
+    reg.refresh_stats("alpha-project", 1, ["Alpha"])
+    reg.refresh_stats("beta-project", 1, ["Beta"])
+
+    ctx, used = _aggregate_memory_context(store, "demo", reg)
+    ids = {u["wiki_id"] for u in used}
+    assert "project/alpha" in ids, used
+    assert "project/beta" in ids, used
+    assert "Alpha deadline is March 1" in ctx
+    assert "Beta deadline is April 1" in ctx
+
+
 def _store():
     from app.deps import get_graph_store
     return get_graph_store()
@@ -48,6 +91,49 @@ def test_retrieval_finds_multiple_entities_and_builds_context(seeded):
     assert ids == {"person/alice-chen", "project/orion"}
     assert "Alice Chen" in ctx and "Orion" in ctx
     assert ctx.startswith("Relevant memory:")
+
+
+def test_component_priority_ranks_the_stronger_cluster_first(client):
+    """Two disconnected clusters, an ambiguous query hitting both -- the
+    cluster with the stronger overall match must rank ahead, and the
+    weaker-but-real match in the other cluster must still appear (soft
+    demotion, not a hard filter). See app/graph/components.py's unit tests
+    for the exact weighting math this exercises end-to-end here."""
+    store = _store()
+    # Cluster A: two linked entities; the query names the strong one by its
+    # exact title (title tier, high confidence).
+    store.upsert_entity("demo", "concept", "Weak Anchor", aliases=["Anchor"])
+    store.upsert_entity("demo", "project", "Q3 Planning Meeting")
+    store.link_entities("demo", "concept/weak-anchor", "project/q3-planning-meeting")
+    # Cluster B: an isolated entity the query names only by alias (a
+    # genuinely weaker, but still real, match tier).
+    store.upsert_entity("demo", "person", "Someone Else", aliases=["Someone"])
+    store.flush()
+
+    ctx, used = _memory_context(
+        store, "demo", "Let's talk about the Q3 Planning Meeting and Someone")
+    ids_in_order = [u["wiki_id"] for u in used]
+    assert ids_in_order.index("project/q3-planning-meeting") < ids_in_order.index(
+        "person/someone-else")
+    assert "person/someone-else" in ids_in_order, \
+        "a weaker match in the other cluster must still appear, not be hidden"
+
+
+def test_component_priority_is_a_noop_on_a_linked_single_cluster(client):
+    """With every matched entity in ONE connected component, every
+    component weight is 1.0 (see component_priority_weights' single-
+    component guarantee) -- retrieval order must be identical to a plain
+    confidence sort, unaffected by the reweighting code path at all."""
+    store = _store()
+    store.upsert_entity("demo", "person", "Alice Chen", aliases=["Alice"])
+    store.upsert_entity("demo", "project", "Orion")
+    store.link_entities("demo", "person/alice-chen", "project/orion")
+    store.flush()
+
+    _, used = _memory_context(
+        store, "demo", "What is Alice Chen working on with Orion?")
+    ids = {u["wiki_id"] for u in used}
+    assert ids == {"person/alice-chen", "project/orion"}
 
 
 def test_unrelated_message_retrieves_nothing(seeded):

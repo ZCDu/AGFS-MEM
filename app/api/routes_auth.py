@@ -92,6 +92,13 @@ class LoginRequest(BaseModel):
     password: str = Field(..., min_length=1)
 
 
+class RegisterRequest(BaseModel):
+    username: str = Field(..., min_length=1)
+    password: str = Field(..., min_length=1)
+    # Optional display name; the user_id defaults to the normalised username.
+    display_name: str = Field("", max_length=120)
+
+
 class LoginResponse(BaseModel):
     token: str
     token_type: str = "bearer"
@@ -145,6 +152,50 @@ def login(body: LoginRequest, request: Request):
         settings.auth_secret, user.user_id, settings.auth_session_hours,
         is_admin=user.is_admin, username=user.username)
     logger.info("login: %r -> user_id %r", user.username, user.user_id)
+    return LoginResponse(token=token, expires_at=exp, user_id=user.user_id,
+                         username=user.username, is_admin=user.is_admin)
+
+
+@router.post("/register", response_model=LoginResponse, status_code=201)
+def register(body: RegisterRequest, request: Request):
+    """Create a new account and log it in immediately.
+
+    Self-service signup: a caller picks a username and password, and on
+    success receives a session token exactly like a successful login, so they
+    are logged in the moment they register. The new account is a normal user
+    (`is_admin=False`) with no wiki grants; they reach meeting/project wikis
+    by redeeming a passcode invite owned by an existing member.
+
+    Gated the same way as login (fail-closed): registration is only available
+    when AUTH_MODE=token and AUTH_SECRET is set.
+    """
+    settings = get_settings()
+    if settings.auth_mode == "off":
+        raise HTTPException(
+            status_code=400,
+            detail="AUTH_MODE=off, so there is nothing to register for.")
+    if not settings.auth_secret:
+        raise HTTPException(
+            status_code=503,
+            detail="Registration is not enabled: AUTH_SECRET is not set.")
+
+    username = UserStore.normalise(body.username)
+    client = _client(request)
+    _throttle.check(username, client, settings.auth_login_max_attempts,
+                    settings.auth_login_window_seconds)
+
+    try:
+        user = _store().create(
+            username, body.password, user_id=username,
+            is_admin=False)
+    except ValueError as e:  # already exists, empty, or too-weak password
+        raise HTTPException(status_code=409, detail=str(e)) from e
+
+    _throttle.clear(username, client)
+    token, exp = issue_session_token(
+        settings.auth_secret, user.user_id, settings.auth_session_hours,
+        is_admin=user.is_admin, username=user.username)
+    logger.info("register: new user_id %r", user.user_id)
     return LoginResponse(token=token, expires_at=exp, user_id=user.user_id,
                          username=user.username, is_admin=user.is_admin)
 

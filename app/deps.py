@@ -11,6 +11,7 @@ from app.config import Settings, get_settings
 from app.graph.store import EntityGraphStore
 from app.graph.title_resolver import WikiTitleResolver
 from app.rawlog.log import RawFactLog
+from app.rawlog.notes import NotesLog
 from app.storage.backend import StorageBackend
 from app.storage.mirage_backend import MirageBackend
 
@@ -79,6 +80,10 @@ def get_title_resolver() -> WikiTitleResolver:
 
 def get_raw_log() -> RawFactLog:
     return RawFactLog(get_storage_backend())
+
+
+def get_notes_log() -> "NotesLog":
+    return NotesLog(get_storage_backend())
 
 
 @lru_cache(maxsize=1)

@@ -1,0 +1,99 @@
+# Local stack: the service plus an S3-compatible bucket.
+#
+#   docker compose up --build
+#   open http://127.0.0.1:8000/gui
+#
+# MinIO stands in for Qiniu Kodo so development needs no cloud credentials and
+# no network. Both speak the S3 API, and mirage talks to either by endpoint
+# URL alone — the application code cannot tell them apart, which is the point:
+# what runs locally is the code that ships.
+#
+# To point at real Qiniu instead, put the MIRAGE_S3_* values in .env and run:
+#   docker compose up backend
+# (omitting the minio services; `backend` alone pulls in neither).
+
+services:
+  minio:
+    image: minio/minio:RELEASE.2025-04-22T22-12-26Z
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
+    ports:
+      - "${MINIO_PORT:-9000}:9000"
+      - "${MINIO_CONSOLE_PORT:-9001}:9001"   # browser UI, to see the objects
+    volumes:
+      - minio-data:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+
+  # One-shot: creates the bucket, then exits. Without it the first write fails
+  # against a bucket that does not exist, which reads like a credentials
+  # problem and is not.
+  minio-init:
+    image: minio/mc:RELEASE.2025-04-16T18-13-26Z
+    depends_on:
+      minio:
+        condition: service_healthy
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
+      BUCKET: ${MIRAGE_S3_BUCKET:-memory}
+    entrypoint: >
+      /bin/sh -c "
+      mc alias set local http://minio:9000 $$MINIO_ROOT_USER $$MINIO_ROOT_PASSWORD &&
+      mc mb --ignore-existing local/$$BUCKET &&
+      echo 'bucket ready: '$$BUCKET
+      "
+
+  backend:
+    build: .
+    depends_on:
+      minio-init:
+        condition: service_completed_successfully
+    ports:
+      - "${BACKEND_PORT:-8000}:8000"
+    environment:
+      STORAGE_BACKEND: mirage
+      MIRAGE_S3_BUCKET: ${MIRAGE_S3_BUCKET:-memory}
+      MIRAGE_S3_REGION: ${MIRAGE_S3_REGION:-us-east-1}
+      # Service name, not localhost: inside the network `minio` resolves to
+      # the container.
+      MIRAGE_S3_ENDPOINT_URL: ${MIRAGE_S3_ENDPOINT_URL:-http://minio:9000}
+      MIRAGE_S3_ACCESS_KEY_ID: ${MIRAGE_S3_ACCESS_KEY_ID:-${MINIO_ROOT_USER:-minioadmin}}
+      MIRAGE_S3_SECRET_ACCESS_KEY: ${MIRAGE_S3_SECRET_ACCESS_KEY:-${MINIO_ROOT_PASSWORD:-minioadmin}}
+      # Path style puts the bucket in the URL path rather than the hostname.
+      # Virtual-hosted addressing needs wildcard DNS for the bucket subdomain,
+      # which MinIO only serves when MINIO_DOMAIN is set, and which many
+      # S3-compatible gateways do not provide cleanly. It also measured ~20%
+      # faster against Qiniu, so there is no reason to prefer the alternative.
+      MIRAGE_S3_PATH_STYLE: "true"
+      # Defaults to the app's own "memory_backend/". Passing an empty string
+      # here would override that and silently relocate every object, so the
+      # default is repeated rather than left blank.
+      MIRAGE_S3_KEY_PREFIX: ${MIRAGE_S3_KEY_PREFIX:-memory_backend/}
+
+      # Must stay 0: a non-zero index TTL returns stale directory listings
+      # when another process writes, and _rebuild_manifest replaces the index
+      # with whatever a listing returns.
+      MIRAGE_INDEX_TTL_SECONDS: "0"
+      MIRAGE_REUSE_CONNECTIONS: "true"
+
+      AUTH_MODE: ${AUTH_MODE:-token}
+      AUTH_TOKENS: ${AUTH_TOKENS:-}
+      AUTH_SECRET: ${AUTH_SECRET:-}
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
+      LLM_MODEL: ${LLM_MODEL:-deepseek-chat}
+
+      # Amortises the manifest and ops-log writes. The default of 2s fires
+      # between requests when each takes about a second, which defeats the
+      # batching entirely.
+      FLUSH_INTERVAL_SECONDS: ${FLUSH_INTERVAL_SECONDS:-30}
+      FLUSH_MAX_PENDING: ${FLUSH_MAX_PENDING:-200}
+    restart: unless-stopped
+
+volumes:
+  minio-data:

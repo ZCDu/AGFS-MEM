@@ -67,10 +67,17 @@
   #stats { font: 12px var(--mono); color: var(--ink-soft); }
 
   aside {
-    background: var(--panel); overflow-y: auto;
-    display: flex; flex-direction: column;
+    background: var(--panel);
+    min-height: 0;   /* let the panel shrink inside its grid row */
   }
-  aside.left { grid-area: left; border-right: 1px solid var(--line); }
+  aside.left {
+    grid-area: left; border-right: 1px solid var(--line);
+    /* Plain vertical stack (NOT flex column): when the four panels exceed
+       the sidebar height, the container scrolls and no panel ever overlaps
+       or covers its neighbours. */
+    overflow-y: auto;
+    display: block;
+  }
   aside.right { grid-area: right; border-left: 1px solid var(--line); }
 
   section { padding: 12px 14px; border-bottom: 1px solid var(--line-soft); }
@@ -185,13 +192,12 @@
 <header>
   <h1>Memory graph</h1>
   <div class="row" style="width:auto">
-    <label for="wiki" style="margin:0">Wiki</label>
-    <select id="wiki" style="width:150px; padding:4px 7px"></select>
     <label for="user" style="margin:0">User</label>
     <input id="user" value="demo" style="width:130px; font-family:var(--mono)">
-    <label for="token" style="margin:0">Token</label>
-    <input id="token" type="password" placeholder="token, or sign in"
-           style="width:130px; font-family:var(--mono)" autocomplete="off">
+    <!-- The session token lives here so auth.js's existing $("token") reads/
+         writes keep working unchanged, but it's never shown or typed into --
+         signing in with username/password is the only way a user sees. -->
+    <input id="token" type="hidden">
     <button class="sm" id="load">Load</button>
     <button class="sm ghost" id="signin">Sign in</button>
     <button class="sm ghost" id="signout">Sign out</button>
@@ -199,6 +205,8 @@
     <select id="depth" style="width:56px">
       <option>1</option><option selected>2</option><option>3</option><option>4</option>
     </select>
+    <label for="cluster" style="margin:0" title="A wiki can hold several disconnected clusters of entities with no edges between them -- pick which one to view.">Cluster</label>
+    <select id="cluster" style="width:170px"></select>
     <span id="who" class="muted" style="font-size:11px"></span>
   </div>
   <span class="sp"></span>
@@ -222,19 +230,64 @@
     <button id="create">Add entity</button>
   </section>
 
-  <section style="flex:1; display:flex; flex-direction:column; min-height:0">
+  <section style="display:flex; flex-direction:column; max-height:44vh; min-height:0">
     <h2>Entities <span id="count" class="muted"></span></h2>
     <input id="filter" placeholder="Filter by name or type">
-    <div class="elist" id="elist" style="margin:9px -14px 0; overflow-y:auto"></div>
+    <div class="elist" id="elist" style="margin:9px -14px 0; flex:1; min-height:0; overflow-y:auto"></div>
+  </section>
+
+  <section style="display:flex; flex-direction:column; max-height:44vh; min-height:0">
+    <h2>Notes <span class="muted" id="ncount"></span></h2>
+    <textarea id="ntext" placeholder="A medium-memory note / sticker: e.g. \"Sofia starts 2026-11-02\""></textarea>
+    <label for="ntags">Tags (comma-separated)</label>
+    <input id="ntags" placeholder="hiring, follow-up">
+    <label for="nexpires">Expires (optional, YYYY-MM-DD)</label>
+    <input id="nexpires" type="date">
+    <div style="height:8px"></div>
+    <button id="ncreate">Add note</button>
+    <div class="row" style="margin-top:8px">
+      <input id="nfiltertag" placeholder="filter by tag">
+      <button class="ghost sm" id="nactive">Active only</button>
+      <button class="ghost sm" id="nshowexp">Expired</button>
+    </div>
+    <div id="nlist" style="margin-top:9px; flex:1; min-height:0; overflow-y:auto"></div>
   </section>
 
   <section>
-    <h2>Assess text</h2>
-    <textarea id="atext" placeholder="Paste conversation text to score against this graph"></textarea>
-    <div style="height:8px"></div>
-    <button class="ghost" id="assess">Assess</button>
-    <div id="aout" style="margin-top:9px"></div>
+    <h2>Capture timer</h2>
+    <p class="muted" style="margin:0 0 6px; font-size:12px">Daily auto-update.
+      Reads/updates the background capture schedule.</p>
+    <div id="tstate" class="muted" style="font-size:12px">…</div>
+    <div class="row" style="margin-top:8px">
+      <input id="ttime" type="time" value="22:00">
+      <button class="ghost sm" id="tset">Set</button>
+    </div>
+    <div class="muted" style="margin-top:6px; font-size:11px" id="tnote">Process-only: set AUTO_CAPTURE_TIME in .env to persist.</div>
+    <div class="row" style="margin-top:8px">
+      <button class="ghost sm" id="trunnow">Capture now</button>
+    </div>
+    <div class="muted" style="margin-top:6px; font-size:11px">The scheduled run only ever captures <em>yesterday's</em>
+      journal, so today's messages wait until tomorrow's run by default. This runs today's capture immediately instead.</div>
   </section>
+
+  <section id="adminSection" hidden>
+    <h2>Admin</h2>
+    <p class="muted" style="margin:0 0 6px; font-size:12px">Visible because your account has platform-admin access.
+      Every read here is logged to that user's own audit trail.</p>
+    <div class="row">
+      <select id="adminUserSelect" style="flex:1"><option>loading…</option></select>
+    </div>
+    <div class="row" style="margin-top:6px">
+      <button class="ghost sm" id="adminViewWiki">View wiki</button>
+      <button class="ghost sm" id="adminSummarize">Ask for summary</button>
+    </div>
+    <input id="adminQuery" placeholder="optional: what to focus the summary on" style="margin-top:6px">
+    <div id="adminOut" style="margin-top:8px; font-size:12px; max-height:280px; overflow-y:auto"></div>
+  </section>
+
+  <input type="file" id="finput" accept=".txt,.md,.markdown,.csv,.log,.json" hidden>
+  <div id="fstatus" class="muted" style="margin-top:6px; font-size:12px"></div>
+  <div id="fplan" style="margin-top:8px"></div>
 </aside>
 
 <main>
@@ -267,18 +320,28 @@ const CATS = ["related_to","refines","contradicts","causes","temporal_before","t
 const colour = t => getComputedStyle(document.documentElement).getPropertyValue("--t-" + t).trim() || "#55707f";
 
 let entities = [];      // nodes currently drawn
-let catalogue = [];     // sidebar list, fetched separately and paged
+let catalogue = [];     // sidebar list -- allEntities filtered to the current cluster + search text
 let graph = {nodes: [], edges: []};
 let nodes = [], links = [];
 let selected = null;    // wiki_id
 let sim = null;
 
+// ---------------- clusters ----------------
+// A wiki can hold several disconnected clusters of entities with zero edges
+// between them (see app/graph/components.py). The graph page shows ONE
+// cluster at a time -- both the canvas and the sidebar list -- rather than
+// spreading every cluster across one shared view, so "which cluster am I
+// looking at" always has an unambiguous answer.
+let allEntities = [];        // full, unpaged catalogue -- the source clusters/sidebar are built from
+let clusters = [];           // [{members: Set<wiki_id>, label, updatedAt}], largest first
+let currentCluster = null;   // index into `clusters`, or null to show every cluster at once
+
 const $ = id => document.getElementById(id);
 const user = () => $("user").value.trim() || "demo";
-// The graph endpoints are still addressed by user for backwards
-// compatibility; the picker overrides which graph that resolves to, so an
-// explicit choice wins over the user's own default wiki.
-const scope = () => ($("wiki") && $("wiki").value) || user();
+// Single-user deployment: no wiki picker, the graph is always this user's
+// own default wiki. The graph endpoints are still addressed by user_id for
+// backwards compatibility -- see app/api/routes_entities.py.
+const scope = () => user();
 const base = () => `/v1/users/${encodeURIComponent(scope())}`;
 
 function toast(msg, isErr) {
@@ -318,6 +381,81 @@ async function api(method, path, body) {
 
 /* ---------------- data ---------------- */
 
+// Undirected adjacency + BFS partition, mirroring app/graph/components.py's
+// build_adjacency()/connected_components() exactly (same undirected-despite-
+// directional-edges reasoning, same largest-first/lexicographic ordering) so
+// the client and server never disagree about what counts as one cluster.
+function computeClustersFrom(rows) {
+  const adj = new Map(rows.map(e => [e.wiki_id, new Set()]));
+  const byId = new Map(rows.map(e => [e.wiki_id, e]));
+  for (const e of rows) {
+    for (const edge of e.edges || []) {
+      if (!adj.has(edge.t)) continue;
+      adj.get(e.wiki_id).add(edge.t);
+      adj.get(edge.t).add(e.wiki_id);
+    }
+  }
+  const seen = new Set();
+  const comps = [];
+  for (const id of [...adj.keys()].sort()) {
+    if (seen.has(id)) continue;
+    const members = [];
+    const queue = [id];
+    seen.add(id);
+    while (queue.length) {
+      const n = queue.pop();
+      members.push(n);
+      for (const nb of adj.get(n)) {
+        if (!seen.has(nb)) { seen.add(nb); queue.push(nb); }
+      }
+    }
+    members.sort();
+    comps.push(members);
+  }
+  comps.sort((a, b) => b.length - a.length || (a[0] < b[0] ? -1 : 1));
+  return comps.map(members => {
+    const memberSet = new Set(members);
+    // Label by the highest-degree member -- the same "hubs are the useful
+    // entry point" convention app/graph/store.py's subgraph() already uses
+    // for its default seeds.
+    const hub = members.reduce((best, id) =>
+      adj.get(id).size > adj.get(best).size ? id : best, members[0]);
+    const updatedAt = members.reduce((max, id) => {
+      const u = byId.get(id).updated_at || "";
+      return u > max ? u : max;
+    }, "");
+    return {
+      members: memberSet,
+      label: `${byId.get(hub).title}${members.length > 1 ? ` +${members.length - 1}` : ""}`,
+      updatedAt,
+    };
+  });
+}
+
+async function computeClusters() {
+  try {
+    allEntities = await api("GET", "/wiki");
+  } catch (e) { toast("Could not load entities: " + e.message, true); return; }
+  clusters = computeClustersFrom(allEntities);
+
+  // Default to showing EVERY cluster at once -- a single extraction (one
+  // meeting log, one long document) routinely produces several disconnected
+  // clusters, and hiding all but one behind a selector meant most of what
+  // was just stored was invisible with no obvious way to find it. Clusters
+  // stay visually separated (layout() gives each its own anchor point), but
+  // narrowing to just one is now something you opt into, not the default.
+  // Preserve a manual single-cluster selection across reloads as long as
+  // it's still valid; otherwise fall back to "all".
+  const stillValid = typeof currentCluster === "number" && clusters[currentCluster];
+  if (!stillValid) currentCluster = null;
+
+  const sel = $("cluster");
+  sel.innerHTML = `<option value="">All (${allEntities.length})</option>`
+    + clusters.map((c, i) =>
+        `<option value="${i}">${esc(c.label)} (${c.members.size})</option>`).join("");
+  sel.value = currentCluster !== null ? String(currentCluster) : "";
+}
+
 // wiki_ids currently on the canvas. The graph view is a NEIGHBOURHOOD, not
 // the whole index: a page of a graph has edges pointing at nodes you were not
 // sent, which cannot be laid out. Expanding adds to this set.
@@ -325,10 +463,27 @@ let loaded = new Set();
 
 async function load(keepSelection) {
   try {
+    if (!loaded.size) await computeClusters();  // fresh load: (re)establish which cluster to show
     const depth = parseInt($("depth").value, 10) || 2;
-    const body = loaded.size
-      ? {entry_wiki_ids: [...loaded], max_depth: 0, max_nodes: 600}
-      : {max_depth: depth, max_nodes: 40};   // seed from the highest-degree nodes
+    const cluster = typeof currentCluster === "number" ? clusters[currentCluster] : null;
+    let body;
+    if (loaded.size) {
+      body = {entry_wiki_ids: [...loaded], max_depth: 0, max_nodes: 600};
+    } else if (cluster) {
+      // depth 0 with every member as an entry point returns exactly that
+      // closed cluster -- membership is already known from computeClusters(),
+      // so there's no hub-guessing needed.
+      body = {entry_wiki_ids: [...cluster.members], max_depth: 0,
+              max_nodes: Math.max(cluster.members.size, 40)};
+    } else if (allEntities.length) {
+      // No single cluster picked -- show everything. Every known entity is
+      // its own entry point at depth 0, the same trick used for a single
+      // cluster, just applied to the whole wiki instead of one slice of it.
+      body = {entry_wiki_ids: allEntities.map(e => e.wiki_id), max_depth: 0,
+              max_nodes: Math.max(allEntities.length, 40)};
+    } else {
+      body = {max_depth: depth, max_nodes: 40};   // empty wiki: nothing to scope to
+    }
     const g = await api("POST", "/wiki/subgraph", body);
     graph = g;
     loaded = new Set(g.nodes.map(n => n.wiki_id));
@@ -364,6 +519,10 @@ function buildGraph() {
     return {
       id: e.wiki_id, title: e.title, type: e.type,
       hidden: e.hidden_neighbours || 0, degree: e.degree || 0,
+      // Which disconnected cluster this node belongs to (server-computed,
+      // see app/graph/components.py) -- layout() gives each cluster its own
+      // anchor point instead of pulling everything toward one shared center.
+      component: e.component ?? 0,
       x: p ? p.x : (hasSaved ? e.x : (Math.random() - 0.5) * 300),
       y: p ? p.y : (hasSaved ? e.y : (Math.random() - 0.5) * 300),
       vx: 0, vy: 0, placed: hasSaved && !p,
@@ -389,17 +548,23 @@ async function expand(wikiId) {
   } catch (e) { toast(e.message, true); }
 }
 
-async function loadCatalogue() {
-  // The sidebar is a CATALOGUE: flat, searchable, paged. Separate request
-  // because it wants different fields and different semantics from the graph.
-  try {
-    const q = $("filter").value.trim();
-    const rows = await api("GET", "/wiki" +
-      `?limit=200${q ? "&q=" + encodeURIComponent(q) : ""}`);
-    catalogue = rows;
-    $("count").textContent = rows.length ? `(${rows.length})` : "";
-    renderList();
-  } catch { /* the graph is still usable without the sidebar */ }
+function loadCatalogue() {
+  // The sidebar is a CATALOGUE, filtered to the currently shown cluster --
+  // client-side over allEntities/clusters (already fetched by
+  // computeClusters(), called from load()), fine at this scale the same
+  // way app/graph/components.py's own algorithms are. Re-filtering on every
+  // keystroke in the search box needs no new request, just a narrower slice
+  // of data already in hand.
+  const q = $("filter").value.trim().toLowerCase();
+  const cluster = typeof currentCluster === "number" ? clusters[currentCluster] : null;
+  let rows = cluster ? allEntities.filter(e => cluster.members.has(e.wiki_id)) : allEntities;
+  if (q) {
+    rows = rows.filter(e => e.title.toLowerCase().includes(q)
+      || e.type.toLowerCase().includes(q) || e.wiki_id.toLowerCase().includes(q));
+  }
+  catalogue = rows;
+  $("count").textContent = rows.length ? `(${rows.length})` : "";
+  renderList();
 }
 
 /* ---------------- force layout ----------------
@@ -407,9 +572,28 @@ async function loadCatalogue() {
    that may not reach one. Repulsion between all pairs, springs along edges,
    weak pull to centre, velocity damping. Fine at this scale. */
 
+// Anchor points per disconnected cluster (node.component, see buildGraph()
+// and app/graph/components.py), so the centering pull below separates
+// unrelated clusters instead of dragging every node toward one shared
+// origin. With 0 or 1 clusters present, every anchor is (0,0) -- IDENTICAL
+// to the single shared centre this replaces, not just visually similar, so
+// a wiki with one connected component is unaffected.
+function clusterAnchors() {
+  const ids = [...new Set(nodes.map(n => n.component))].sort((a, b) => a - b);
+  const anchors = new Map();
+  const k = ids.length;
+  const r = k <= 1 ? 0 : 90 + k * 70;
+  ids.forEach((id, i) => {
+    const angle = (2 * Math.PI * i) / k;
+    anchors.set(id, { x: r * Math.cos(angle), y: r * Math.sin(angle) });
+  });
+  return anchors;
+}
+
 function layout() {
   if (sim) cancelAnimationFrame(sim);
   if (!nodes.length) { draw(); return; }
+  const anchors = clusterAnchors();
   let alpha = 1;
   const step = () => {
     for (let i = 0; i < nodes.length; i++) {
@@ -435,7 +619,8 @@ function layout() {
     }
     for (const n of nodes) {
       if (n.fixed || n.pinned) { n.vx = n.vy = 0; continue; }
-      n.vx -= n.x * 0.006; n.vy -= n.y * 0.006;
+      const anchor = anchors.get(n.component) || { x: 0, y: 0 };
+      n.vx -= (n.x - anchor.x) * 0.006; n.vy -= (n.y - anchor.y) * 0.006;
       n.vx *= 0.82; n.vy *= 0.82;
       n.x += n.vx * alpha; n.y += n.vy * alpha;
     }
@@ -578,6 +763,18 @@ async function showDetail(id) {
   }
 
   const others = entities.filter(x => x.wiki_id !== id);
+  // Merge candidates deliberately come from allEntities (every entity this
+  // user has), not `others` (only the entities currently drawn in this
+  // cluster) -- two duplicate entities are, by definition, usually
+  // unconnected and so never appear in the same cluster together. Sourcing
+  // from the drawn subgraph would make the one case merge exists for
+  // impossible to reach from the UI. Restricted to the same type as the
+  // server rejects a cross-type merge (a person absorbed into a project
+  // makes no sense) -- filtering here avoids a round trip just to learn that.
+  const mergeCandidates = allEntities
+    .filter(x => x.wiki_id !== id && x.type === e.type)
+    .slice()
+    .sort((a, b) => a.title.localeCompare(b.title));
   $("detail").innerHTML = `
     <section>
       <h2>Selected entity</h2>
@@ -645,6 +842,28 @@ async function showDetail(id) {
     </section>
 
     <section>
+      <h2>Share</h2>
+      <p class="muted">Anyone with the link can chat with the assistant about this and everything
+        already linked to it &mdash; nothing else. They can add to it; they can't see or touch
+        the rest of your graph.</p>
+      <div id="d_shares"><p class="muted">Loading&hellip;</p></div>
+      <div style="height:6px"></div>
+      <button class="ghost" id="d_share_new">Create share link</button>
+    </section>
+
+    <section>
+      <h2>Merge duplicate</h2>
+      <p class="muted">Found two entities for the same thing? Fold this one into another —
+        its facts, aliases and relations move over, and anything pointing at this entity
+        gets redirected instead of broken.</p>
+      <label for="d_merge_target">Merge into</label>
+      <select id="d_merge_target">${mergeCandidates.map(o =>
+        `<option value="${esc(o.wiki_id)}">${esc(o.title)} — ${esc(o.wiki_id)}</option>`).join("")}</select>
+      <div style="height:6px"></div>
+      <button class="ghost" id="d_merge" ${mergeCandidates.length ? "" : "disabled"}>Merge into selected entity</button>
+    </section>
+
+    <section>
       <h2>Danger zone</h2>
       <p class="muted">Removing an entity also strips relations pointing at it.</p>
       <div style="height:6px"></div>
@@ -656,6 +875,63 @@ async function showDetail(id) {
 
   const expandBtn = $("detail").querySelector("#d_expand");
   if (expandBtn) expandBtn.onclick = () => expand(e.wiki_id);
+
+  async function renderShares() {
+    const box = $("d_shares");
+    if (!box) return;
+    let links;
+    try {
+      links = (await api("GET", "/shares")).filter(l => l.entry_wiki_id === e.wiki_id);
+    } catch (err) {
+      box.innerHTML = `<p class="muted">${esc(err.message)}</p>`;
+      return;
+    }
+    if (!links.length) {
+      box.innerHTML = `<p class="muted">No active share links for this entity.</p>`;
+      return;
+    }
+    // scope_size comes from the same public preview a guest sees (GET
+    // /v1/shared/{id}, no auth) -- fetched here too so the OWNER can tell
+    // how big a cluster a link actually covers without opening it
+    // themselves. Best-effort per link: one failing preview shouldn't blank
+    // out the rest of the list.
+    const sizes = await Promise.all(links.map(l =>
+      fetch(`/v1/shared/${encodeURIComponent(l.share_id)}`)
+        .then(r => r.ok ? r.json() : null).then(p => p?.scope_size).catch(() => null)));
+    box.innerHTML = links.map((l, i) => `
+      <div class="item">
+        <div class="id">created ${esc((l.created_at || "").slice(0, 10))}${
+          l.expires_at ? " · expires " + esc(l.expires_at.slice(0, 10)) : ""}
+          ${sizes[i] != null ? ` · shares ${sizes[i]} linked ${sizes[i] === 1 ? "item" : "items"}` : ""}</div>
+        <input readonly value="${esc(location.origin + l.url)}"
+               style="width:100%; margin-top:4px; font:11px var(--mono)"
+               onclick="this.select()">
+        <div class="row" style="margin-top:5px">
+          <button class="sm ghost" data-copy="${esc(location.origin + l.url)}">Copy link</button>
+          <button class="sm danger" data-revoke="${esc(l.share_id)}">Revoke</button>
+        </div>
+      </div>`).join("");
+    box.querySelectorAll("[data-copy]").forEach(b => b.onclick = async () => {
+      try { await navigator.clipboard.writeText(b.dataset.copy); toast("Link copied"); }
+      catch { toast("Could not copy — select and copy the link text", true); }
+    });
+    box.querySelectorAll("[data-revoke]").forEach(b => b.onclick = guard(async () => {
+      if (!confirm("Revoke this share link? Anyone still holding it loses access immediately."))
+        return;
+      await api("DELETE", `/shares/${encodeURIComponent(b.dataset.revoke)}`);
+      toast("Share link revoked");
+      await renderShares();
+    }));
+  }
+  renderShares();
+  const shareNewBtn = $("detail").querySelector("#d_share_new");
+  if (shareNewBtn) shareNewBtn.onclick = guard(async () => {
+    const r = await api("POST", path + "/share", {label: e.title});
+    toast("Share link created");
+    await renderShares();
+    try { await navigator.clipboard.writeText(location.origin + r.url); toast("Link copied"); }
+    catch { /* clipboard permission denied — the link is still listed below */ }
+  });
 
   $("d_save").onclick = guard(async () => {
     await api("PUT", "/wiki", {
@@ -684,6 +960,16 @@ async function showDetail(id) {
     if (!confirm(`Delete ${e.wiki_id}? This cannot be undone.`)) return;
     await api("DELETE", path + "?hard_delete=true&cascade=true");
     toast("Deleted " + e.wiki_id); selected = null; await load(false);
+  });
+  const mergeBtn = $("detail").querySelector("#d_merge");
+  if (mergeBtn) mergeBtn.onclick = guard(async () => {
+    const target = $("d_merge_target").value;
+    const targetTitle = mergeCandidates.find(o => o.wiki_id === target)?.title || target;
+    if (!confirm(`Merge ${e.title} into ${targetTitle}? ${e.title} will be tombstoned.`)) return;
+    const r = await api("POST", path + "/merge_into", {target_wiki_id: target});
+    toast(`Merged into ${targetTitle} (${r.facts_moved} facts, ` +
+          `${r.relations_moved + r.relations_redirected} relations moved)`);
+    selected = null; await load(false);
   });
   $("detail").querySelectorAll("[data-savefact]").forEach(b => b.onclick = guard(async () => {
     const id2 = b.dataset.savefact;
@@ -721,6 +1007,13 @@ function remember() {
 }
 
 $("depth").onchange = () => { loaded = new Set(); selected = null; load(false); };
+$("cluster").onchange = () => {
+  const v = $("cluster").value;
+  currentCluster = v === "" ? null : Number(v);
+  loaded = new Set(); selected = null;
+  loadCatalogue();  // re-filter the sidebar to the newly picked cluster immediately
+  load(false);      // computeClusters() inside load() will see currentCluster already set and keep it
+};
 
 $("more").onclick = () => {
   // Step the depth up one and reseed, rather than silently fetching more at
@@ -734,22 +1027,7 @@ $("more").onclick = () => {
   load(false);
 };
 
-async function loadWikis() {
-  const sel = $("wiki");
-  if (!sel) return;
-  const keep = sel.value;
-  try {
-    const wikis = await (await fetch("/v1/wikis", {headers: MemAuth.headers()})).json();
-    const rows = Array.isArray(wikis) ? wikis : [];
-    sel.innerHTML = `<option value="">${esc(user())} (own)</option>`
-      + rows.map(w => `<option value="${esc(w.wiki_id)}">${esc(w.title)} (${w.entity_count})</option>`).join("");
-    sel.value = keep;
-  } catch { /* auth off or no registry; the own-wiki option still works */ }
-}
-
-$("wiki").onchange = () => { loaded = new Set(); selected = null; load(false); };
-
-$("load").onclick = () => { remember(); selected = null; loadWikis(); load(false); };
+$("load").onclick = () => { remember(); selected = null; load(false); };
 $("token").addEventListener("keydown", e => { if (e.key === "Enter") { remember(); selected = null; load(false); } });
 $("user").addEventListener("keydown", e => { if (e.key === "Enter") { remember(); selected = null; load(false); } });
 let filterTimer = null;
@@ -787,25 +1065,283 @@ $("create").onclick = async () => {
   } catch (e) { toast(e.message, true); }
 };
 
-$("assess").onclick = async () => {
-  const text = $("atext").value.trim();
-  if (!text) return toast("Paste some text first", true);
+/* ---------------- ingest a file ---------------- */
+
+// A dropped file goes through the same "review then apply" two-step as the
+// chat page: upload -> read its text -> POST /extract (writes nothing) -> user
+// reviews the plan -> Apply commits it. Nothing is written on drop.
+const FTC = {upsert_entity:"#2f6fb5", add_fact:"#82711e", link_entities:"#7048a8"};
+let filePlan = null;   // {target_wiki, proposal, ops} from the last review
+
+function fStatus(msg, err) {
+  $("fstatus").innerHTML = `<span style="color:${err ? "var(--danger)" : "var(--ink-soft)"}">${esc(msg)}</span>`;
+}
+
+async function ingestFile(file) {
   try {
-    const r = await api("POST", "/assess", {text});
-    const tone = r.decision === "store" ? "var(--ok)" : r.decision === "review" ? "var(--t-event)" : "var(--ink-soft)";
-    $("aout").innerHTML = `
-      <div class="item">
-        <div><span class="pill" style="background:${tone}">${esc(r.decision)}</span>
-          <span class="muted" style="margin-left:6px">score ${r.usefulness}</span></div>
-        <div class="muted" style="font-family:var(--mono); font-size:11px; margin-top:5px">
-          relevance ${r.relevance} · novelty ${r.novelty}<br>importance ${r.importance} · density ${r.density}</div>
-        ${r.related.length ? `<div style="margin-top:5px; font-size:12px">Links to ${
-          r.related.map(x => `<span style="font-family:var(--mono)">${esc(x.wiki_id)}</span>`).join(", ")}</div>` : ""}
-        ${r.new_candidates.length ? `<div style="margin-top:4px; font-size:12px">New names: ${
-          r.new_candidates.map(esc).join(", ")}</div>` : ""}
-        <div class="muted" style="margin-top:5px; font-size:11px">${esc(r.reasons.join("; "))}</div>
-      </div>`;
-  } catch (e) { toast(e.message, true); }
+    $("fplan").innerHTML = ""; filePlan = null;
+    fStatus(`Uploading ${esc(file.name)}…`);
+    const uid = user();
+    const meta = await MemAuth.upload(uid, file);
+    if (!meta.text_extractable) {
+      fStatus(`${esc(file.name)}: stored, but no text can be extracted from this file type.`);
+      return;
+    }
+    fStatus(`Extracting text from ${esc(file.name)}…`);
+    const gt = await MemAuth.fileText(uid, meta.file_id);
+    if (!gt.text || !gt.text.trim()) { fStatus(`${esc(file.name)}: no text found.`); return; }
+    renderFilePlan({file: file.name, text: gt.text});
+  } catch (e) {
+    fStatus(e.message, true);
+  }
+}
+
+function renderFilePlan({file, text}) {
+  $("fstatus").innerHTML = `<span class="muted"><span style="font-family:var(--mono)">${esc(file)}</span> — ${text.length.toLocaleString()} chars.</span>
+    <span class="muted" style="margin-left:6px">Review the plan below, then Apply to write it into memory.</span>`;
+  const going = $("fplan");
+  going.innerHTML = `<div class="item">
+      <button class="ghost sm" id="f_go">Build extraction plan</button>
+      <span class="muted" style="margin-left:8px; font-size:12px">runs the same router + extractor as chat</span>
+    </div>`;
+  const store = {file, text};
+  $("f_go").onclick = async () => {
+    $("f_go").disabled = true;
+    try {
+      const plan = await api("POST", "/extract", {text: text.slice(0, 60000), force: true});
+      filePlan = {target_wiki: plan.target_wiki || null,
+                  proposal: plan.new_wiki_proposal || null,
+                  ops: (plan.operations || []).filter(o => o.status === "proposed")};
+      renderFileReview(plan);
+    } catch (e) { fStatus("Extraction failed: " + e.message, true); $("f_go").disabled = false; }
+  };
+}
+
+function renderFileReview(plan) {
+  const parts = [];
+  const tone = plan.decision === "store" ? "var(--ok)" : plan.decision === "review" ? "var(--accent)" : "var(--ink-soft)";
+  parts.push(`<div style="margin-top:6px"><span class="pill" style="background:${tone}">${esc(plan.decision)}</span>
+    <span class="muted" style="margin-left:6px">${esc(plan.target_wiki || "no wiki")}</span></div>`);
+  if (!plan.operations || !plan.operations.length) {
+    parts.push(`<p class="muted" style="margin-top:8px">Nothing proposed.</p>`);
+  } else {
+    parts.push(`<div style="margin-top:9px">` + plan.operations.map(o => `
+      <div class="item" style="margin:3px 0"><span style="color:${FTC[o.op] || "var(--ink)"}">${esc(o.op)}</span>
+        <span class="muted" style="font-family:var(--mono); font-size:11px">${esc(o.wiki_id)}</span>
+        ${o.detail ? `<div class="muted" style="font-size:10px">${esc(o.detail)}</div>` : ""}
+      </div>`).join("") + `</div>`);
+  }
+  parts.push(`<button class="sm" id="f_apply" style="margin-top:8px" ${plan.operations.length ? "" : "disabled"}>Apply ${plan.operations.length} operation${plan.operations.length === 1 ? "" : "s"}</button>`);
+  $("fplan").innerHTML = parts.join("");
+  const applyBtn = $("f_apply");
+  if (applyBtn) applyBtn.onclick = async () => {
+    applyBtn.disabled = true;
+    try {
+      const res = await api("POST", "/extract/apply", {
+        target_wiki: filePlan.target_wiki,
+        new_wiki_proposal: filePlan.proposal || undefined,
+        operations: filePlan.ops.map(o => ({op: o.op, wiki_id: o.wiki_id, payload: o.payload, reason: o.reason || "", status: "proposed", detail: o.detail || ""})),
+      });
+      fStatus(`Committed: ${res.operations.length} operation(s) to ${filePlan.target_wiki}.`);
+      $("fplan").innerHTML = `<div class="muted" style="margin-top:6px">Done — ${filePlan.target_wiki}. Reload the wiki to see new entities.</div>`;
+      filePlan = null;
+    } catch (e) { fStatus("Apply failed: " + e.message, true); applyBtn.disabled = false; }
+  };
+}
+
+// Drag-and-drop anywhere on the page triggers file ingestion.
+MemAuth.installDnD({onDrop: f => ingestFile(f)});
+$("finput").onchange = () => { if ($("finput").files[0]) ingestFile($("finput").files[0]); $("finput").value = ""; };
+
+/* ---------------- medium-memory notes ---------------- */
+
+function escAttr(s) {
+  return String(s == null ? "" : s).replace(/&/g, "&amp;").replace(/"/g, "&quot;")
+    .replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+let noteOpts = {tag: "", active: false, expired: false};
+
+async function loadNotes() {
+  const q = new URLSearchParams();
+  if (noteOpts.tag) q.set("tag", noteOpts.tag);
+  if (noteOpts.active) q.set("active", "true");
+  if (noteOpts.expired) q.set("include_expired", "false");
+  let notes = [];
+  try {
+    if (noteOpts.expired) {
+      const st = await api("GET", "/notes/expired");
+      notes = st.expired_notes || [];
+      $("ncount").textContent = `${st.active} active · ${st.expired} expired`;
+    } else {
+      notes = await api("GET", "/notes" + (q.toString() ? "?" + q.toString() : ""));
+      $("ncount").textContent = `${notes.length} note${notes.length === 1 ? "" : "s"}`;
+    }
+  } catch (e) { toast("Notes: " + e.message, true); return; }
+  if (!notes.length) {
+    $("nlist").innerHTML = `<p class="muted" style="margin:0">No notes.</p>`;
+    return;
+  }
+  $("nlist").innerHTML = notes.map(n => `
+    <div class="item" style="margin:5px 0; padding:6px 8px; border:1px solid var(--line-soft); border-radius:4px">
+      <div>${escAttr(n.text)}</div>
+      <div class="muted" style="font-size:11px; margin-top:3px">
+        ${(n.tags || []).map(t => `<span class="pill">${escAttr(t)}</span>`).join(" ")}
+        ${n.expires_at ? `<span style="margin-left:6px">expires ${escAttr(String(n.expires_at).slice(0,10))}</span>` : ""}
+      </div>
+      <button class="sm danger" data-delnote="${escAttr(n.id)}" style="margin-top:4px">Delete</button>
+    </div>`).join("");
+  // wire delete
+  $("nlist").querySelectorAll("[data-delnote]").forEach(b => b.onclick = async () => {
+    try { await api("DELETE", "/notes/" + encodeURIComponent(b.dataset.delnote)); loadNotes(); }
+    catch (e) { toast("Delete failed: " + e.message, true); }
+  });
+}
+
+$("ncreate").onclick = async () => {
+  const text = $("ntext").value.trim();
+  if (!text) return toast("Note text is empty.", true);
+  const tags = $("ntags").value.split(",").map(s => s.trim()).filter(Boolean);
+  const exp = $("nexpires").value;
+  const body = {text, tags};
+  if (exp) body.expires_at = new Date(exp + "T00:00:00").toISOString();
+  try {
+    await api("POST", "/notes", body);
+    $("ntext").value = ""; $("ntags").value = ""; $("nexpires").value = "";
+    noteOpts = {tag: "", active: false, expired: false};
+    $("nfiltertag").value = "";
+    loadNotes();
+  } catch (e) { toast("Add note failed: " + e.message, true); }
+};
+
+$("nfiltertag").oninput = () => { noteOpts.tag = $("nfiltertag").value.trim(); loadNotes(); };
+$("nactive").onclick = () => { noteOpts.active = !noteOpts.active; noteOpts.expired = false; loadNotes(); };
+$("nshowexp").onclick = () => { noteOpts.expired = !noteOpts.expired; noteOpts.active = false; loadNotes(); };
+
+/* ---------------- capture timer schedule ---------------- */
+
+// The timer endpoint lives under the USER, not the wiki scope.
+const userBase = () => `/v1/users/${encodeURIComponent(user())}`;
+
+async function loadTimer() {
+  try {
+    const res = await fetch(userBase() + "/autocapture/schedule", {headers: authHeaders()});
+    if (!res.ok) { $("tstate").textContent = res.status === 401 ? "auth required" : `HTTP ${res.status}`; return; }
+    const body = await res.json();
+    const s = body.schedule;
+    const on = s.enabled ? (s.time ? s.time : "—") + (s.tz ? " " + s.tz : "") : "disabled";
+    $("tstate").textContent = `enabled: ${s.enabled} · daily ${on}\nbackfill ${s.backfill_days}d · lookback ${s.lookback_days}d`;
+    if (s.time) $("ttime").value = s.time;
+  } catch (e) { $("tstate").textContent = "unavailable"; }
+}
+
+$("tset").onclick = async () => {
+  const t = $("ttime").value || "10:50";
+  if (!/^\d{2}:\d{2}$/.test(t)) return toast("Time must be HH:MM.", true);
+  try {
+    const res = await fetch(userBase() + "/autocapture/schedule", {
+      method: "POST", headers: {"content-type": "application/json", ...authHeaders()},
+      body: JSON.stringify({time: t, tz: "Asia/Shanghai"}),
+    });
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error((body.detail || "HTTP " + res.status));
+    toast("Capture timer set to " + t);
+    loadTimer();
+  } catch (e) { toast("Set timer failed: " + e.message, true); }
+};
+
+$("trunnow").onclick = async () => {
+  const btn = $("trunnow");
+  btn.disabled = true;
+  const original = btn.textContent;
+  btn.textContent = "Capturing…";
+  try {
+    // No `on` param -> the endpoint defaults to today (server's UTC date),
+    // unlike the scheduled timer which always targets yesterday.
+    const res = await fetch(userBase() + "/autocapture/run", {
+      method: "POST", headers: authHeaders(),
+    });
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error((body.detail || "HTTP " + res.status));
+    toast(`Captured: ${body.stored} stored, ${body.skipped} skipped, ${body.failed} failed`);
+  } catch (e) { toast("Capture now failed: " + e.message, true); }
+  finally { btn.disabled = false; btn.textContent = original; }
+};
+
+/* ---------------- admin panel ---------------- */
+// Hidden by default; shown only after /v1/auth/me confirms the signed-in
+// credential carries is_admin. The endpoints themselves also enforce this
+// (403 without it) -- this check is purely so the panel doesn't dangle in
+// front of someone it will just reject.
+
+async function checkAdmin() {
+  const section = $("adminSection");
+  try {
+    const res = await fetch("/v1/auth/me", {headers: authHeaders()});
+    if (!res.ok) { section.hidden = true; return; }
+    const me = await res.json();
+    section.hidden = !me.is_admin;
+    if (me.is_admin) loadAdminUsers();
+  } catch { section.hidden = true; }
+}
+
+async function loadAdminUsers() {
+  const sel = $("adminUserSelect");
+  try {
+    const res = await fetch("/v1/admin/users", {headers: authHeaders()});
+    const body = await res.json().catch(() => []);
+    if (!res.ok) throw new Error(body.detail || "HTTP " + res.status);
+    sel.innerHTML = body.map(w =>
+      `<option value="${w.user_id}">${w.user_id} (${w.entity_count})</option>`).join("");
+  } catch (e) {
+    sel.innerHTML = `<option>failed to load: ${e.message}</option>`;
+  }
+}
+
+function escapeHtml(s) {
+  return String(s ?? "").replace(/[&<>"']/g, c =>
+    ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+}
+
+$("adminViewWiki").onclick = async () => {
+  const owner = $("adminUserSelect").value;
+  const out = $("adminOut");
+  if (!owner) return;
+  out.textContent = "Loading…";
+  try {
+    const res = await fetch(`/v1/admin/users/${encodeURIComponent(owner)}/wiki`, {headers: authHeaders()});
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(body.detail || "HTTP " + res.status);
+    const rows = (body.entities || []).map(e =>
+      `<li><b>[${escapeHtml(e.type)}]</b> ${escapeHtml(e.title)}
+       <span class="muted">(${(e.facts || []).length} facts)</span></li>`).join("");
+    out.innerHTML = `<div><b>${escapeHtml(owner)}</b> — ${body.entity_count} entities</div>
+      <ul style="margin:6px 0 0 16px; padding:0">${rows || "<li class=muted>empty</li>"}</ul>`;
+  } catch (e) { out.textContent = "Failed: " + e.message; }
+};
+
+$("adminSummarize").onclick = async () => {
+  const owner = $("adminUserSelect").value;
+  const query = $("adminQuery").value.trim();
+  const out = $("adminOut");
+  if (!owner) return;
+  out.textContent = "Summarizing… (this calls the LLM, may take a few seconds)";
+  try {
+    const res = await fetch(`/v1/admin/users/${encodeURIComponent(owner)}/wiki/summarize`, {
+      method: "POST", headers: {"content-type": "application/json", ...authHeaders()},
+      body: JSON.stringify({query, scope: "all"}),
+    });
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(body.detail || "HTTP " + res.status);
+    const list = (label, items) => (items && items.length)
+      ? `<div style="margin-top:6px"><b>${label}:</b><ul style="margin:2px 0 0 16px; padding:0">
+         ${items.map(i => `<li>${escapeHtml(i)}</li>`).join("")}</ul></div>` : "";
+    out.innerHTML = `<div><b>${escapeHtml(owner)}</b> — summary</div>
+      <p style="margin:6px 0">${escapeHtml(body.summary)}</p>
+      ${list("Key people", body.key_people)}
+      ${list("Decisions", body.decisions)}
+      ${list("Open items", body.open_items)}`;
+  } catch (e) { out.textContent = "Failed: " + e.message; }
 };
 
 /* ---------------- sign in ---------------- */
@@ -822,13 +1358,18 @@ MemAuth.install({
     loaded = new Set();
     selected = null;
     load(false);
+    loadNotes();
+    loadTimer();
+    checkAdmin();
   },
 });
 
 addEventListener("beforeunload", flushPositions);
 addEventListener("resize", draw);
-loadWikis();
-load(false).then(refreshWho);
+load(false).then(() => MemAuth.refreshWho());
+loadNotes();
+loadTimer();
+checkAdmin();
 </script>
 </body>
 </html>

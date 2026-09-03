@@ -11,7 +11,7 @@ A FastAPI service that stores a per-user knowledge graph as flat files in S3.
 No database. Each entity is one Markdown file with YAML front-matter:
 
 ```
-{user_id}/wiki/{type}/{slug}.md
+{user_id}/wiki/{type}/{slug}.okf.md
 ```
 
 Alongside them, two pieces of derived state that the service maintains
@@ -37,71 +37,6 @@ Both are the same code path, differing only in the mounted resource.
 
 ---
 
-## Docker（快速部署）
-
-### 使用 docker compose（推荐）
-
-```bash
-# 1. 配置 .env（参考 .env.example）
-cp .env.example .env
-# 编辑 .env：设置 STORAGE_BACKEND、LLM_API_KEY 等
-
-# 2. 构建并启动
-docker compose up -d
-
-# 3. 查看日志
-docker compose logs -f
-
-# 4. 打开 http://localhost:8000/chat
-```
-
-### 使用 Makefile
-
-```bash
-make build    # 构建镜像
-make up       # 启动服务
-make logs     # 查看日志
-make down     # 停止服务
-make test     # 运行测试
-```
-
-### 手动 Docker 命令
-
-```bash
-# 构建
-docker build -t memory-backend .
-
-# 运行（挂载本地数据目录）
-docker run -d -p 8000:8000 \
-  --env-file .env \
-  -v memory_data:/data \
-  --name memory-backend \
-  memory-backend
-
-# 查看日志
-docker logs -f memory-backend
-
-# 停止
-docker stop memory-backend && docker rm memory-backend
-```
-
-### Docker 环境变量覆盖
-
-在 `docker-compose.yml` 或 `docker run -e` 中覆盖关键变量：
-
-```yaml
-environment:
-  - STORAGE_BACKEND=disk          # 使用本地存储（无需 S3）
-  - LOCAL_BUCKET_ROOT=/data/bucket
-  - AUTH_MODE=token
-  - AUTH_SECRET=your-secret-here
-  - LLM_BASE_URL=https://api.deepseek.com/v1
-  - LLM_MODEL=deepseek-chat
-  - DEEPSEEK_API_KEY=sk-xxx
-```
-
----
-
 ## Authentication
 
 The API requires a bearer token, and **the app refuses to start without one**
@@ -118,17 +53,6 @@ There are two credential kinds, and both arrive in the same
 | **Session token** | people | `POST /v1/auth/login` with a username and password |
 
 Configure at least one. Either satisfies startup.
-
-### Built-in admin account
-
-On first startup, if no users exist, the server creates a default admin:
-
-- **Username:** `admin`
-- **Password:** `admin123456`
-- **Admin:** yes
-
-**Change the password immediately.** Log in at `http://localhost:8000/chat`
-or `POST /v1/auth/login`, then `POST /v1/auth/password`.
 
 ### Username and password (people)
 
@@ -237,23 +161,10 @@ Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
 .\run.ps1
 ```
 
-**Window 2 — everything else.**
-
-```powershell
-cd C:\memory_backend
-.\.venv\Scripts\Activate.ps1
-. .\env.ps1
-```
-
-Note the leading dot in `. .\env.ps1`. Without it the script runs in its own
-scope and defines nothing. You should see:
-
-```
-  connected: http://127.0.0.1:8000  user=demo  storage=mirage
-  mem  = ready
-```
-
-To work as a different user: `. .\env.ps1 -UserId assess`
+**Everything else happens through the browser** — there is no separate
+terminal setup needed. `http://127.0.0.1:8000/healthz` confirms the server is
+up; `/docs` is the interactive API reference if you want to try a request
+without opening the GUI.
 
 ---
 
@@ -288,39 +199,22 @@ middleware — a `file://` page cannot call the API.
 
 `http://127.0.0.1:8000/docs` remains available for raw request/response work.
 
-## Chat UI
+## Calling the API directly
 
-```
-http://127.0.0.1:8000/chat
-```
-
-A ChatGPT-style interface with memory-aware responses. Features:
-- Drag and drop files anywhere on the page
-- Ctrl+V to paste files
-- Click the 📎 paperclip button to browse
-- Files appear as chips below the input, then move into the message bubble on send
-- Supported formats: .txt, .md, .json, .csv, .log, .docx, .xlsx, .pdf
-- .docx, .xlsx, .pdf are text-extracted for the LLM
-- Files are stored per session under `{user_id}/raw/{session_id}/{file_id}/`
-
-## The `mem` command
-
-One command for every API call. Paths are relative to `/v1/users/{user}`.
+`/docs` (Swagger UI) covers this for one-off requests — open the endpoint,
+fill in the form, **Try it out**. For scripting, plain `Invoke-RestMethod`
+needs nothing beyond what's already installed:
 
 ```powershell
-mem GET  /wiki/_stats
-mem GET  /wiki
-mem PUT  /wiki @{ type='person'; title='Alice Chen'; aliases=@('Alice') }
-mem POST /wiki/person/alice-chen/facts @{ text='Leads retrieval.'; confidence=0.9 }
-mem POST /wiki/traverse @{ entry_wiki_ids=@('person/alice-chen'); max_depth=2 }
-mem GET  /raw-facts -Query @{ on='2026-07-29' }
-mem GET  /healthz -Absolute
+$H = @{ Authorization = "Bearer <token>" }   # omit if AUTH_MODE=off
+$base = "http://127.0.0.1:8000/v1/users/demo"
+
+Invoke-RestMethod "$base/wiki/_stats" -Headers $H
+Invoke-RestMethod "$base/wiki" -Method Put -Headers $H -ContentType "application/json" `
+  -Body (@{ type='person'; title='Alice Chen'; aliases=@('Alice') } | ConvertTo-Json)
+Invoke-RestMethod "$base/wiki/person/alice-chen/facts" -Method Post -Headers $H -ContentType "application/json" `
+  -Body (@{ text='Leads retrieval.'; confidence=0.9 } | ConvertTo-Json)
 ```
-
-Bodies are PowerShell hashtables; they are converted to JSON for you. On
-failure it prints the API's own error message rather than swallowing it.
-
-To see full output: `mem GET /wiki | ConvertTo-Json -Depth 5`
 
 ---
 
@@ -331,19 +225,6 @@ To see full output: `mem GET /wiki | ConvertTo-Json -Depth 5`
 | file | what it does |
 |---|---|
 | `run.ps1` | starts the server |
-| `env.ps1` | sets up your shell: loads `mem`, sets `$U` / `$J` |
-| `memory.psm1` | defines `mem`; loaded by `env.ps1`, not run directly |
-
-**Occasional:**
-
-| file | what it does |
-|---|---|
-| `seed_demo.ps1` | creates 17 entities / 21 edges of realistic sample data |
-| `crud_demo.ps1` | runs one full create/read/update/delete pass |
-| `bench.ps1` | times N CRUD cycles, splitting server vs network |
-
-`seed_demo.ps1` and `crud_demo.ps1` set their own variables internally, so
-they work without `env.ps1`.
 
 **Diagnostics, only when something is wrong:**
 
@@ -354,6 +235,7 @@ they work without `env.ps1`.
 | `scripts\check_bucket.py` | corrupt entity files |
 | `scripts\s3_preflight.py` | validate a bucket before deploying to it |
 | `scripts\cost_benchmark.py` | storage write-cost model |
+| `scripts\browse_bucket.py` | browse/download bucket contents directly when you can't reach Qiniu another way |
 
 ---
 
@@ -432,18 +314,17 @@ The assessor gates the model call, so chatter costs nothing —
 ## Common tasks
 
 ```powershell
-# health
-mem GET /healthz -Absolute
-mem GET /wiki/_stats
+$H = @{ Authorization = "Bearer <token>" }
+$base = "http://127.0.0.1:8000/v1/users/demo"
+
+Invoke-RestMethod "http://127.0.0.1:8000/healthz"
+Invoke-RestMethod "$base/wiki/_stats" -Headers $H
 
 # repair: index disagrees with what is actually stored
-mem POST /wiki/_rebuild_manifest
+Invoke-RestMethod "$base/wiki/_rebuild_manifest" -Method Post -Headers $H
 
 # repair: relations pointing at deleted entities
-mem POST /wiki/_reconcile
-
-# maintenance: fold yesterday's audit segments into one object
-mem POST /wiki/_compact_ops -Query @{ on = [DateTime]::UtcNow.AddDays(-1).ToString('yyyy-MM-dd') }
+Invoke-RestMethod "$base/wiki/_reconcile" -Method Post -Headers $H
 ```
 
 ---
@@ -459,9 +340,6 @@ mem POST /wiki/_compact_ops -Query @{ on = [DateTime]::UtcNow.AddDays(-1).ToStri
 | `429 Too many failed attempts` | login throttle; wait for the `Retry-After` value |
 | `503 Password login is not enabled` | `AUTH_SECRET` is not set |
 | `401 Session expired` | log in again |
-| `The term 'mem' is not recognized` | `env.ps1` not dot-sourced, or old extract |
-| `Invalid URI: The hostname could not be parsed` | `$U` empty — dot-source `env.ps1` |
-| `.\x.ps1 is not recognized` | file missing — you are on an old extract |
 | `_stats` shows 0 entities | you are pointed at an empty user id, not an error |
 | everything ~600ms | `MIRAGE_REUSE_CONNECTIONS` disabled |
 | HTTP 422 mentioning a corrupt file | run `python scripts\check_bucket.py --fix` |

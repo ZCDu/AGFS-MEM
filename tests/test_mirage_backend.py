@@ -85,8 +85,11 @@ def test_manifest_and_ops_log_via_mirage(mirage_backend):
     assert entries[0].wiki_id == "person/alice"
     assert entries[0].compact == "Engineer."
 
-    from datetime import date
-    ops = store.ops_log.read_day("u1", date.today())
+    # ops_log shards by UTC date (app/graph/ops_log.py) -- match that, not
+    # the local date.today(), which is wrong for part of the day in any
+    # timezone ahead of UTC.
+    from datetime import datetime, timezone
+    ops = store.ops_log.read_day("u1", datetime.now(timezone.utc).date())
     assert len(ops) >= 1
     assert ops[0]["op"] == "create"
     assert ops[0]["wiki_id"] == "person/alice"
@@ -96,8 +99,10 @@ def test_raw_log_via_mirage(mirage_backend):
     log = RawFactLog(mirage_backend)
     log.append_batch("u1", [{"fact": "hello"}, {"fact": "world"}])
 
-    from datetime import date
-    records = log.read_day("u1", date.today())
+    # RawFactLog shards by UTC date (app/rawlog/log.py) -- same reasoning
+    # as above.
+    from datetime import datetime, timezone
+    records = log.read_day("u1", datetime.now(timezone.utc).date())
     assert len(records) == 2
     assert {r["fact"] for r in records} == {"hello", "world"}
 

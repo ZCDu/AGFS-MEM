@@ -53,5 +53,14 @@ def client(tmp_path, monkeypatch):
 
     from fastapi.testclient import TestClient
     from app.main import create_app
-    yield TestClient(create_app())
+
+    # Use TestClient as a context manager so FastAPI's lifespan runs. The
+    # lifespan is what calls backend.close() (which drains the write-behind
+    # buffers and stops the mirage event loop). Without it the backend and
+    # its event loop leak past the test, background flush timers keep firing,
+    # and at interpreter shutdown they try to write through a dead aiofiles
+    # executor -> a flood of "cannot schedule new futures after shutdown"
+    # tracebacks that do not fail any test but bury the summary.
+    with TestClient(create_app()) as test_client:
+        yield test_client
     deps_module.get_storage_backend.cache_clear()

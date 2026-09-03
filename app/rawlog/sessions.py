@@ -132,6 +132,23 @@ class SessionLog:
         return {"session_id": session_id, "date": day.isoformat(),
                 "appended": len(prepared), "total": len(lines)}
 
+    def _find_key(self, user_id: str, session_id: str,
+                  day: date | None) -> tuple[str | None, list[dict] | None]:
+        """Resolve a session to (key, parsed messages), locating it backwards
+        when the date is not known. Returns (None, None) when the session does
+        not exist, so a best-effort mark cannot raise."""
+        validate_session_id(session_id)
+        if day is not None:
+            key = self._key(user_id, day, session_id)
+            raw = self.backend.get_bytes(key)
+            if raw is None:
+                return None, None
+            return key, self._parse(raw)
+        key = self.find(user_id, session_id)
+        if key is None:
+            return None, None
+        return key, self._parse(self.backend.get_bytes(key))
+
     # ---------- reading ----------
 
     def read(self, user_id: str, session_id: str, day: date | None = None) -> list[dict]:
@@ -149,6 +166,58 @@ class SessionLog:
         if found is None:
             return []
         return self._parse(self.backend.get_bytes(found))
+
+    # ---------- examined-state (shared with the review + autocapture paths) ----------
+    #
+    # A session is a stream of messages; only the parts not yet EXAMINED should
+    # ever be passed to the extractor/apply pipeline. "Examined" means the
+    # message has already been reviewed and applied (interactive flow) or
+    # captured by the timer. Tracking this per message -- not per whole session
+    # -- keeps two paths from trampling the same reviewed data:
+    #   * a human reviews a conversation and applies it, then the timer must
+    #     NOT re-examine those same messages;
+    #   * a session that grows after being captured only feeds its NEW,
+    #     unexamined messages to the next run.
+    #
+    # The flag lives on the message record itself (so it travels with the data),
+    # written back as one file rewrite per mark call. A single capture run marks
+    # once (after its messages are processed), not per message, so the rewrite
+    # cost is bounded by one session file per run.
+
+    def read_unexamined(self, user_id: str, session_id: str,
+                        day: date | None = None) -> list[tuple[int, dict]]:
+        """(index, message) pairs for the parts of a session that have not yet
+        been examined (no `examined` flag). `index` is the message's position in
+        the session file, which is what `mark_examined` accepts. The whole
+        session is read so indexes stay stable even when earlier messages were
+        already examined."""
+        messages = self.read(user_id, session_id, day=day)
+        return [(i, m) for i, m in enumerate(messages) if not m.get("examined")]
+
+    def mark_examined(self, user_id: str, session_id: str, indexes: list[int],
+                      day: date | None = None, by: str = "autocapture") -> int:
+        """Flag the messages at `indexes` (0-based positions in the session
+        file) as examined, recording who/what examined them. Rewrites the file
+        once. Returns the number of messages newly marked (already-marked ones
+        are not double-counted)."""
+        if not indexes:
+            return 0
+        key, messages = self._find_key(user_id, session_id, day)
+        if messages is None:
+            return 0
+        wanted = set(indexes)
+        changed = 0
+        for i, m in enumerate(messages):
+            if i in wanted and not m.get("examined"):
+                m["examined"] = True
+                m["examined_at"] = datetime.now(timezone.utc).isoformat()
+                m["examined_by"] = by
+                changed += 1
+        if not changed:
+            return 0
+        lines = [json.dumps(r, ensure_ascii=False) for r in messages]
+        self.backend.put_bytes(key, ("\n".join(lines) + "\n").encode("utf-8"))
+        return changed
 
     def find(self, user_id: str, session_id: str, search_days: int = 400) -> str | None:
         """Locate a session's key without knowing its date.

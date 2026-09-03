@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, Depends, HTTPException, Query
 
@@ -22,7 +22,12 @@ def append_facts(
     log: RawFactLog = Depends(get_raw_log),
 ):
     log.append_batch(user_id, body.facts)
-    today = date.today()
+    # RawFactLog shards by the UTC date of the write (see log.py's
+    # append_batch), so the read-back must use the same UTC "today" -- a
+    # naive date.today() (local date) drifts a day out of sync with what was
+    # actually just written for roughly a third of the day in any timezone
+    # ahead of UTC, making a just-appended batch briefly invisible.
+    today = datetime.now(timezone.utc).date()
     records = log.read_day(user_id, today)
     return RawFactsResponse(date=today.isoformat(), count=len(records), records=records)
 

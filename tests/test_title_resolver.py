@@ -22,8 +22,14 @@ def client(tmp_path, monkeypatch):
     config_module._settings = None
     deps_module.get_storage_backend.cache_clear()
 
-    app = create_app()
-    yield TestClient(app)
+    # Context-managed TestClient so FastAPI's lifespan runs backend.close()
+    # (drains write-behind buffers, stops the mirage event loop). Without it
+    # the backend leaks and its flush timers fire at interpreter shutdown
+    # through a dead executor -> a "cannot schedule new futures after
+    # shutdown" flood that does not fail tests but buries the summary.
+    with TestClient(create_app()) as test_client:
+        yield test_client
+    deps_module.get_storage_backend.cache_clear()
     shutil.rmtree(tmp_path / "bucket", ignore_errors=True)
 
 

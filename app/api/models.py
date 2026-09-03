@@ -91,6 +91,24 @@ class EntityOut(BaseModel):
     decay_score: float
 
 
+class MergeEntitiesRequest(BaseModel):
+    target_wiki_id: str = Field(..., description="wiki_id of the entity to keep, e.g. "
+                                                     "'person/alice-chen'. The entity in the "
+                                                     "URL is folded into this one and tombstoned.")
+    hard_delete: bool = Field(False, description="Physically remove the source's file after "
+                                                     "merging. False (default) keeps a permanent "
+                                                     "tombstone recording where it was merged to.")
+
+
+class MergeEntitiesResponse(BaseModel):
+    merged: bool
+    target: str
+    facts_moved: int
+    relations_moved: int
+    relations_redirected: int
+    failed: str | None = None
+
+
 class LinkEntitiesRequest(BaseModel):
     target_wiki_id: str = Field(..., description="Target entity's wiki_id, e.g. 'project/orion'")
     category: str = Field("related_to")
@@ -167,17 +185,6 @@ class ResolveInboxCandidateRequest(BaseModel):
 
 # ---------- manifest ----------
 
-class SubgraphRequest(BaseModel):
-    entry_wiki_ids: list[str] | None = Field(
-        None, description="Where to start. Omit to seed from the highest-degree "
-                          "nodes, which are the useful entry point into an "
-                          "unfamiliar graph.")
-    max_depth: int = Field(1, ge=0, le=10)
-    max_nodes: int = Field(50, ge=1, le=1000)
-    categories: list[str] | None = Field(
-        None, description="Only follow these relation categories")
-
-
 class SetPositionsRequest(BaseModel):
     positions: dict[str, list[float]] = Field(
         ..., description="wiki_id -> [x, y]. Unknown ids are ignored.")
@@ -231,6 +238,20 @@ class ManifestEntryOut(BaseModel):
     # instead of fetching every entity. None means the entry predates the
     # index and its edges are unknown, which is different from having none.
     edges: list[dict] | None = None
+    # Persisted graph-editor layout coordinates (None until a client saves a
+    # position via POST /wiki/layout).
+    x: float | None = None
+    y: float | None = None
+    # Populated only on subgraph() responses: total incident edges, and how
+    # many of that node's neighbours were left out of THIS response (lets a
+    # client offer an expand affordance instead of implying a leaf).
+    degree: int = 0
+    hidden_neighbours: int = 0
+    # Connected-component index within the wiki (see app/graph/components.py)
+    # -- entities with no edges connecting them to each other get different
+    # values. None when not computed (e.g. outside subgraph()), distinct
+    # from "computed as component 0".
+    component: int | None = None
 
 
 # ---------- raw log ----------
@@ -243,3 +264,61 @@ class RawFactsResponse(BaseModel):
     date: str
     count: int
     records: list[dict]
+
+
+# ---------- share links ----------
+
+class CreateShareRequest(BaseModel):
+    label: str = Field("", description="Optional display label for the guest landing "
+                                          "page, e.g. the entity's title. Defaults to it "
+                                          "if left blank.")
+    expires_in_days: float | None = Field(
+        None, gt=0, description="Link stops working after this many days. Omit for no "
+                                   "expiry (still revocable at any time).")
+
+
+class ShareOut(BaseModel):
+    share_id: str
+    owner_user_id: str
+    entry_wiki_id: str
+    label: str
+    created_at: str
+    expires_at: str | None
+    revoked_at: str | None
+    active: bool
+    url: str
+
+
+class SharePreview(BaseModel):
+    """What a guest sees before starting a chat -- no memory content, just
+    enough to know what they're being invited into."""
+    label: str
+    entry_wiki_id: str
+    entry_title: str
+    entry_type: str
+    scope_size: int
+    active: bool
+
+
+class SharedChatMessage(BaseModel):
+    role: str = Field(..., pattern="^(user|assistant)$")
+    content: str
+
+
+class SharedChatRequest(BaseModel):
+    messages: list[SharedChatMessage] = Field(..., min_length=1)
+    session_id: str | None = Field(
+        None, description="Omit on the first turn; echo back the returned id "
+                          "on later turns so the whole conversation lands in "
+                          "one session file.")
+
+
+class SharedChatResponse(BaseModel):
+    reply: str
+    session_id: str
+    applied: list[dict] = Field(
+        default_factory=list, description="Operations that landed, within scope.")
+    rejected: list[dict] = Field(
+        default_factory=list, description="Operations the model proposed that fell "
+                                             "outside what was shared -- not saved "
+                                             "anywhere, with a reason each.")

@@ -144,7 +144,16 @@ DEFAULT_VERIFY_CONDITIONAL_WRITES = True
 # ---------------------------------------------------------------------------
 
 _pool_lock = threading.Lock()
-_pooled: dict[str, tuple] = {}   # signature -> (context_manager, client)
+# key -> (context_manager, client). The key must bind the client to the
+# exact asyncio loop that created it, because aiohttp/aioboto3 clients are
+# NOT loop-safe: a client created on loop A will raise "Future attached to
+# a different loop" the moment it is reused from loop B. The original
+# implementation keyed only by config signature, so a client created on the
+# FastAPI main loop (e.g. during startup) would be reused by the backend's
+# dedicated loop thread on the next request and crash every read. Keying by
+# the loop object + signature keeps the reuse win (the backend owns exactly
+# one loop) while making cross-loop reuse impossible.
+_pooled: dict[tuple, tuple] = {}   # (loop, signature) -> (context_manager, client)
 _patched = False
 
 
@@ -177,13 +186,31 @@ class _ReusableClientCM:
         self._sig = _signature(kwargs)
 
     async def __aenter__(self):
-        entry = _pooled.get(self._sig)
-        if entry is None:
-            ctx = self._session.client(**self._kwargs)
-            client = await ctx.__aenter__()
-            _pooled[self._sig] = (ctx, client)
+        loop = asyncio.get_running_loop()
+        key = (loop, self._sig)
+        with _pool_lock:
+            entry = _pooled.get(key)
+            if entry is not None:
+                return entry[1]
+            # No existing client for THIS loop+signature; we create one.
+            # The await must happen outside the lock (it is async I/O),
+            # so a second caller may reach the same spot concurrently —
+            # the second creation below is reconciled so only one survives.
+        ctx = self._session.client(**self._kwargs)
+        client = await ctx.__aenter__()
+        with _pool_lock:
+            entry = _pooled.get(key)
+            if entry is not None:
+                # A concurrent creator won the race for this exact loop.
+                # Close the one we just built and hand back the winner so
+                # we never leak a socket for a loop that will not use it.
+                try:
+                    await ctx.__aexit__(None, None, None)
+                except Exception:
+                    pass
+                return entry[1]
+            _pooled[key] = (ctx, client)
             return client
-        return entry[1]
 
     async def __aexit__(self, *exc_info):
         # Deliberately does not close: that is the entire point.
@@ -418,7 +445,7 @@ class MirageBackend(StorageBackend):
         deadlocks: the buffer's flush timer fires after the loop is gone and
         blocks on a future that will never complete.
         """
-        for attr in ("_wiki_manifest", "_wiki_ops_log"):
+        for attr in ("_wiki_manifest", "_wiki_ops_log", "_embedding_index"):
             buf = getattr(self, attr, None)
             if buf is not None:
                 try:

@@ -14,6 +14,8 @@ from app.api.models import (  # noqa: I001
     InboxCandidateOut,
     LinkEntitiesRequest,
     ManifestEntryOut,
+    MergeEntitiesRequest,
+    MergeEntitiesResponse,
     RelationOut,
     ReconcileResponse,
     ResolveInboxCandidateRequest,
@@ -27,6 +29,7 @@ from app.api.models import (  # noqa: I001
 )
 from app.auth import require_user
 from app.deps import get_graph_store, get_title_resolver
+from app.graph.search import rank_entries
 from app.graph.store import (VALID_TYPES, Entity, EntityGraphStore,
                              MalformedEntityError, SlugConflictError)
 from app.graph.title_resolver import WikiTitleResolver
@@ -111,8 +114,9 @@ def list_entities(
     user_id: str,
     type: str | None = Query(None, description="Filter by entity type"),
     include_deleted: bool = Query(False, description="Include tombstoned (status=deleted) entities"),
-    q: str | None = Query(None, description="Case-insensitive substring match on title, "
-                                           "aliases or wiki_id"),
+    q: str | None = Query(None, description="Case-insensitive match on title, aliases, "
+                                           "wiki_id, or description (compact) overlap; "
+                                           "results are ranked, name matches first"),
     limit: int | None = Query(None, ge=1, le=1000,
                               description="Page size. Omit to return everything."),
     offset: int = Query(0, ge=0, description="Rows to skip; use with limit"),
@@ -133,12 +137,9 @@ def list_entities(
     if not include_deleted:
         entries = [e for e in entries if e.status != "deleted"]
     if q:
-        needle = q.strip().lower()
-        entries = [e for e in entries
-                   if needle in e.title.lower()
-                   or needle in e.wiki_id.lower()
-                   or any(needle in a.lower() for a in e.aliases)]
-    entries.sort(key=lambda e: (e.type, e.title.lower()))
+        entries = rank_entries(entries, q, store, user_id)
+    else:
+        entries.sort(key=lambda e: (e.type, e.title.lower()))
     if limit is not None:
         entries = entries[offset:offset + limit]
     elif offset:
@@ -256,6 +257,30 @@ def delete_entity(
     existed = store.delete_entity(user_id, wiki_id, cascade=cascade, hard_delete=hard_delete)
     if not existed:
         raise HTTPException(status_code=404, detail=f"Entity {wiki_id!r} not found")
+
+
+@router.post("/wiki/{type}/{title}/merge_into", response_model=MergeEntitiesResponse)
+def merge_entities(
+    user_id: str,
+    type: str,
+    title: str,
+    body: MergeEntitiesRequest,
+    store: EntityGraphStore = Depends(get_graph_store),
+):
+    """Fold the entity named in the URL into `body.target_wiki_id`, which
+    must already exist. Use this once you've found a duplicate that
+    upsert_entity()'s fuzzy title matching didn't catch at write time — a
+    nickname with no string overlap with the canonical name, or a duplicate
+    left over from before that matching existed."""
+    wiki_id = _wiki_id(type, title)
+    result = store.merge_entities(user_id, wiki_id, body.target_wiki_id,
+                                  hard_delete=body.hard_delete)
+    if not result["merged"]:
+        # "not found" is a missing resource (404); "same entity" and a type
+        # mismatch are a malformed request against resources that do exist (422).
+        status = 404 if "not found" in (result["failed"] or "") else 422
+        raise HTTPException(status_code=status, detail=result["failed"])
+    return MergeEntitiesResponse(**result)
 
 
 @router.post("/wiki/{type}/{title}/facts", response_model=EntityOut)
@@ -409,31 +434,6 @@ def traverse(
     return TraverseResponse(wiki_ids=sorted(wiki_ids))
 
 
-@router.post("/wiki/subgraph")
-def subgraph(
-    user_id: str,
-    body: SubgraphRequest,
-    store: EntityGraphStore = Depends(get_graph_store),
-):
-    """A drawable neighbourhood: nodes AND the edges between them.
-
-    Use this instead of `GET /wiki` when you want to render or explore the
-    graph. Every returned edge has both endpoints in `nodes`, so the result is
-    self-contained — paging a graph by index gives you edges pointing at nodes
-    you were not sent, which cannot be laid out.
-
-    `hidden_neighbours` per node counts neighbours that were left out, so a UI
-    can offer an expand affordance rather than implying a node is a leaf.
-    """
-    return store.subgraph(
-        user_id,
-        entry_wiki_ids=body.entry_wiki_ids,
-        max_depth=body.max_depth,
-        max_nodes=body.max_nodes,
-        categories=set(body.categories) if body.categories else None,
-    )
-
-
 @router.post("/wiki/layout")
 def set_layout(
     user_id: str,
@@ -463,10 +463,13 @@ def subgraph(
         user_id, entry_wiki_ids=body.entry_wiki_ids or None,
         max_depth=body.max_depth, max_nodes=body.max_nodes,
         categories=body.categories)
+    nodes = result.get("nodes", [])
+    expandable = [n["wiki_id"] for n in nodes
+                  if n.get("hidden_neighbours", 0) > 0]
     return SubgraphResponse(
-        nodes=[ManifestEntryOut(**n) for n in result["nodes"]],
-        edges=result["edges"], seeds=result["seeds"],
-        expandable=result["expandable"], truncated=result["truncated"])
+        nodes=[ManifestEntryOut(**n) for n in nodes],
+        edges=result.get("edges", []), seeds=result.get("seeds", []),
+        expandable=expandable, truncated=result.get("truncated", False))
 
 
 @router.get("/wiki/_layout")

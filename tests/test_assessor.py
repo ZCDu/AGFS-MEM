@@ -90,6 +90,38 @@ def test_short_first_person_preference_survives_the_length_gate(assessor):
     assert "preference" in r.signals["importance_markers"]
 
 
+def test_short_relational_identity_fact_survives_the_length_gate(assessor):
+    """"Ravi is a data engineer at Silverline Analytics" is 7-11 words and uses
+    none of the literal identity verbs ("works at", "reports to", ...). It is a
+    genuine, durable relational fact and must not be discarded as chatter by
+    the min_words gate."""
+    r = assessor.assess("u", "Ravi Shah is a data engineer at Silverline "
+                             "Analytics in Austin.")
+    assert r.decision != "skip", r.reasons
+    assert len(r.new_candidates) >= 1  # Ravi Shah is proposed as a new entity
+
+
+def test_short_relational_identity_fact_worker_in_org(assessor):
+    """The earlier 'Anna is a worker in Taldic Corps' case — 7 words, no literal
+    identity verb, but a real durable fact."""
+    r = assessor.assess("u", "Anna is a worker in Taldic Corps.")
+    assert r.decision != "skip", r.reasons
+
+
+def test_relational_identity_regex_does_not_fire_on_chatter(assessor):
+    """Preference and decision phrases must not get identity status just for
+    containing 'is a'."""
+    for txt in [
+        "I prefer async updates over meetings.",
+        "We decided to use Postgres for this.",
+        "the espresso machine is a thing in the office.",
+    ]:
+        r = assessor.assess("u", txt)
+        # these should NOT be promoted purely by identity; they stay short-skipped
+        # or chatter (any non-store decision is fine — the bug was over-promoting)
+        assert "identity" not in r.signals.get("importance_markers", []), txt
+
+
 def test_correction_about_known_entity_is_stored(assessor):
     r = assessor.assess("u", "Actually I was wrong earlier - Hybrid Search does not use "
                              "BM25 anymore, it moved to SPLADE in Q2.")
@@ -129,3 +161,107 @@ def test_every_assessment_explains_itself(assessor):
         r = assessor.assess("u", text)
         assert r.reasons, f"no explanation for {text!r}"
         assert r.decision in {"store", "review", "skip"}
+
+
+# ---------- name-fragment / first-name retrieval ----------
+
+def test_first_name_lookup_finds_full_name_entity(assessor):
+    """A first-name fragment ("whos Anton") must link to the full "Anton
+    Lokhy" entity even when no alias covers that single word. The alias tier
+    below proves Alice resolves via her alias; Anton proves the fragment tier."""
+    # Alice resolves via her "Alice" alias
+    ra = assessor.assess("u", "whos Alice", link_only=True)
+    assert "person/alice-chen" in {x.wiki_id for x in ra.related}
+
+
+def test_fragment_tier_when_no_alias(assessor):
+    """Add an entity with no alias for its first name; a first-name lookup
+    must still land on it via the name-fragment tier (no false negatives)."""
+    assessor.store.upsert_entity("u", "person", "Anton Lokhy",
+                                 summary_append="Famous Instagram account holder.")
+    assessor.store.flush()
+    r = assessor.assess("u", "whos Anton", link_only=True)
+    ids = {x.wiki_id for x in r.related}
+    assert "person/anton-lokhy" in ids, f"first-name lookup missed Anton Lokhy: {ids}"
+    hit = next(x for x in r.related if x.wiki_id == "person/anton-lokhy")
+    assert hit.matched_on == "name-fragment"
+
+
+def test_fragment_does_not_false_positive_other_names(assessor):
+    """A bare first name must not link to an entity whose title merely SHARES
+    that token later (e.g. "Orion" must not match a hypothetical Second Orion)
+    or to an unrelated entity. "Project Orion" is only matched when the full
+    title appears in the question."""
+    r = assessor.assess("u", "whos Alice Chen", link_only=True)
+    ids = {x.wiki_id for x in r.related}
+    assert "person/alice-chen" in ids
+    # Orion is not mentioned in the question -> must not appear.
+    assert "project/orion" not in ids
+
+
+# ---------- CJK fuzzy/summary-tier retrieval ----------
+
+def test_chinese_query_fuzzy_matches_a_related_but_differently_worded_entity(assessor):
+    """Regression: content_tokens() used to tokenize CJK text one character
+    at a time and then filter out anything not longer than 2 characters --
+    which silently discarded every CJK token, so Jaccard overlap against
+    Chinese text was always 0.0 and the "summary" fuzzy tier never fired.
+    Only an exact title/alias substring worked; a shorter, related phrase
+    found nothing even though the entity clearly covers it."""
+    assessor.store.upsert_entity(
+        "u", "organization", "分行整改方案",
+        compact="各分支行整改方案", summary_append="各分支行整改方案。")
+    assessor.store.flush()
+
+    # The exact phrase from the title still matches (unaffected baseline).
+    exact = assessor.assess("u", "分行整改方案", link_only=True)
+    assert exact.related, "exact-phrase match must still work"
+
+    # A shorter, related phrase that appears only inside the SUMMARY (not
+    # the title) must now also retrieve it via the fuzzy tier.
+    fuzzy = assessor.assess("u", "分支行", link_only=True)
+    assert fuzzy.related, "fuzzy/summary tier must match related Chinese text"
+    hit = fuzzy.related[0]
+    assert hit.matched_on == "summary"
+
+
+# ---------- semantic (embedding) fallback tier ----------
+
+def test_semantic_fallback_matches_a_conceptually_related_entity(assessor, monkeypatch):
+    """The tier above all this session's lexical work still can't do:
+    "branch" and "department" share no text at all, so no amount of
+    tokenizing bridges them -- only a meaning-level comparison can. embed()
+    is stubbed to a fixed vector so this proves the tier is reachable and
+    wired correctly without needing the real model in a test."""
+    import app.graph.embeddings as embeddings_module
+    monkeypatch.setattr(embeddings_module, "is_embedding_enabled", lambda: True)
+    monkeypatch.setattr(embeddings_module, "embed", lambda text: [1.0, 0.0, 0.0])
+
+    assessor.store.upsert_entity(
+        "u", "organization", "Branch Rectification Plan",
+        compact="Covers branch offices and their compliance workflow.")
+    assessor.store.flush()
+
+    r = assessor.assess("u", "what is the departmental structure overview",
+                        link_only=True)
+    ids = {x.wiki_id for x in r.related}
+    assert "organization/branch-rectification-plan" in ids
+    hit = next(x for x in r.related
+              if x.wiki_id == "organization/branch-rectification-plan")
+    assert hit.matched_on == "semantic"
+
+
+def test_semantic_fallback_is_skipped_once_an_earlier_tier_matches(assessor, monkeypatch):
+    """Cost control: the semantic tier must only run on a TOTAL miss across
+    every entity, not per-entity -- if anything already matched via title/
+    alias/name-fragment/summary, embed() must not be called at all."""
+    import app.graph.embeddings as embeddings_module
+    monkeypatch.setattr(embeddings_module, "is_embedding_enabled", lambda: True)
+
+    def boom(text):
+        raise AssertionError("embed() must not be called once an earlier tier matched")
+
+    monkeypatch.setattr(embeddings_module, "embed", boom)
+
+    r = assessor.assess("u", "whos Alice", link_only=True)
+    assert "person/alice-chen" in {x.wiki_id for x in r.related}

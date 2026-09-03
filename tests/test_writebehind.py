@@ -61,9 +61,9 @@ def wipe_manifest(backend, user_id):
     """Delete all persisted manifest state — snapshot, deltas, and the
     legacy single file. Tests must not hardcode one filename, because the
     layout is snapshot+deltas and a compaction can move where state lives."""
-    for key in list(backend.list_keys(f"wikis/{user_id}/_manifest")):
+    for key in list(backend.list_keys(f"{user_id}/wiki/_manifest")):
         backend.delete(key)
-    backend.delete(f"wikis/{user_id}/_manifest.json")
+    backend.delete(f"{user_id}/wiki/_manifest.json")
 
 
 @pytest.fixture()
@@ -117,7 +117,7 @@ def test_manifest_bytes_are_linear(make_store):
         store.flush()
         written[n] = sum(
             len(backend.get_bytes(k).data)
-            for k in backend.list_keys("wikis/u/_manifest")
+            for k in backend.list_keys("u/wiki/_manifest")
             if backend.get_bytes(k) is not None
         )
 
@@ -138,7 +138,7 @@ def test_manifest_compaction_bounds_delta_count(make_store):
         store.upsert_entity("u", "concept", f"C{i}")
     store.flush()
 
-    deltas = [k for k in backend.list_keys("wikis/u/_manifest/d/") if k.endswith(".json")]
+    deltas = [k for k in backend.list_keys("u/wiki/_manifest/d/") if k.endswith(".json")]
     assert len(deltas) <= COMPACT_MAX_DELTAS
 
 
@@ -200,7 +200,10 @@ def test_ops_log_segments_are_readable_and_ordered(make_store):
     backend, store = make_store(FLUSH_INTERVAL_SECONDS="3600", FLUSH_MAX_PENDING="100000")
     for i in range(25):
         store.upsert_entity("u", "person", f"P{i}")
-    today = datetime.date.today()
+    # ops_log/manifest shard by UTC date on write (default `when`), so
+    # reading back must ask for the same UTC day -- datetime.date.today()
+    # (local date) is wrong for part of the day in any timezone ahead of UTC.
+    today = datetime.datetime.now(datetime.timezone.utc).date()
     records = store.ops_log.read_day("u", today)
 
     assert len(records) == 25
@@ -212,11 +215,14 @@ def test_ops_log_compaction_preserves_records(make_store):
     backend, store = make_store(FLUSH_INTERVAL_SECONDS="3600", FLUSH_MAX_PENDING="100000")
     for i in range(10):
         store.upsert_entity("u", "person", f"P{i}")
-    today = datetime.date.today()
+    # ops_log/manifest shard by UTC date on write (default `when`), so
+    # reading back must ask for the same UTC day -- datetime.date.today()
+    # (local date) is wrong for part of the day in any timezone ahead of UTC.
+    today = datetime.datetime.now(datetime.timezone.utc).date()
     before = store.ops_log.read_day("u", today)
 
     n = store.ops_log.compact_day("u", today)
-    remaining = [k for k in backend.list_keys(f"wikis/u/_ops/{today.isoformat()}/")
+    remaining = [k for k in backend.list_keys(f"u/wiki/_ops/{today.isoformat()}/")
                  if k.endswith(".jsonl")]
 
     assert n == len(before)
@@ -227,9 +233,12 @@ def test_ops_log_compaction_preserves_records(make_store):
 def test_legacy_day_file_still_readable(make_store):
     """Logs written by the pre-segment layout must not become invisible."""
     backend, store = make_store()
-    today = datetime.date.today()
+    # ops_log/manifest shard by UTC date on write (default `when`), so
+    # reading back must ask for the same UTC day -- datetime.date.today()
+    # (local date) is wrong for part of the day in any timezone ahead of UTC.
+    today = datetime.datetime.now(datetime.timezone.utc).date()
     backend.put_bytes(
-        f"wikis/u/_ops/{today.isoformat()}_op.jsonl",
+        f"u/wiki/_ops/{today.isoformat()}_op.jsonl",
         b'{"op_id":"old_1","op":"create","wiki_id":"person/x",'
         b'"created_at":"2020-01-01T00:00:00+00:00"}\n',
     )
@@ -260,12 +269,15 @@ def test_manifest_rebuilds_from_entity_files(make_store):
 def test_sync_mode_writes_through_immediately(make_store):
     backend, store = make_store(MANIFEST_WRITE_MODE="sync", OPS_LOG_WRITE_MODE="sync")
     store.upsert_entity("u", "person", "Sync")
-    today = datetime.date.today()
+    # ops_log/manifest shard by UTC date on write (default `when`), so
+    # reading back must ask for the same UTC day -- datetime.date.today()
+    # (local date) is wrong for part of the day in any timezone ahead of UTC.
+    today = datetime.datetime.now(datetime.timezone.utc).date()
 
     # The manifest is log-structured: a sync write emits a delta object,
     # not a rewrite of one file. Assert a delta landed, not a filename.
-    assert [k for k in backend.list_keys("wikis/u/_manifest/") if k.endswith(".json")]
-    assert [k for k in backend.list_keys(f"wikis/u/_ops/{today.isoformat()}/")
+    assert [k for k in backend.list_keys("u/wiki/_manifest/") if k.endswith(".json")]
+    assert [k for k in backend.list_keys(f"u/wiki/_ops/{today.isoformat()}/")
             if k.endswith(".jsonl")]
 
 
@@ -276,7 +288,7 @@ def test_decay_score_survives_unparseable_last_accessed(make_store):
     turned one hand-edited file into a permanent opaque 500."""
     backend, store = make_store(OKF_MODE="frontmatter")
     store.upsert_entity("u", "person", "Zed")
-    key = "wikis/u/person/zed.okf.md"
+    key = "u/wiki/person/zed.okf.md"
     broken = backend.get_bytes(key).data.decode().replace("last_accessed:", "la_broken:")
     backend.put_bytes(key, broken.encode())
 
@@ -332,7 +344,7 @@ def test_corrupt_entity_file_raises_malformed_not_keyerror(make_store, corrupt, 
     backend, store = make_store(OKF_MODE="frontmatter")
     store.upsert_entity("u", "person", "Alice Chen")
     store.add_fact("u", "person/alice-chen", "a fact")
-    key = "wikis/u/person/alice-chen.okf.md"
+    key = "u/wiki/person/alice-chen.okf.md"
     backend.put_bytes(key, corrupt(backend.get_bytes(key).data.decode()).encode())
 
     with pytest.raises(MalformedEntityError):
@@ -409,7 +421,7 @@ def test_traverse_does_not_abort_on_a_corrupt_entity_file(make_store):
         store.link_entities("u", "person/hub", f"concept/{name.lower()}")
     store.flush()
 
-    key = "wikis/u/concept/bad.okf.md"
+    key = "u/wiki/concept/bad.okf.md"
     backend.put_bytes(key, backend.get_bytes(key).data.decode().replace("wiki_id:", "nope:").encode())
 
     reached = store.traverse("u", ["person/hub"], max_depth=2, max_nodes=100)

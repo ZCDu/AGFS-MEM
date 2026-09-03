@@ -65,6 +65,11 @@ class WikiOp:
     op: OpType
     wiki_id: str
     reason: str = ""
+    # Who performed the write. In the user-scoped API this is the same as the
+    # scope (a token is bound to its path user), but on a shared wiki it is
+    # the caller's identity from the token — the field that lets the activity
+    # feed show "alice added a fact" rather than "some user did something".
+    actor: str = ""
     field_name: str | None = None
     before_hash: str | None = None
     after_hash: str | None = None
@@ -80,6 +85,8 @@ class WikiOp:
             "evidence": self.evidence,
             "created_at": self.created_at or datetime.now(timezone.utc).isoformat(),
         }
+        if self.actor:
+            d["actor"] = self.actor
         if self.field_name is not None:
             d["field"] = self.field_name
         if self.before_hash is not None:

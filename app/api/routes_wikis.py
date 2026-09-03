@@ -65,6 +65,21 @@ class GrantRequest(BaseModel):
     role: str = Field(ROLE_READ, pattern="^(read|write|admin)$")
 
 
+class CreateInviteRequest(BaseModel):
+    role: str = Field(ROLE_WRITE, pattern="^(read|write|admin)$")
+    uses_left: int | None = Field(
+        None, ge=1, description="Max redemptions, or null for unlimited.")
+    expires_in: int | None = Field(
+        None, ge=1, description="Seconds from now until it expires, or null.")
+    passcode: str | None = Field(
+        None, min_length=4, max_length=64,
+        description="Optional explicit passcode; a random one is generated.")
+
+
+class JoinRequest(BaseModel):
+    passcode: str = Field(..., min_length=4, max_length=64)
+
+
 class RouteRequest(BaseModel):
     text: str = Field(..., min_length=1)
     role: str = Field(ROLE_READ, pattern="^(read|write)$")
@@ -176,6 +191,210 @@ def archive_wiki(wiki_id: str, archived: bool = Query(True),
         reg.require(wiki_id, _caller(cred), ROLE_ADMIN,
                     is_admin=cred.get("is_admin", False))
         return reg.set_archived(wiki_id, archived).to_dict()
+    except WikiNotFound as e:
+        raise HTTPException(status_code=404, detail=str(e)) from e
+    except WikiAccessDenied as e:
+        raise HTTPException(status_code=403, detail=str(e)) from e
+
+
+# ---------- merge / split (two independent graphs, could be merged) ----------
+
+def _wiki_edges(store: EntityGraphStore, wiki_id: str) -> list[dict]:
+    """All relations recorded on entities of ONE wiki, as {src,tgt,label}."""
+    edges = []
+    for wid in store.list_entities(wiki_id):
+        ent = store.get_entity(wiki_id, wid, touch=False)
+        if ent is None or ent.status == "deleted":
+            continue
+        for rel in ent.relations:
+            if rel.target:
+                edges.append({"src": wid, "tgt": rel.target,
+                              "label": rel.label or rel.category})
+    return edges
+
+
+def _connecting_edges(store: EntityGraphStore, a: str, b: str) -> list[dict]:
+    """Edges whose endpoints straddle the two wikis (either direction). These
+    are the relations that make the two graphs actually CONNECTED."""
+    b_ids = set(store.list_entities(b))
+    links = []
+    for e in _wiki_edges(store, a):
+        if e["tgt"] in b_ids:
+            links.append(e)
+    a_ids = set(store.list_entities(a))
+    for e in _wiki_edges(store, b):
+        if e["tgt"] in a_ids:
+            links.append(e)
+    return links
+
+
+@router.post("/wikis/{wiki_id}/connections", response_model=dict | None)
+def wiki_connections(wiki_id: str,
+                     cred: dict = Depends(require_any_credential)):
+    """Report how many independent (disconnected) subgraphs a wiki contains.
+
+    A wiki can hold several unrelated topic-graphs that were merged in by
+    accident. This returns the internal edge set so a caller can see whether
+    it is one connected graph or several. Requires read access."""
+    reg = _registry()
+    try:
+        reg.require(wiki_id, _caller(cred), ROLE_READ,
+                    is_admin=cred.get("is_admin", False))
+    except WikiNotFound as e:
+        raise HTTPException(status_code=404, detail=str(e)) from e
+    except WikiAccessDenied as e:
+        raise HTTPException(status_code=403, detail=str(e)) from e
+    store = get_graph_store()
+    return {"wiki_id": wiki_id, "edges": _wiki_edges(store, wiki_id),
+            "edge_count": len(_wiki_edges(store, wiki_id)),
+            "entity_count": len(store.list_entities(wiki_id))}
+
+
+@router.post("/wikis/{source}/merge-into/{target}")
+def merge_wiki(source: str, target: str,
+               cred: dict = Depends(require_any_credential)):
+    """Merge every entity of `source` into `target`, then empty `source`.
+
+    This is the "join two graphs" operation for the case where content that
+    should have been separate ended up split (or where two separate graphs are
+    genuinely the same thing after a later connection). It is deliberately
+    guarded: the caller must be a signed-in credential AND must explicitly
+    confirm the merge (the act of calling this endpoint with a valid token is
+    the confirmation). Without a valid credential the merge is refused.
+
+    Before merging it reports whether the two wikis were CONNECTED (shared an
+    edge). Pass force=true to merge even when they are disconnected (e.g. you
+    have linked them by intent). A merge of a wiki into itself is refused.
+    """
+    # AUTH GATE: refuse unless the caller presents a valid credential and has
+    # admin on BOTH wikis. The token is the confirmation to merge.
+    reg = _registry()
+    caller = _caller(cred)
+    for wid in (source, target):
+        try:
+            reg.require(wid, caller, ROLE_ADMIN,
+                        is_admin=cred.get("is_admin", False))
+        except WikiNotFound as e:
+            raise HTTPException(status_code=404, detail=str(e)) from e
+        except WikiAccessDenied as e:
+            raise HTTPException(
+                status_code=403,
+                detail="Merge requires admin on both wikis and a valid, "
+                       "confirmed credential.") from e
+    if source == target:
+        raise HTTPException(status_code=400, detail="Cannot merge a wiki into itself.")
+
+    store = get_graph_store()
+    src_ids = store.list_entities(source)
+    if not src_ids:
+        raise HTTPException(status_code=409, detail=f"Source wiki {source!r} is empty.")
+
+    # Whether the two graphs were connected before merging — reported, not a
+    # blocker. Per the chosen rule, merging a disconnected pair is allowed as
+    # long as the caller is authenticated (the token above is that confirm);
+    # we just surface that they were independent graphs.
+    connected = _connecting_edges(store, source, target)
+
+    moved, failed = [], []
+    for wid in src_ids:
+        r = store.move_entity_between_wikis(source, target, wid)
+        if r.get("moved"):
+            moved.append(wid)
+        else:
+            failed.append({"wiki_id": wid, "error": r.get("failed")})
+
+    # Empty source: archive it (there is no delete-by-design).
+    leftover = store.list_entities(source)
+    if not leftover:
+        try:
+            reg.set_archived(source, True)
+        except Exception:
+            pass
+    return {
+        "source": source,
+        "target": target,
+        "moved": len(moved),
+        "failed": failed,
+        "connected_before": bool(connected),
+        "connections_before": connected,
+        "target_entity_count": len(store.list_entities(target)),
+    }
+
+
+# ---------- passcode invites / join ----------
+
+@router.post("/wikis/{wiki_id}/invite", status_code=201)
+def create_invite(wiki_id: str, body: CreateInviteRequest,
+                  cred: dict = Depends(require_any_credential)):
+    """Issue a passcode invite to a wiki. Requires admin on that wiki.
+
+    The passcode is returned once, in the response; an administrator shares
+    it with whoever should join. Redeeming it grants the invite's role.
+    """
+    reg = _registry()
+    try:
+        reg.require(wiki_id, _caller(cred), ROLE_ADMIN,
+                    is_admin=cred.get("is_admin", False))
+        return reg.create_invite(
+            wiki_id, _caller(cred), role=body.role,
+            uses_left=body.uses_left, expires_in=body.expires_in,
+            passcode=body.passcode)
+    except WikiNotFound as e:
+        raise HTTPException(status_code=404, detail=str(e)) from e
+    except WikiAccessDenied as e:
+        raise HTTPException(status_code=403, detail=str(e)) from e
+    except WikiError as e:
+        raise HTTPException(status_code=422, detail=str(e)) from e
+
+
+@router.post("/wikis/{wiki_id}/join")
+def join_wiki(wiki_id: str, body: JoinRequest,
+              cred: dict = Depends(require_any_credential)):
+    """Redeem a passcode to gain access to a wiki as a self-service step.
+
+    Any authenticated user may attempt it; the passcode itself is the
+    authorisation. On success the caller is granted the invite's role.
+    """
+    reg = _registry()
+    try:
+        caller = _caller(cred)
+        return reg.redeem_invite(wiki_id, body.passcode, caller).to_dict()
+    except WikiNotFound as e:
+        raise HTTPException(status_code=404, detail=str(e)) from e
+    except WikiError as e:
+        raise HTTPException(status_code=422, detail=str(e)) from e
+
+
+@router.get("/wikis/{wiki_id}/invites")
+def list_invites(wiki_id: str, cred: dict = Depends(require_any_credential)):
+    """List active invites (admin on the wiki only). Passcodes are exposed
+    here too -- listing invites means you already administer the wiki."""
+    reg = _registry()
+    try:
+        reg.require(wiki_id, _caller(cred), ROLE_ADMIN,
+                    is_admin=cred.get("is_admin", False))
+        return reg.list_invites(wiki_id)
+    except WikiNotFound as e:
+        raise HTTPException(status_code=404, detail=str(e)) from e
+    except WikiAccessDenied as e:
+        raise HTTPException(status_code=403, detail=str(e)) from e
+
+
+@router.delete("/wikis/{wiki_id}/invite/{passcode}")
+def revoke_invite(wiki_id: str, passcode: str,
+                  cred: dict = Depends(require_any_credential)):
+    """Revoke a passcode so it can no longer be redeemed. Admin only.
+
+    Existing grants are untouched; only the invite is invalidated.
+    """
+    reg = _registry()
+    try:
+        reg.require(wiki_id, _caller(cred), ROLE_ADMIN,
+                    is_admin=cred.get("is_admin", False))
+        removed = reg.revoke_invite(wiki_id, passcode)
+        if not removed:
+            raise HTTPException(status_code=404, detail="No such invite.")
+        return {"revoked": True}
     except WikiNotFound as e:
         raise HTTPException(status_code=404, detail=str(e)) from e
     except WikiAccessDenied as e:

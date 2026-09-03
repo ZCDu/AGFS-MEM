@@ -8,6 +8,8 @@ Manage user accounts.
     python scripts/manage_users.py passwd alice
     python scripts/manage_users.py disable alice
     python scripts/manage_users.py enable alice
+    python scripts/manage_users.py promote alice   # give an EXISTING account admin
+    python scripts/manage_users.py demote alice
     python scripts/manage_users.py delete alice
 
 Exists because of a bootstrapping problem: creating an account requires
@@ -80,6 +82,12 @@ def main() -> None:
         p = sub.add_parser(name, help=help_text)
         p.add_argument("username")
 
+    p_promote = sub.add_parser("promote",
+        help="give an EXISTING account platform-admin (may access ANY user_id)")
+    p_promote.add_argument("username")
+    p_demote = sub.add_parser("demote", help="remove platform-admin from an account")
+    p_demote.add_argument("username")
+
     args = ap.parse_args()
 
     settings = get_settings()
@@ -130,6 +138,17 @@ def main() -> None:
             if args.cmd == "disable":
                 print("Any session token already issued keeps working until it "
                       "expires. Rotate AUTH_SECRET to cut them off immediately.")
+
+        elif args.cmd in ("promote", "demote"):
+            if store.get(args.username) is None:
+                print(f"No such user {args.username!r}.")
+                raise SystemExit(1)
+            store.set_admin(args.username, args.cmd == "promote")
+            verb = "is now a platform admin" if args.cmd == "promote" else "is no longer a platform admin"
+            print(f"{args.username!r} {verb}.")
+            print("Takes effect on their NEXT sign-in — a session token they "
+                  "already hold keeps whatever admin flag it was issued with "
+                  "until it expires (AUTH_SESSION_HOURS) or AUTH_SECRET is rotated.")
 
         elif args.cmd == "delete":
             if input(f"Delete account {args.username!r}? Their memory data is "

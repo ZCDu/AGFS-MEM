@@ -119,6 +119,73 @@ def test_seeds_from_hubs_when_no_entry_given(store):
     assert "person/hub" in {n["wiki_id"] for n in g["nodes"]}
 
 
+# ---------- connected components ----------
+
+def test_nodes_in_different_clusters_report_different_components(store):
+    chain(store, 3)  # n0 -> n1 -> n2, one cluster
+    store.upsert_entity("u", "concept", "X")
+    store.upsert_entity("u", "concept", "Y")
+    store.link_entities("u", "concept/x", "concept/y")  # a second, disjoint cluster
+    store.flush()
+
+    g = store.subgraph("u", None, max_depth=3, max_nodes=50)
+    by_id = {n["wiki_id"]: n["component"] for n in g["nodes"]}
+    assert by_id["concept/n0"] == by_id["concept/n1"] == by_id["concept/n2"]
+    assert by_id["concept/x"] == by_id["concept/y"]
+    assert by_id["concept/n0"] != by_id["concept/x"]
+
+
+def test_fully_connected_wiki_has_one_component(store):
+    chain(store, 4)
+    g = store.subgraph("u", None, max_depth=3, max_nodes=50)
+    components = {n["component"] for n in g["nodes"]}
+    assert components == {0}
+
+
+def test_default_seeds_backfill_a_small_disconnected_cluster(store):
+    """Regression: the top-3-by-degree default seeds have no component
+    awareness, so a small disconnected cluster could lose every tiebreak
+    against a large one and be completely absent from the response --
+    not just visually unseparated, never rendered at all (this is the
+    exact path a first page load in the GUI always takes)."""
+    # A large, densely-linked cluster whose members dominate by degree.
+    for i in range(6):
+        store.upsert_entity("u", "concept", f"Big {i}")
+    for i in range(6):
+        for j in range(i + 1, 6):
+            store.link_entities("u", f"concept/big-{i}", f"concept/big-{j}")
+    # A small, totally disconnected cluster.
+    store.upsert_entity("u", "concept", "Small A")
+    store.upsert_entity("u", "concept", "Small B")
+    store.link_entities("u", "concept/small-a", "concept/small-b")
+    store.flush()
+
+    g = store.subgraph("u", None, max_depth=1, max_nodes=50)
+    ids = {n["wiki_id"] for n in g["nodes"]}
+    assert "concept/small-a" in ids or "concept/small-b" in ids, \
+        "the small disconnected cluster must not be entirely absent"
+
+
+def test_default_seeds_unchanged_for_a_single_component_wiki(store):
+    """The backfill must ADD seeds only when other components exist and
+    aren't covered -- a single-component wiki's seed selection must be
+    byte-identical to the plain top-3-by-degree ranking."""
+    for i in range(6):
+        store.upsert_entity("u", "concept", f"C{i}")
+    # A single connected component: C0 is the hub.
+    for i in range(1, 6):
+        store.link_entities("u", "concept/c0", f"concept/c{i}")
+    store.flush()
+
+    entries = {e.wiki_id: e for e in store.manifest.list_entries("u")}
+    from app.graph.components import build_adjacency
+    adj = build_adjacency(list(entries.values()))
+    expected = sorted(entries, key=lambda w: (-len(adj[w]), w))[:3]
+
+    g = store.subgraph("u", None, max_depth=0, max_nodes=50)
+    assert g["seeds"] == expected
+
+
 def test_category_filter_restricts_traversal(store):
     store.upsert_entity("u", "concept", "A")
     store.upsert_entity("u", "concept", "B")
@@ -203,3 +270,43 @@ def test_subgraph_endpoint_over_the_api(client):
 
     r = client.post(u + "/wiki/layout", json={"positions": {"person/alice-chen": [5, 6]}})
     assert r.json() == {"updated": 1}
+
+
+def test_subgraph_response_carries_component_and_layout_fields_over_http(client):
+    """Regression: a dead, untyped duplicate handler used to shadow the real
+    (response_model=SubgraphResponse) one, so x/y/degree/hidden_neighbours
+    were silently dropped before ever reaching an HTTP caller even though
+    the store computed them. Assert they actually survive the real request."""
+    u = "/v1/users/demo"
+    client.put(u + "/wiki", json={"type": "person", "title": "Alice Chen"})
+    client.put(u + "/wiki", json={"type": "project", "title": "Orion"})
+    client.post(u + "/wiki/person/alice-chen/relations",
+               json={"target_wiki_id": "project/orion"})
+    client.post(u + "/wiki/layout", json={"positions": {"person/alice-chen": [5, 6]}})
+
+    g = client.post(u + "/wiki/subgraph",
+                    json={"entry_wiki_ids": ["person/alice-chen"], "max_depth": 1}).json()
+    alice = next(n for n in g["nodes"] if n["wiki_id"] == "person/alice-chen")
+    assert isinstance(alice["component"], int)
+    assert alice["degree"] == 1
+    assert (alice["x"], alice["y"]) == (5.0, 6.0)
+
+
+def test_exactly_one_subgraph_route_is_registered():
+    """Regression guard: two @router.post("/wiki/subgraph") handlers were
+    both registered under the same path -- Starlette silently matched the
+    first (untyped, dropping fields) and the second (correctly typed) was
+    dead code for the app's entire history. Nothing caught it."""
+    from app.main import create_app
+    app = create_app()
+
+    matches = []
+    for included in app.routes:
+        original_router = getattr(included, "original_router", None)
+        if original_router is None:
+            continue
+        for r in original_router.routes:
+            if (getattr(r, "path", "").endswith("/wiki/subgraph")
+                    and "POST" in (getattr(r, "methods", None) or [])):
+                matches.append(r)
+    assert len(matches) == 1, [getattr(r, "path", None) for r in matches]

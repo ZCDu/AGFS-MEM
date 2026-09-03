@@ -17,8 +17,16 @@ def client(tmp_path, monkeypatch):
     config_module._settings = None
     deps_module.get_storage_backend.cache_clear()
 
-    app = create_app()
-    yield TestClient(app)
+    # Use TestClient as a context manager so FastAPI's lifespan runs and
+    # calls backend.close() (drains write-behind buffers, stops the mirage
+    # event loop). Without it the backend leaks and its background flush
+    # timers fire at interpreter shutdown through a dead aiofiles executor,
+    # flooding the run with "cannot schedule new futures after shutdown".
+    # Clear the cache on teardown too, so the app's module-level singleton
+    # doesn't outlive this test.
+    with TestClient(create_app()) as test_client:
+        yield test_client
+    deps_module.get_storage_backend.cache_clear()
     shutil.rmtree(tmp_path / "bucket", ignore_errors=True)
 
 
@@ -28,45 +36,168 @@ def test_healthz(client):
     assert r.json()["status"] == "ok"
 
 
-def test_extract_first_use_falls_back_to_personal_wiki(client):
-    """Before any topic wiki exists, the very first Review must not 409.
-    It lands in the user's own personal wiki instead, and bare chatter is
-    still correctly classified as not worth storing (no LLM call)."""
+def test_extract_first_use_lands_in_the_users_own_wiki(client):
+    """Single-wiki deployment: the very first extract must not 409, and it
+    routes straight to the user's own home wiki (wiki_id == user_id) --
+    never a separate topic wiki, and never a proposal to review first."""
     r = client.post("/v1/users/demo/extract", json={
         "text": "User: hello?\n\nAssistant: Hello! How can I help you today?",
     })
     assert r.status_code == 200, r.text
     body = r.json()
     assert body["target_wiki"] == "demo"
-    assert "personal wiki" in body["target_wiki_reason"]
+    assert body["target_wiki_reason"] == "single wiki: user's own wiki"
+    assert body.get("new_wiki_proposal") is None
     assert body["llm_used"] is False
 
 
-def test_extract_new_topic_creates_a_wiki(client, monkeypatch):
-    """A write that matches nothing and is not the user's very first
-    conversation creates a NEW topic wiki instead of 409-ing. Auto-creation
-    still cannot fragment the graph -- a near-duplicate name reuses the
-    existing wiki rather than splitting it."""
-    # First use: establish the personal wiki so the next extract is NOT
-    # the "first use" path.
+def test_extract_unrelated_topic_still_lands_in_the_same_wiki(client):
+    """A write that matches nothing reachable and introduces an entirely new
+    subject used to be deferred as a NEW-wiki proposal for review. In a
+    single-wiki deployment there is nothing to propose: it lands directly in
+    the user's own wiki, immediately, like everything else.
+
+    force=true is used so the LLM plan runs deterministically in this test
+    despite the assessor's chatter gate."""
     client.post("/v1/users/demo/extract", json={
         "text": "User: hello?\n\nAssistant: Hello!",
     })
 
-    # A genuinely new topic, unrelated to anything reachable. The target is
-    # resolved (and the wiki created) before the assessor/LLM runs, so this
-    # can stay key-less: short text is gated as chatter and never reaches
-    # the model.
     r = client.post("/v1/users/demo/extract", json={
         "text": "We signed a deal with Acme Corp yesterday.",
+        "force": True,
     })
     assert r.status_code == 200, r.text
-    assert r.json()["target_wiki"] == "acme-corp"
-    assert "created" in r.json()["target_wiki_reason"]
+    body = r.json()
+    assert body.get("new_wiki_proposal") is None
+    assert body["target_wiki"] == "demo"
 
-    wiki = client.get("/v1/wikis/acme-corp")
+    # No deferral: the wiki already exists, from /extract alone.
+    assert client.get("/v1/wikis/demo").status_code == 200
+
+    ops = body["operations"]
+    if ops:
+        r = client.post("/v1/users/demo/extract/apply", json={
+            "target_wiki": "demo",
+            "operations": ops,
+        })
+        assert r.status_code == 200, r.text
+    wiki = client.get("/v1/wikis/demo")
     assert wiki.status_code == 200, wiki.text
-    assert wiki.json()["title"] == "Acme Corp"
+    assert wiki.json()["title"].strip()
+
+
+def test_notes_api_crud_and_expiry(client):
+    """The medium-memory notes layer over HTTP: create, list by tag, expired
+    surfacing, and delete. Notes are cheap — no wiki is created by filing one."""
+    from datetime import datetime, timedelta, timezone
+
+    past = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
+    r = client.post("/v1/users/u/notes", json={
+        "text": "Sofia starts 2026-11-02", "tags": ["hiring"]})
+    assert r.status_code == 201, r.text
+    n1 = r.json()
+    assert n1["tags"] == ["hiring"]
+
+    r = client.post("/v1/users/u/notes", json={
+        "text": "follow up on vendor", "tags": ["hiring"],
+        "expires_at": past})
+    assert r.status_code == 201, r.text
+    n2 = r.json()
+
+    r = client.get("/v1/users/u/notes", params={"tag": "hiring"})
+    assert r.status_code == 200
+    assert {n["text"] for n in r.json()} == {"Sofia starts 2026-11-02",
+                                             "follow up on vendor"}
+
+    r = client.get("/v1/users/u/notes", params={"active": "true"})
+    active_texts = {n["text"] for n in r.json()}
+    assert active_texts == {"Sofia starts 2026-11-02"}
+
+    r = client.get("/v1/users/u/notes/expired")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["expired"] == 1
+    assert body["expired_notes"][0]["text"] == "follow up on vendor"
+
+    r = client.delete(f"/v1/users/u/notes/{n1['id']}")
+    assert r.status_code == 200
+    assert client.get(f"/v1/users/u/notes/{n1['id']}").status_code == 404
+    assert n2["id"] in {n["id"] for n in client.get("/v1/users/u/notes").json()}
+
+
+def test_schedule_endpoint_reports_across_states(client, monkeypatch):
+    """The timer-schedule endpoint works against the running timer and rejects
+    bad input cleanly. Bad HH:MM -> 422; a valid time re-schedules and returns
+    the new schedule; a missing timer -> 409 (not a crash)."""
+    import app.api.routes_autocapture as rc
+
+    # GET returns a well-formed schedule (the timer runs in the lifespan).
+    res = client.get("/v1/users/u/autocapture/schedule")
+    assert res.status_code == 200, res.text
+    assert "time" in res.json()["schedule"]
+
+    # Bad HH:MM must be rejected as 422 on the real timer.
+    res = client.post("/v1/users/u/autocapture/schedule", json={"time": "99:99"})
+    assert res.status_code == 422, res.text
+
+    # A valid time re-schedules the real timer and returns the new schedule.
+    res = client.post("/v1/users/u/autocapture/schedule", json={"time": "07:45"})
+    assert res.status_code == 200, res.text
+    assert res.json()["schedule"]["time"] == "07:45"
+
+    # A missing timer must 409, not 500.
+    monkeypatch.setattr(rc, "_timer", lambda: None)
+    res = client.post("/v1/users/u/autocapture/schedule", json={"time": "14:30"})
+    assert res.status_code == 409, res.text
+
+
+def test_interactive_apply_marks_session_examined_so_autocapture_skips(client):
+    """End-to-end review-data contamination guard: when a human reviews and
+    applies a conversation via the interactive flow, its session messages are
+    marked `examined`, so the auto-capture timer must NOT re-examine (and
+    re-write) that same reviewed data."""
+    from datetime import date, datetime, timezone
+    from app.deps import get_storage_backend
+    from app.rawlog.sessions import SessionLog
+
+    user = "demo"
+    day = date(2026, 8, 20)
+    # Write a session the way chat does: two durable user messages.
+    session_log = SessionLog(get_storage_backend())
+    sid = "reviewed-1"
+    session_log.append(user, sid, [
+        {"role": "user", "content": (
+            "We decided to spin up the Orion search migration. "
+            "Alice Chen will lead it, deadline 2026-09-30.")},
+        {"role": "assistant", "content": "Sounds good."},
+    ], when=datetime(2026, 8, 20, 9, 0, tzinfo=timezone.utc))
+
+    # A human reviews this conversation with the interactive flow and applies.
+    r = client.post(f"/v1/users/{user}/extract",
+                    params={"apply": "true"},
+                    json={
+                        "text": session_log.transcript(user, sid, day=day),
+                        "session_id": sid,
+                        "session_date": day.isoformat(),
+                        "force": True,
+                    })
+    assert r.status_code == 200, r.text
+    assert r.json()["llm_used"] is True
+
+    # The reviewed session's messages are now marked examined…
+    unexamined = session_log.read_unexamined(user, sid, day=day)
+    assert unexamined == [], "interactive apply should mark the session examined"
+
+    # …so auto-capture has nothing left to examine in it: it must not
+    # re-extract/re-write the reviewed content.
+    run = client.post(f"/v1/users/{user}/autocapture/run",
+                      params={"on": day.isoformat()})
+    assert run.status_code == 200, run.text
+    body = run.json()
+    # No session is newly stored by the timer: the reviewed one is skipped
+    # (its only content was already examined and applied).
+    assert body["stored"] == 0, body
 
 
 def test_entity_upsert_and_get(client):
@@ -251,6 +382,45 @@ def test_soft_delete_leaves_tombstone_when_hard_delete_false(client):
     assert r.json()["status"] == "deleted"
 
 
+def test_merge_entities_via_api(client):
+    client.put("/v1/users/u1/wiki", json={"type": "person", "title": "Alice Chen"})
+    client.put("/v1/users/u1/wiki", json={"type": "person", "title": "Alicia"})
+    client.post("/v1/users/u1/wiki/person/Alicia/facts", json={"text": "Based in Berlin"})
+
+    r = client.post("/v1/users/u1/wiki/person/Alicia/merge_into",
+                    json={"target_wiki_id": "person/alice-chen"})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["merged"] is True
+    assert body["target"] == "person/alice-chen"
+    assert body["facts_moved"] == 1
+
+    target = client.get("/v1/users/u1/wiki/person/Alice Chen").json()
+    assert "Based in Berlin" in {f["text"] for f in target["facts"]}
+    assert "Alicia" in target["aliases"]
+
+    assert client.get("/v1/users/u1/wiki/person/Alicia").status_code == 404
+    ghost = client.get("/v1/users/u1/wiki/person/Alicia",
+                       params={"include_deleted": "true"}).json()
+    assert ghost["status"] == "deleted"
+    assert ghost["merged_into"] == "person/alice-chen"
+
+
+def test_merge_entities_missing_target_404s(client):
+    client.put("/v1/users/u1/wiki", json={"type": "person", "title": "Alice"})
+    r = client.post("/v1/users/u1/wiki/person/Alice/merge_into",
+                    json={"target_wiki_id": "person/nobody"})
+    assert r.status_code == 404
+
+
+def test_merge_entities_across_types_422s(client):
+    client.put("/v1/users/u1/wiki", json={"type": "person", "title": "Orion"})
+    client.put("/v1/users/u1/wiki", json={"type": "project", "title": "Orion Two"})
+    r = client.post("/v1/users/u1/wiki/project/Orion Two/merge_into",
+                    json={"target_wiki_id": "person/orion"})
+    assert r.status_code == 422
+
+
 def test_soft_deleted_entity_never_resolves_via_traverse(client):
     client.put("/v1/users/u1/wiki", json={"type": "person", "title": "Alice"})
     client.put("/v1/users/u1/wiki", json={"type": "project", "title": "Orion"})
@@ -376,6 +546,105 @@ def test_list_entities_from_manifest(client):
     assert {e["wiki_id"] for e in r.json()} == {"person/alice"}
 
 
+def test_list_entities_matches_description(client):
+    """`q` must also match against an entity's description (compact), not
+    just its title/aliases/wiki_id — a name-blind search on words that only
+    appear in the description should still find it."""
+    client.put("/v1/users/u1/wiki", json={
+        "type": "project", "title": "Orion",
+        "compact": "Quarterly launch timeline for the propulsion team.",
+    })
+    r = client.get("/v1/users/u1/wiki", params={"q": "propulsion timeline"})
+    assert r.status_code == 200
+    assert {e["wiki_id"] for e in r.json()} == {"project/orion"}
+
+
+def test_list_entities_title_match_outranks_description_match(client):
+    """When both a title hit and a description-only hit exist, the title
+    hit must sort first."""
+    client.put("/v1/users/u1/wiki", json={
+        "type": "project", "title": "Timeline Overhaul",
+    })
+    client.put("/v1/users/u1/wiki", json={
+        "type": "project", "title": "Orion",
+        "compact": "Includes a full timeline for the propulsion team.",
+    })
+    r = client.get("/v1/users/u1/wiki", params={"q": "timeline"})
+    assert r.status_code == 200
+    ids = [e["wiki_id"] for e in r.json()]
+    assert ids == ["project/timeline-overhaul", "project/orion"]
+
+
+def test_list_entities_matches_chinese_description(client):
+    """Regression: the shared tokenizer used to tokenize CJK text one
+    character at a time and filter out anything not longer than 2
+    characters, which discarded every CJK token -- so a Chinese description
+    could never match via the overlap tier, only via an exact title/alias
+    substring. A shorter, related Chinese phrase must now also match."""
+    client.put("/v1/users/u1/wiki", json={
+        "type": "organization", "title": "分行整改方案",
+        "compact": "各分支行整改方案",
+    })
+    r = client.get("/v1/users/u1/wiki", params={"q": "分支行"})
+    assert r.status_code == 200
+    assert len(r.json()) == 1
+
+
+def test_list_entities_semantic_fallback_when_lexical_finds_nothing(client, monkeypatch):
+    """The regression this fallback tier exists for: a query and an entity
+    can be genuinely related with zero shared words/characters ("branch" vs
+    "department"). Lexical matching can never bridge that; the semantic
+    tier is what's supposed to. embed() is stubbed to a fixed vector so this
+    proves the WIRING (fallback reachable, entity found, ranked) without
+    needing the real ~1-2GB model in a test."""
+    monkeypatch.setenv("EMBEDDING_ENABLED", "true")
+    import app.config as config_module
+    config_module._settings = None
+    import app.graph.embeddings as embeddings_module
+    monkeypatch.setattr(embeddings_module, "is_embedding_enabled", lambda: True)
+    monkeypatch.setattr(embeddings_module, "embed", lambda text: [1.0, 0.0, 0.0])
+
+    # Title/compact share zero words with the query below.
+    client.put("/v1/users/u1/wiki", json={
+        "type": "organization", "title": "Branch Rectification Plan",
+        "compact": "Covers branch offices and their compliance workflow.",
+    })
+
+    r = client.get("/v1/users/u1/wiki",
+                   params={"q": "departmental structure overview"})
+    assert r.status_code == 200
+    assert {e["wiki_id"] for e in r.json()} == {"organization/branch-rectification-plan"}
+
+
+def test_list_entities_lexical_hit_skips_the_semantic_fallback(client, monkeypatch):
+    """Cost control: when lexical matching already found something, the
+    semantic tier must not run at all (not just "not change the result") --
+    embed() is stubbed to blow up if called, so this fails loudly if that
+    invariant breaks."""
+    monkeypatch.setenv("EMBEDDING_ENABLED", "true")
+    import app.config as config_module
+    config_module._settings = None
+    import app.graph.embeddings as embeddings_module
+    monkeypatch.setattr(embeddings_module, "is_embedding_enabled", lambda: True)
+
+    def boom(text):
+        raise AssertionError("embed() must not be called when lexical already matched")
+
+    client.put("/v1/users/u1/wiki", json={"type": "person", "title": "Alice Chen"})
+    monkeypatch.setattr(embeddings_module, "embed", boom)
+
+    r = client.get("/v1/users/u1/wiki", params={"q": "alice"})
+    assert r.status_code == 200
+    assert {e["wiki_id"] for e in r.json()} == {"person/alice-chen"}
+
+
+def test_list_entities_no_match_returns_empty(client):
+    client.put("/v1/users/u1/wiki", json={"type": "person", "title": "Alice"})
+    r = client.get("/v1/users/u1/wiki", params={"q": "zzz_no_such_thing"})
+    assert r.status_code == 200
+    assert r.json() == []
+
+
 def test_delete_entity(client):
     client.put("/v1/users/u1/wiki", json={"type": "concept", "title": "Temp"})
     r = client.delete("/v1/users/u1/wiki/concept/Temp")
@@ -404,8 +673,12 @@ def test_raw_facts_append_and_read(client):
     assert r.status_code == 201
     assert r.json()["count"] == 2
 
-    from datetime import date
-    r = client.get("/v1/users/u1/raw-facts", params={"on": date.today().isoformat()})
+    # RawFactLog shards by the UTC date of the write (app/rawlog/log.py), so
+    # this must ask for the same UTC day -- a naive date.today() (local date)
+    # is wrong for roughly a third of the day in any timezone ahead of UTC.
+    from datetime import datetime, timezone
+    r = client.get("/v1/users/u1/raw-facts",
+                   params={"on": datetime.now(timezone.utc).date().isoformat()})
     assert r.status_code == 200
     assert r.json()["count"] == 2
 
@@ -562,7 +835,7 @@ def test_entity_files_conform_to_okf(client):
 
     import app.deps as deps
     backend = deps.get_storage_backend()
-    keys = [k for k in backend.list_keys("wikis/demo/") if k.endswith(".okf.md")]
+    keys = [k for k in backend.list_keys("demo/wiki/") if k.endswith(".okf.md")]
     assert keys
 
     for key in keys:
@@ -587,7 +860,7 @@ def test_relations_appear_as_markdown_links_in_the_body(client):
 
     import app.deps as deps
     text = deps.get_storage_backend().get_bytes(
-        "wikis/demo/person/alice-chen.okf.md").data.decode("utf-8")
+        "demo/wiki/person/alice-chen.okf.md").data.decode("utf-8")
 
     body = text.split("---\n", 2)[2]
     assert "[project/orion](/project/orion.md)" in body, "bundle-relative link per §5.1"
@@ -626,7 +899,7 @@ def test_frontmatter_does_not_duplicate_okf_fields(client):
 
     import app.deps as deps
     text = deps.get_storage_backend().get_bytes(
-        "wikis/demo/person/alexei.okf.md").data.decode("utf-8")
+        "demo/wiki/person/alexei.okf.md").data.decode("utf-8")
     front = yaml.safe_load(re.match(r"^---\n(.*?)\n---\n", text, re.DOTALL).group(1))
 
     assert front["tags"] == ["Alexei Krasny"]
@@ -638,7 +911,7 @@ def test_old_files_using_aliases_and_compact_still_load(client):
     """Dropping fields from the writer must not orphan files already written."""
     import app.deps as deps
     backend = deps.get_storage_backend()
-    backend.put_bytes("wikis/demo/person/legacy.okf.md", b"""---
+    backend.put_bytes("demo/wiki/person/legacy.okf.md", b"""---
 type: person
 title: Legacy Person
 wiki_id: person/legacy
@@ -682,7 +955,7 @@ def test_body_carries_the_detail_a_reader_needs(client):
 
     import app.deps as deps
     text = deps.get_storage_backend().get_bytes(
-        "wikis/demo/person/alexei.okf.md").data.decode("utf-8")
+        "demo/wiki/person/alexei.okf.md").data.decode("utf-8")
     body = text.split("---\n", 2)[2]
 
     assert "| Fact | Confidence | Source |" in body, "facts belong in a table"

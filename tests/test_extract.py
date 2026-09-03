@@ -212,6 +212,80 @@ def test_confidence_is_clamped(store):
     assert all(0.0 <= c <= 1.0 for c in confs), confs
 
 
+def test_significance_is_clamped_and_applied_on_creation(store):
+    response = {"entities": [{"title": "Orion", "type": "project", "summary": "x",
+                              "significance": 7.5}],
+                "relations": []}
+    ex = ConversationExtractor(store, StubLLM(response))
+    plan = ex.plan("u", CONVERSATION)
+    sigs = [o.payload["significance"] for o in plan.operations if o.op == "upsert_entity"]
+    assert sigs == [1.0], sigs
+
+    ex.apply("u", plan)
+    store.flush()
+    assert store.get_entity("u", "project/orion", touch=False).metadata.significance == 1.0
+
+
+def test_missing_significance_falls_back_to_default_on_creation(store):
+    response = {"entities": [{"title": "Orion", "type": "project", "summary": "x"}],
+                "relations": []}
+    ex = ConversationExtractor(store, StubLLM(response))
+    ex.apply("u", ex.plan("u", CONVERSATION))
+    store.flush()
+    assert store.get_entity("u", "project/orion", touch=False).metadata.significance == 0.5
+
+
+def test_significance_never_lowers_an_existing_entity(store):
+    """One pass's narrower view of a single conversation should not be able
+    to devalue an entity that a previous pass already rated more important --
+    only reinforcement (seeing it again, rated at least as high) can raise
+    significance further."""
+    store.upsert_entity("u", "project", "Orion", summary_append="x", significance=0.9)
+    store.flush()
+
+    response = {"entities": [{"title": "Orion", "type": "project", "summary": "y",
+                              "significance": 0.2}],
+                "relations": []}
+    ex = ConversationExtractor(store, StubLLM(response))
+    ex.apply("u", ex.plan("u", CONVERSATION))
+    store.flush()
+
+    assert store.get_entity("u", "project/orion", touch=False).metadata.significance == 0.9
+
+
+def test_significance_reinforcement_raises_an_existing_entity(store):
+    store.upsert_entity("u", "project", "Orion", summary_append="x", significance=0.3)
+    store.flush()
+
+    response = {"entities": [{"title": "Orion", "type": "project", "summary": "y",
+                              "significance": 0.8}],
+                "relations": []}
+    ex = ConversationExtractor(store, StubLLM(response))
+    ex.apply("u", ex.plan("u", CONVERSATION))
+    store.flush()
+
+    assert store.get_entity("u", "project/orion", touch=False).metadata.significance == 0.8
+
+
+def test_significance_floor_does_not_leak_across_a_type_collision(store):
+    """A same-titled, differently-typed entity (e.g. person 'Orion' and
+    project 'Orion') is NOT a match -- it creates a new entity (see the
+    `matched` check in _build_plan). Its significance must be judged on its
+    own terms, not floored against the unrelated existing entity's value
+    just because they share a wiki_id lookup key before the type check."""
+    store.upsert_entity("u", "person", "Orion", summary_append="x", significance=0.9)
+    store.flush()
+
+    response = {"entities": [{"title": "Orion", "type": "project", "summary": "y",
+                              "significance": 0.1}],
+                "relations": []}
+    ex = ConversationExtractor(store, StubLLM(response))
+    ex.apply("u", ex.plan("u", CONVERSATION))
+    store.flush()
+
+    assert store.get_entity("u", "project/orion", touch=False).metadata.significance == 0.1
+
+
 def test_empty_extraction_is_a_valid_answer(store):
     plan = ConversationExtractor(
         store, StubLLM({"entities": [], "relations": [],
@@ -578,3 +652,64 @@ def test_invalid_entity_types_are_reported(store):
 
     assert [o.wiki_id for o in plan.operations] == ["person/chairwoman-yin"]
     assert any("invalid type 'nation'" in str(r) for r in plan.rejected)
+
+
+# ---------- retraction / removal ----------
+
+def test_plan_removal_whole_entity(store):
+    """A removal message about a known entity plans a delete_entity (not an
+    add/create) against the target wiki.
+
+    Retraction now goes through app.intents.semantica_crud.structure_claim,
+    which asks the LLM to structure the message into a claim -- so the stub
+    here returns a CLAIMS array (a generic/no-specific-property retraction,
+    matching "remove her from memory" -- a whole-entity signal), not the
+    normal entities/relations extraction shape."""
+    store.upsert_entity("u", "person", "Rina Sato", on_conflict="disambiguate")
+    store.add_fact("u", "person/rina-sato", "head of comms at Taldic Corps")
+    store.flush()
+    claims = json.dumps([{"entity": "person/rina-sato", "property": "fact", "value": None}])
+    ex = ConversationExtractor(store, StubLLM(claims))
+    plan = ex.plan("u", "Rina Sato is no longer working at Taldic Corps. Remove her from memory.")
+    ops = [o for o in plan.operations if o.op in ("delete_entity", "delete_fact")]
+    assert len(ops) == 1
+    assert ops[0].op == "delete_entity"
+    assert ops[0].wiki_id == "person/rina-sato"
+    # A whole-entity delete from a retraction is destructive and this path
+    # can run unattended (autocapture) -- it must be staged for confirmation,
+    # never auto-applied outright.
+    assert ops[0].payload.get("confirm") is True
+    # The apply validator (routes_extract REQUIRED_FIELDS) demands an
+    # `entity` field on delete_entity; a plan that omits it fails with
+    # "missing ['entity']" when reviewed-and-applied. Guard that contract.
+    assert ops[0].payload.get("entity") == "person/rina-sato"
+
+
+def test_plan_removal_fact_specific(store):
+    """A removal that targets ONE stored fact plans a delete_fact, keeping the
+    entity node. Stub returns a claim with a SPECIFIC property (not a
+    generic whole-entity signal), which resolves to a single-fact delete."""
+    store.upsert_entity("u", "person", "Rina Sato", on_conflict="disambiguate")
+    store.add_fact("u", "person/rina-sato", "head of comms at Taldic Corps")
+    store.flush()
+    claims = json.dumps([{"entity": "person/rina-sato", "property": "role", "value": None}])
+    ex = ConversationExtractor(store, StubLLM(claims))
+    plan = ex.plan("u", "remove the claim that Rina Sato is the head of comms")
+    ops = [o for o in plan.operations if o.op in ("delete_entity", "delete_fact")]
+    assert len(ops) == 1
+    assert ops[0].op == "delete_fact"
+    assert ops[0].wiki_id == "person/rina-sato"
+    assert ops[0].payload.get("confirm") is True
+    assert ops[0].payload.get("entity") == "person/rina-sato"
+    assert ops[0].payload.get("fact_id")
+
+
+def test_plan_removal_no_match_falls_through(store):
+    """When the retraction structures to no actionable claim (the stub here
+    returns the normal entities/relations shape, which structure_claim's
+    claims-array parser rejects as not a list), _plan_removal returns None
+    and the ordinary (assessor-gated) path runs instead -- it must not
+    raise."""
+    ex = ConversationExtractor(store, StubLLM(GOOD_RESPONSE))
+    plan = ex.plan("u", "Forget someone named Nils, he never existed.")
+    assert isinstance(plan, object)  # does not raise; returns some plan

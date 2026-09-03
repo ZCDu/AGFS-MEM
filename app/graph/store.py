@@ -58,16 +58,20 @@ import json
 import logging
 import math
 import re
+import threading
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
+from app.graph.components import build_adjacency, connected_components
+from app.graph.embeddings import EmbeddingIndex
 from app.graph.manifest import ManifestEntry, WikiManifest
 from app.graph.ops_log import WikiOp, WikiOpsLog
+from app.graph.conflicts import ConflictStore
 from app.storage.backend import ConflictError, StorageBackend
 
 logger = logging.getLogger("memory_backend.graph")
 
-_attach_lock = __import__("threading").Lock()
+_attach_lock = threading.Lock()
 
 
 def _attach(backend: StorageBackend, attr: str, factory):
@@ -83,14 +87,60 @@ def _attach(backend: StorageBackend, attr: str, factory):
             return existing
         from app.config import get_settings
         st = get_settings()
-        mode = st.manifest_write_mode if attr == "_wiki_manifest" else st.ops_log_write_mode
+        mode = (st.manifest_write_mode if attr in ("_wiki_manifest", "_embedding_index")
+                else st.ops_log_write_mode)
         obj = factory(backend, mode=mode,
                       flush_interval=st.flush_interval_seconds,
                       max_pending=st.flush_max_pending)
         setattr(backend, attr, obj)
         return obj
 
+
+def _lock_for_entity(backend: StorageBackend, user_id: str, wiki_id: str) -> threading.Lock:
+    """Get-or-create the lock guarding ONE entity's read-modify-write cycle
+    end to end (see _mutate below) -- not just its final write.
+
+    Why this exists: MIRAGE_VERIFY_CONDITIONAL_WRITES's re-read-before-write
+    only closes the race for the WRITE step; two writers can still both read
+    the same stale state before either writes, and the second writer's
+    result silently overwrites the first's (a lost update) even with
+    verification on, in the narrow window between the read and the lock
+    mirage_backend takes around its own write. This lock closes that window
+    completely for same-process writers by covering the ENTIRE cycle, which
+    is what actually lets MIRAGE_VERIFY_CONDITIONAL_WRITES=false be safe
+    rather than merely faster: this deployment runs as one process, so
+    same-process is the case that matters (chat and autocapture writing the
+    same entity at the same moment), and this protects it at zero per-write
+    network cost -- unlike the read it replaces.
+
+    Registered on the BACKEND, not the EntityGraphStore instance: a fresh
+    EntityGraphStore is built per request (see EntityGraphStore.__init__),
+    so a per-instance lock dict would give every request its own, mutually
+    invisible registry -- exactly the bug this is meant to avoid.
+    """
+    registry = getattr(backend, "_entity_locks", None)
+    if registry is None:
+        with _attach_lock:
+            registry = getattr(backend, "_entity_locks", None)
+            if registry is None:
+                registry = {}
+                backend._entity_locks = registry
+    key = (user_id, wiki_id)
+    lock = registry.get(key)
+    if lock is None:
+        with _attach_lock:
+            lock = registry.get(key)
+            if lock is None:
+                lock = threading.Lock()
+                registry[key] = lock
+    return lock
+
+
 MAX_WRITE_RETRIES = 5
+# Cap on how many default seeds subgraph() backfills across components, so a
+# wiki with many tiny/singleton components can't flood a first-page-load
+# response and crowd out real detail from the largest cluster.
+_DEFAULT_SEED_CAP = 10
 # Tracks the Google Cloud Open Knowledge Format spec version these files
 # target. Was "1.0", which is not a version OKF has ever had.
 OKF_VERSION = "0.1"
@@ -141,9 +191,27 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _cjk_slug(name: str) -> str:
+    """Deterministic CJK/latin fallback slug for a name with no ASCII chars.
+
+    Collapsing a Chinese-only name to \"\" then \"entity\" made every such
+    entity collide on e.g. person/entity. Encode the first codepoints + a hash
+    so each script title gets its own stable, valid slug (mirrors
+    registry.slugify_wiki).
+    """
+    cjk = [c for c in name.strip() if ord(c) > 127 and not c.isspace()]
+    if not cjk:
+        return "entity"
+    code = "-".join(f"{ord(c):x}" for c in cjk[:4])
+    import hashlib as _hl
+    h = _hl.sha1(name.encode("utf-8")).hexdigest()[:8]
+    raw = f"cjk-{code}-{h}"
+    return re.sub(r"[^a-z0-9-]+", "-", raw.lower()).strip("-") or "entity"
+
+
 def _slugify(name: str) -> str:
     slug = re.sub(r"[^a-z0-9]+", "-", name.strip().lower()).strip("-")
-    return slug or "entity"
+    return slug or _cjk_slug(name)
 
 
 def _title_key(title: str) -> str:
@@ -170,9 +238,15 @@ def has_usable_slug(title: str) -> bool:
 
     _slugify falls back to the literal "entity" for such titles, so "!!!" and
     "???" both become `concept/entity` and collide with each other and with
-    anything else unnameable.
+    anything else unnameable. CJK/other-script titles (Chinese, Japanese,
+    Korean) ARE usable -- they slug to a deterministic cjk-* id via
+    _slugify, so they must not be rejected here.
     """
-    return bool(re.sub(r"[^a-z0-9]+", "", title.strip().lower()))
+    s = title.strip().lower()
+    if re.sub(r"[^a-z0-9]+", "", s):
+        return True
+    # CJK / non-Latin titles are nameable via _slugify's cjk fallback.
+    return any(ord(c) > 127 and not c.isspace() for c in s)
 
 
 class SlugConflictError(ValueError):
@@ -303,6 +377,25 @@ class Metadata:
         )
 
 
+def decay_score(last_accessed: str, significance: float = 0.5,
+                lam: float = 0.15, now: datetime | None = None) -> float:
+    """exp(-lambda * days_since_access / significance). Standalone so both
+    Entity.decay_score() (needs a full entity) and search ranking (only ever
+    has a ManifestEntry, which carries last_accessed but not the full entity)
+    can share one formula rather than duplicating it."""
+    now = now or datetime.now(timezone.utc)
+    try:
+        last = datetime.fromisoformat(last_accessed)
+    except (TypeError, ValueError):
+        # Hand-edited, legacy, or partially-written file. This is called
+        # unconditionally by the API serializer, so raising here turns one
+        # bad file into a permanent opaque 500 on that entity.
+        return 0.0
+    days = max(0.0, (now - last).total_seconds() / 86400.0)
+    sig = max(significance, 1e-3)
+    return math.exp(-lam * days / sig)
+
+
 @dataclass
 class Entity:
     wiki_id: str
@@ -320,17 +413,8 @@ class Entity:
 
     def decay_score(self, now: datetime | None = None, lam: float = 0.15) -> float:
         """exp(-lambda * days_since_access / significance) — unchanged from before."""
-        now = now or datetime.now(timezone.utc)
-        try:
-            last = datetime.fromisoformat(self.metadata.last_accessed)
-        except (TypeError, ValueError):
-            # Hand-edited, legacy, or partially-written file. This is called
-            # unconditionally by the API serializer, so raising here turns one
-            # bad file into a permanent opaque 500 on that entity.
-            return 0.0
-        days = max(0.0, (now - last).total_seconds() / 86400.0)
-        sig = max(self.metadata.significance, 1e-3)
-        return math.exp(-lam * days / sig)
+        return decay_score(self.metadata.last_accessed, self.metadata.significance,
+                           lam=lam, now=now)
 
 
 class EntityGraphStore:
@@ -346,12 +430,88 @@ class EntityGraphStore:
         self.okf_mode = get_settings().okf_mode
         self.manifest = _attach(backend, "_wiki_manifest", WikiManifest)
         self.ops_log = _attach(backend, "_wiki_ops_log", WikiOpsLog)
+        self.embedding_index = _attach(backend, "_embedding_index", EmbeddingIndex)
+        # Conflict records are written once per conflict (not append-heavy),
+        # so a per-request instance is fine — no write-behind buffer to keep.
+        self.conflicts = ConflictStore(backend)
+        self._conflict_enabled = self._load_conflict_flag()
+        # Per-request author for the ops log. The wiki-scoped router sets this
+        # from the bearer token before a write; user-scoped routes leave it
+        # unset and _log_op falls back to the scope (== the token-bound user).
+        self._actor: str | None = None
+
+    @staticmethod
+    def _load_conflict_flag() -> bool:
+        """Feature flag: conflict checking off by default so nothing changes
+        unless a deployment opts in. Also turns itself off if semantica isn't
+        importable."""
+        try:
+            from app.config import get_settings
+            settings = get_settings()
+        except Exception:
+            return False
+        if not settings.conflict_check_enabled:
+            return False
+        try:
+            from app.graph.semantica_wrap import semantica_available
+            return semantica_available()
+        except Exception:
+            return False
+
+    def set_actor(self, actor: str | None) -> None:
+        """Name who is performing writes in this request's scope."""
+        self._actor = actor
 
     def flush(self) -> None:
         """Force all buffered derived state to storage. Called on app
         shutdown and by tests that assert on raw storage contents."""
         self.manifest.flush()
         self.ops_log.flush()
+
+    def _detect_and_record_conflicts(self, user_id: str, op: str,
+                                     context: dict) -> None:
+        """Run Semantica-backed conflict detection for a write and persist any
+        findings as OKF conflict records. Best-effort: a detection failure must
+        never break the write itself. Returns nothing; records are queryable via
+        list_conflicts()."""
+        if not self._conflict_enabled:
+            return
+        try:
+            from app.graph.semantica_wrap import detect_for_write
+        except Exception:
+            return
+        try:
+            records = detect_for_write(user_id, op, context)
+        except Exception:
+            logger.warning("conflict detection raised; skipping for %s %s",
+                           op, user_id, exc_info=True)
+            return
+        for rec in records:
+            if not rec.conflict_id:
+                from app.graph.conflicts import new_conflict_id
+                rec.conflict_id = new_conflict_id()
+            try:
+                self.conflicts.save(user_id, rec)
+                self._log_op(user_id, "update_fact", user_id,
+                             reason=f"conflict detected: {rec.type}",
+                             evidence=rec.sources)
+            except Exception:
+                logger.warning("could not persist conflict record", exc_info=True)
+
+    def list_conflicts(self, user_id: str, type_: str | None = None,
+                       status: str | None = None,
+                       entity: str | None = None) -> list:
+        """All conflict records in a wiki, newest first, optional filters."""
+        return self.conflicts.list(user_id, type_=type_, status=status, entity=entity)
+
+    def get_conflict(self, user_id: str, conflict_id: str):
+        """One conflict record by id."""
+        return self.conflicts.get(user_id, conflict_id)
+
+    def resolve_conflict(self, user_id: str, conflict_id: str,
+                         resolution: str = "resolved") -> None:
+        """Mark a conflict resolved."""
+        self.conflicts.mark_resolved(user_id, conflict_id, resolution)
 
     # ---------- id / key helpers ----------
 
@@ -603,35 +763,73 @@ class EntityGraphStore:
             companion = got.data if got else None
         return self._deserialize(raw.data, companion)
 
+    def _entity_cache(self) -> dict:
+        """Per-backend short-term (in-memory) entity cache: (user_id, wiki_id)
+        -> deserialized Entity. Attached to the backend so its lifetime tracks
+        the connection (one shared cache per process backend singleton), the
+        same pattern as the manifest/ops-log buffers. Invalidated on writes.
+
+        (Not via _attach: that helper passes manifest/write-mode kwargs that a
+        plain dict factory doesn't accept.)"""
+        cache = getattr(self.backend, "_entity_cache", None)
+        if cache is None:
+            from threading import Lock
+            _lock = getattr(self.backend, "_entity_cache_lock", None)
+            if _lock is None:
+                _lock = Lock()
+                setattr(self.backend, "_entity_cache_lock", _lock)
+            with _lock:
+                cache = getattr(self.backend, "_entity_cache", None)
+                if cache is None:
+                    cache = {}
+                    setattr(self.backend, "_entity_cache", cache)
+        return cache
+
+    @staticmethod
+    def _invalidate_entity(entity_cache: dict, user_id: str, wiki_id: str) -> None:
+        entity_cache.pop((user_id, wiki_id), None)
+
     def _mutate(self, user_id: str, wiki_id: str, mutator) -> Entity:
         """
         Read-modify-write with ETag-based optimistic concurrency and retry.
         `mutator(entity_or_none) -> Entity`. Creates a fresh Entity if none
         exists yet (mutator must handle None — only upsert_entity's mutator does).
+
+        The WHOLE cycle runs under this entity's lock (_lock_for_entity), not
+        just the write: two same-process writers who both read stale state
+        before either writes can otherwise lose one's update even with
+        MIRAGE_VERIFY_CONDITIONAL_WRITES on, since that check only guards the
+        write step. This closes that window for free, which is what makes
+        running with verification OFF safe here rather than merely faster.
         """
         key = self._key(user_id, wiki_id)
-        last_error = None
-        for _ in range(MAX_WRITE_RETRIES):
-            current = self._read_raw(user_id, wiki_id)
-            entity = self._read_entity(user_id, wiki_id, current) if current else None
-            new_entity = mutator(entity)
-            etag = current.etag if current else ""
-            try:
-                if self.okf_mode == OKF_MODE_COMPANION:
-                    # Companion first: a markdown file whose `resource` points
-                    # at a JSON that does not exist yet is worse than a JSON
-                    # nothing points at. The markdown keeps the conditional
-                    # write, so it remains the concurrency control point.
+        lock = _lock_for_entity(self.backend, user_id, wiki_id)
+        with lock:
+            last_error = None
+            for _ in range(MAX_WRITE_RETRIES):
+                current = self._read_raw(user_id, wiki_id)
+                entity = self._read_entity(user_id, wiki_id, current) if current else None
+                new_entity = mutator(entity)
+                etag = current.etag if current else ""
+                try:
+                    if self.okf_mode == OKF_MODE_COMPANION:
+                        # Companion first: a markdown file whose `resource` points
+                        # at a JSON that does not exist yet is worse than a JSON
+                        # nothing points at. The markdown keeps the conditional
+                        # write, so it remains the concurrency control point.
+                        self.backend.put_bytes(
+                            self._companion_key(user_id, wiki_id),
+                            self._serialize_companion(new_entity))
                     self.backend.put_bytes(
-                        self._companion_key(user_id, wiki_id),
-                        self._serialize_companion(new_entity))
-                self.backend.put_bytes(
-                    key, self._serialize(new_entity, self.okf_mode), if_match=etag)
-                return new_entity
-            except ConflictError as e:
-                last_error = e
-                continue
-        raise last_error or RuntimeError("Failed to write entity after retries")
+                        key, self._serialize(new_entity, self.okf_mode), if_match=etag)
+                    # Invalidate the STM entity cache so the next read refetches
+                    # the newly written state.
+                    self._entity_cache().pop((user_id, wiki_id), None)
+                    return new_entity
+                except ConflictError as e:
+                    last_error = e
+                    continue
+            raise last_error or RuntimeError("Failed to write entity after retries")
 
     def _resolve_slug_conflict(self, user_id: str, type_: str, title: str,
                                wiki_id: str, on_conflict: str) -> tuple[str, str | None]:
@@ -684,37 +882,68 @@ class EntityGraphStore:
             # source of truth; this is derived and rebuildable.
             edges=[{"t": r.target, "c": r.category} for r in entity.relations],
         ))
+        # Semantic-search fallback (see app/graph/embeddings.py): off by
+        # default, and a no-op cost when off (is_embedding_enabled() short-
+        # circuits before anything touches the model). Recomputed on every
+        # write off the entity's own compact field, same "derived, never
+        # authoritative" posture as the manifest above. Imported here rather
+        # than at module scope, like every other embeddings.py consumer
+        # (app/graph/search.py, app/verify/assessor.py) -- so monkeypatching
+        # app.graph.embeddings.embed/is_embedding_enabled in tests reaches
+        # this call site too, instead of a stale name bound at import time.
+        from app.graph.embeddings import embed, is_embedding_enabled
+        if is_embedding_enabled() and entity.compact:
+            vector = embed(entity.compact)
+            if vector is not None:
+                self.embedding_index.upsert(user_id, entity.wiki_id, vector)
 
     def _log_op(self, user_id: str, op: str, wiki_id: str, reason: str = "",
-                evidence: list[str] | None = None, field_: str | None = None) -> None:
+                evidence: list[str] | None = None, field_: str | None = None,
+                actor: str | None = None) -> None:
+        # actor defaults to the scope (user_id): on the user-scoped API a
+        # token is bound to its path user, so scope == author. Shared wikis
+        # call store.set_actor(caller) before a write; prefer that when set.
         self.ops_log.append(user_id, WikiOp(
             op_id=self.ops_log._next_op_id(), op=op, wiki_id=wiki_id,
             reason=reason, evidence=evidence or [], field_name=field_,
+            actor=actor if actor is not None
+                  else (self._actor or user_id),
         ))
 
     # ---------- public API ----------
 
     def get_entity(self, user_id: str, wiki_id: str, touch: bool = True,
                     include_deleted: bool = False) -> Entity | None:
-        raw = self._read_raw(user_id, wiki_id)
-        if raw is None:
-            # READ REPAIR. The entity file is the source of truth (ADR-001)
-            # and the manifest is a buffered cache of it, so the two can
-            # diverge: a hard delete removes the file synchronously but the
-            # matching manifest removal is only staged, and an abrupt process
-            # exit (SIGKILL, closing the terminal) drops that staged change.
-            # The result is a phantom — GET 404s while GET /wiki still lists
-            # the entity and _stats still counts it, indefinitely.
-            #
-            # Rather than leave that until someone runs _rebuild_manifest, a
-            # read that finds no file evicts the stale entry. Costs nothing
-            # extra (we already know the file is gone) and converts a silent
-            # permanent inconsistency into a self-correcting one.
-            if self.manifest.get_entry(user_id, wiki_id) is not None:
-                logger.info("read repair: dropping stale manifest entry %s/%s", user_id, wiki_id)
-                self.manifest.remove_entry(user_id, wiki_id)
-            return None
-        entity = self._read_entity(user_id, wiki_id, raw)
+        # Short-term memory: a full entity read (1-2 S3 GETs) cached in
+        # memory so repeated reads — the chat/retrieval hot path — return
+        # sub-ms instead of ~750ms. Invalidated on any write to the entity.
+        cache = self._entity_cache()
+        key = (user_id, wiki_id)
+        cached = cache.get(key)
+        if cached is not None:
+            entity = cached
+        else:
+            raw = self._read_raw(user_id, wiki_id)
+            if raw is None:
+                # READ REPAIR. The entity file is the source of truth (ADR-001)
+                # and the manifest is a buffered cache of it, so the two can
+                # diverge: a hard delete removes the file synchronously but the
+                # matching manifest removal is only staged, and an abrupt process
+                # exit (SIGKILL, closing the terminal) drops that staged change.
+                # The result is a phantom — GET 404s while GET /wiki still lists
+                # the entity and _stats still counts it, indefinitely.
+                #
+                # Rather than leave that until someone runs _rebuild_manifest, a
+                # read that finds no file evicts the stale entry. Costs nothing
+                # extra (we already know the file is gone) and converts a silent
+                # permanent inconsistency into a self-correcting one.
+                if self.manifest.get_entry(user_id, wiki_id) is not None:
+                    logger.info("read repair: dropping stale manifest entry %s/%s", user_id, wiki_id)
+                    self.manifest.remove_entry(user_id, wiki_id)
+                cache.pop(key, None)
+                return None
+            entity = self._read_entity(user_id, wiki_id, raw)
+            cache[key] = entity
         if entity.status == "deleted" and not include_deleted:
             # Tombstoned — treat exactly like a missing file. This is what
             # makes delete_entity()'s status flip instantly authoritative
@@ -827,15 +1056,39 @@ class EntityGraphStore:
         self._sync_manifest(user_id, result)
         self._log_op(user_id, "create" if seen.get("is_new") else "update_fact", wiki_id,
                      reason="upsert_entity")
+        # Cross-type conflict detection. A write of type/title is a *type
+        # conflict* when another active entity holds the same title under a
+        # DIFFERENT type (e.g. decision/sofia-reyes vs person/sofia-reyes).
+        # The incoming slug may be brand new, so we cannot rely on is_new:
+        # instead resolve the existing type for this title from the manifest
+        # and hand it to the detector (which only emits for different types).
+        existing_type = None
+        for e in self.manifest.list_entries(user_id):
+            if e.status == "active" and e.type != type_ and e.title == title:
+                existing_type = e.type
+                break
+        if not seen.get("is_new") or existing_type:
+            self._detect_and_record_conflicts(user_id, "upsert_entity", {
+                "entity": wiki_id,
+                "type_": type_,
+                "existing_type": existing_type or result.type,
+                "type": type_,
+                "value": title,
+                "sample_values": [result.title],
+                "evidence": [],
+            })
         return result
 
     def add_fact(
         self, user_id: str, wiki_id: str, text: str,
         confidence: float = 1.0, evidence: list[str] | None = None,
     ) -> Entity:
+        seen: dict = {}
+
         def mutator(entity: Entity | None) -> Entity:
             if entity is None:
                 raise ValueError(f"Cannot add a fact to nonexistent entity {wiki_id!r}")
+            seen["entity"] = entity
             now = _now_iso()
             fact_id = _next_seq_id("fact", [f.fact_id for f in entity.facts])
             entity.facts.append(Fact(
@@ -850,6 +1103,76 @@ class EntityGraphStore:
         self._sync_manifest(user_id, result)
         self._log_op(user_id, "update_fact", wiki_id, reason="add_fact",
                      evidence=evidence or [], field_="facts")
+        existing = seen.get("entity")
+        if existing is not None:
+            self._detect_and_record_conflicts(user_id, "add_fact", {
+                "entity": wiki_id,
+                "text": text,
+                "confidence": confidence,
+                "evidence": evidence or [],
+                "existing_facts": [
+                    {"text": f.text, "confidence": f.confidence,
+                     "evidence": f.evidence} for f in existing.facts[:-1]
+                ],
+            })
+        return result
+
+    def add_facts(self, user_id: str, wiki_id: str, facts: list[dict]) -> Entity:
+        """Same as calling add_fact() once per item in `facts`, but as ONE
+        read-modify-write instead of one per fact.
+
+        Extraction routinely proposes 5-10+ facts for a single entity in one
+        pass. Each add_fact() call is a full _mutate() -- one GET plus, under
+        OKF_MODE=companion (the default), two PUTs (the .md companion and the
+        .json) -- so N facts on one entity cost 3N network round trips to the
+        object store where 3 would do. Measured: ~17-20s to land 9 facts on
+        one entity, sequentially, dominating capture latency far more than
+        the LLM call that produced them.
+
+        `facts` is a list of {"text", "confidence", "evidence"} dicts, same
+        shape add_fact()'s arguments have individually. Conflict detection
+        still runs once per fact, against the entity's facts as they stood
+        BEFORE this batch (matching add_fact()'s semantics: a fact is judged
+        against what existed, not against its batch-mates).
+        """
+        if not facts:
+            raise ValueError("add_facts() called with an empty list")
+        seen: dict = {}
+
+        def mutator(entity: Entity | None) -> Entity:
+            if entity is None:
+                raise ValueError(f"Cannot add facts to nonexistent entity {wiki_id!r}")
+            seen["original_facts"] = list(entity.facts)
+            now = _now_iso()
+            for f in facts:
+                fact_id = _next_seq_id("fact", [x.fact_id for x in entity.facts])
+                entity.facts.append(Fact(
+                    fact_id=fact_id, text=f["text"],
+                    confidence=f.get("confidence", 1.0),
+                    evidence=list(f.get("evidence") or []),
+                    created_at=now, updated_at=now,
+                ))
+            entity.metadata.updated_at = now
+            entity.metadata.last_accessed = now
+            return entity
+
+        result = self._mutate(user_id, wiki_id, mutator)
+        self._sync_manifest(user_id, result)
+        for f in facts:
+            self._log_op(user_id, "update_fact", wiki_id, reason="add_fact",
+                         evidence=f.get("evidence") or [], field_="facts")
+        original_facts = seen.get("original_facts", [])
+        for f in facts:
+            self._detect_and_record_conflicts(user_id, "add_fact", {
+                "entity": wiki_id,
+                "text": f["text"],
+                "confidence": f.get("confidence", 1.0),
+                "evidence": f.get("evidence") or [],
+                "existing_facts": [
+                    {"text": g.text, "confidence": g.confidence, "evidence": g.evidence}
+                    for g in original_facts
+                ],
+            })
         return result
 
     def update_fact(
@@ -949,6 +1272,18 @@ class EntityGraphStore:
         self._sync_manifest(user_id, result)
         self._log_op(user_id, "update_relation", source_wiki_id,
                      reason=reason or "link_entities", evidence=evidence or [], field_="relations")
+        self._detect_and_record_conflicts(user_id, "link_entities", {
+            "source": source_wiki_id,
+            "target": target_wiki_id,
+            "category": category,
+            "label": label,
+            "confidence": 1.0,
+            "evidence": evidence or [],
+            "existing_edges": [
+                {"target": r.target, "category": r.category, "label": r.label}
+                for r in result.relations if not (r.target == target_wiki_id and r.category == category)
+            ],
+        })
 
         if bidirectional:
             self.link_entities(
@@ -1124,6 +1459,233 @@ class EntityGraphStore:
 
         return True
 
+    def merge_entities(self, user_id: str, source_wiki_id: str, target_wiki_id: str,
+                       hard_delete: bool = False) -> dict:
+        """Fold `source_wiki_id` into `target_wiki_id`: the source's facts,
+        aliases, summary and relations are copied onto the target, every
+        OTHER entity's relations pointing at the source are redirected to
+        the target (not dropped), and the source is tombstoned with
+        `merged_into` set to the target.
+
+        This is the missing half of upsert_entity()'s duplicate-avoidance:
+        that prevents most duplicates at write time via fuzzy title
+        matching (see title_resolver.py), but two entities that were never
+        fuzzy-matched — a nickname with no string overlap with the real
+        name, or a duplicate that predates that fix — can only be found
+        after the fact. This is how you fix one once you've found it.
+
+        Both entities must already exist and be active; call the API/caller
+        decides which is kept. Returns
+        {"merged": bool, "target": wiki_id, "facts_moved": int,
+         "relations_moved": int, "relations_redirected": int, "failed": str|None}.
+        """
+        if source_wiki_id == target_wiki_id:
+            return {"merged": False, "target": target_wiki_id, "facts_moved": 0,
+                    "relations_moved": 0, "relations_redirected": 0,
+                    "failed": "source and target are the same entity"}
+
+        source = self.get_entity(user_id, source_wiki_id, touch=False)
+        if source is None:
+            return {"merged": False, "target": target_wiki_id, "facts_moved": 0,
+                    "relations_moved": 0, "relations_redirected": 0,
+                    "failed": "source entity not found"}
+        target_check = self.get_entity(user_id, target_wiki_id, touch=False)
+        if target_check is None:
+            return {"merged": False, "target": target_wiki_id, "facts_moved": 0,
+                    "relations_moved": 0, "relations_redirected": 0,
+                    "failed": "target entity not found"}
+        if target_check.type != source.type:
+            # type is fixed at creation everywhere else in this file (see
+            # upsert_entity's docstring) -- a person absorbed into a project
+            # would leave person-shaped facts sitting on a project entity,
+            # which is confusing at best. Merging is for two records of the
+            # SAME kind of thing that turned out to be duplicates.
+            return {"merged": False, "target": target_wiki_id, "facts_moved": 0,
+                    "relations_moved": 0, "relations_redirected": 0,
+                    "failed": f"cannot merge a {source.type!r} into a "
+                              f"{target_check.type!r} — types must match"}
+
+        counts: dict = {}
+
+        def mutator(entity: Entity | None) -> Entity:
+            if entity is None:
+                raise ValueError(f"Target entity disappeared mid-merge: {target_wiki_id!r}")
+            now = _now_iso()
+
+            existing_texts = {f.text.strip() for f in entity.facts}
+            moved = 0
+            for f in source.facts:
+                if f.text.strip() in existing_texts:
+                    continue
+                fact_id = _next_seq_id("fact", [x.fact_id for x in entity.facts])
+                entity.facts.append(Fact(
+                    fact_id=fact_id, text=f.text, confidence=f.confidence,
+                    evidence=list(f.evidence), created_at=f.created_at or now, updated_at=now,
+                ))
+                existing_texts.add(f.text.strip())
+                moved += 1
+            counts["facts_moved"] = moved
+
+            new_aliases = set(entity.aliases)
+            if source.title != entity.title:
+                new_aliases.add(source.title)
+            new_aliases |= set(source.aliases)
+            entity.aliases = sorted(new_aliases)
+
+            if source.summary and source.summary.strip() not in (entity.summary or ""):
+                sep = "\n\n" if entity.summary else ""
+                entity.summary = f"{entity.summary}{sep}{source.summary.strip()}"
+            if not entity.compact and entity.summary:
+                entity.compact = _default_compact(entity.summary)
+
+            entity.metadata.significance = max(entity.metadata.significance,
+                                               source.metadata.significance)
+
+            # The target may already hold its OWN relation pointing at the
+            # source (e.g. the two duplicates had been linked to each other
+            # before anyone noticed they were the same entity). Left in
+            # place, that becomes a self-loop the moment the source's id is
+            # gone -- drop it here, symmetric with the "would become a
+            # self-loop" skip below for the opposite direction.
+            entity.relations = [r for r in entity.relations if r.target != source_wiki_id]
+
+            rel_moved = 0
+            for r in source.relations:
+                if r.target == target_wiki_id:
+                    continue  # would become a self-loop
+                match = next((x for x in entity.relations
+                             if x.target == r.target and x.category == r.category), None)
+                if match is not None:
+                    match.fact_ids = sorted(set(match.fact_ids) | set(r.fact_ids))
+                    match.evidence = sorted(set(match.evidence) | set(r.evidence))
+                    match.updated_at = now
+                else:
+                    relation_id = _next_seq_id("rel", [x.relation_id for x in entity.relations])
+                    entity.relations.append(Relation(
+                        relation_id=relation_id, target=r.target, category=r.category,
+                        label=r.label, weight=r.weight, reason=r.reason,
+                        evidence=list(r.evidence), fact_ids=list(r.fact_ids),
+                        created_at=r.created_at or now, updated_at=now,
+                    ))
+                    rel_moved += 1
+            counts["relations_moved"] = rel_moved
+
+            entity.metadata.updated_at = now
+            entity.metadata.last_accessed = now
+            return entity
+
+        try:
+            result = self._mutate(user_id, target_wiki_id, mutator)
+        except ValueError as e:
+            # TOCTOU: target existed at the check above but is gone by the
+            # time _mutate actually reads it (e.g. deleted by a concurrent
+            # request). Nothing was written -- fail cleanly instead of a 500.
+            return {"merged": False, "target": target_wiki_id, "facts_moved": 0,
+                    "relations_moved": 0, "relations_redirected": 0, "failed": str(e)}
+        self._sync_manifest(user_id, result)
+        self._log_op(user_id, "update_fact", target_wiki_id,
+                     reason=f"merge: absorbed {source_wiki_id!r}", field_="facts")
+
+        def tombstone(entity: Entity | None) -> Entity:
+            if entity is None or entity.status == "deleted":
+                raise ValueError(f"Source entity {source_wiki_id!r} not found")
+            entity.status = "deleted"
+            entity.merged_into = target_wiki_id
+            entity.metadata.updated_at = _now_iso()
+            return entity
+
+        try:
+            tombstoned = self._mutate(user_id, source_wiki_id, tombstone)
+        except ValueError as e:
+            # The target-side merge above already landed and was flushed --
+            # the source's content is safely on the target either way. Only
+            # the tombstone step itself failed (source vanished between the
+            # initial check and here). Report it rather than crash; the
+            # source is already effectively gone, so there's nothing left to
+            # retry other than re-running merge_entities if it turns out to
+            # still exist.
+            return {"merged": True, "target": target_wiki_id,
+                    "facts_moved": counts.get("facts_moved", 0),
+                    "relations_moved": counts.get("relations_moved", 0),
+                    "relations_redirected": 0,
+                    "failed": f"target updated, but tombstoning the source failed: {e}"}
+        self._sync_manifest(user_id, tombstoned)
+        self._log_op(user_id, "delete", source_wiki_id,
+                     reason=f"merged into {target_wiki_id!r}")
+
+        redirected = self._redirect_relations(user_id, source_wiki_id, target_wiki_id)
+        counts["relations_redirected"] = len(redirected["fixed"])
+
+        if hard_delete:
+            self._delete_files(user_id, source_wiki_id)
+            self.manifest.remove_entry(user_id, source_wiki_id)
+
+        self.flush()
+        return {"merged": True, "target": target_wiki_id,
+                "facts_moved": counts.get("facts_moved", 0),
+                "relations_moved": counts.get("relations_moved", 0),
+                "relations_redirected": counts.get("relations_redirected", 0),
+                "failed": None}
+
+    def move_entity_between_wikis(self, src_wiki: str, tgt_wiki: str,
+                                  entity_wiki_id: str) -> dict:
+        """Move one entity (node) from src_wiki into tgt_wiki.
+
+        Reads the entity from the source, writes a full copy (metadata, facts,
+        relations) into the target under the SAME node id, then deletes it from
+        the source. This is the primitive behind merge/split: an entity lives in
+        exactly one wiki at a time, and moving it relocates its node + facts +
+        relations. Relations to nodes that ALSO moved into tgt_wiki keep working
+        (both targets now resolve inside tgt_wiki); relations to nodes that
+        stayed in src_wiki are inherited by the copy so the link is preserved
+        (the foreign node is referenced by id).
+
+        Returns {"moved": bool, "target_node": str, "facts": int, "relations": int,
+                 "failed": str | None}.
+        """
+        ent = self.get_entity(src_wiki, entity_wiki_id, touch=False)
+        if ent is None or ent.status == "deleted":
+            return {"moved": False, "target_node": entity_wiki_id,
+                    "failed": "source entity not found"}
+        try:
+            created = self.upsert_entity(
+                tgt_wiki, ent.type, ent.title,
+                aliases=list(ent.aliases or []),
+                summary_append=None,
+                compact=ent.compact,
+                significance=ent.metadata.significance
+                if ent.metadata else None,
+                on_conflict="merge")
+        except Exception as e:
+            return {"moved": False, "target_node": entity_wiki_id,
+                    "failed": f"upsert: {e}"}
+
+        n_facts = n_rels = 0
+        for f in ent.facts:
+            try:
+                self.add_fact(tgt_wiki, created.wiki_id, f.text,
+                              confidence=f.confidence)
+                n_facts += 1
+            except Exception:
+                pass
+        for rel in ent.relations:
+            try:
+                self.link_entities(tgt_wiki, created.wiki_id, rel.target,
+                                   category=rel.category,
+                                   label=rel.label or "", reason=rel.reason)
+                n_rels += 1
+            except Exception:
+                pass
+        try:
+            self.delete_entity(src_wiki, entity_wiki_id, cascade=True,
+                               hard_delete=True)
+        except Exception as e:
+            logger.warning("merge: delete source %r failed: %s",
+                           entity_wiki_id, e)
+        self.flush()
+        return {"moved": True, "target_node": created.wiki_id,
+                "facts": n_facts, "relations": n_rels, "failed": None}
+
     def cascade_orphaned_relations(self, user_id: str, deleted_wiki_id: str) -> dict:
         """
         Strips any relation targeting `deleted_wiki_id` from every other
@@ -1178,6 +1740,78 @@ class EntityGraphStore:
                     "relation to deleted entity %r — continuing with the rest of "
                     "the scan; will be caught by the next /wiki/_reconcile sweep",
                     other_wiki_id, deleted_wiki_id, exc_info=True,
+                )
+                failed.append(other_wiki_id)
+
+        return {"fixed": fixed, "failed": failed}
+
+    def _redirect_relations(self, user_id: str, old_target: str, new_target: str) -> dict:
+        """Like cascade_orphaned_relations(), but for merge_entities(): relations
+        pointing at `old_target` are repointed at `new_target` instead of being
+        dropped, so folding a duplicate entity into its canonical one doesn't
+        quietly sever the rest of the graph. Same per-entity resilience as
+        cascade_orphaned_relations() — one entity's write failure doesn't stop
+        the rest of the scan.
+
+        A collision (the entity already has a relation to `new_target` in the
+        same category) merges fact_ids/evidence into the existing relation
+        instead of creating a duplicate, mirroring link_entities()'s dedupe.
+
+        Returns {"fixed": [...wiki_ids...], "failed": [...wiki_ids...]}.
+        """
+        fixed: list[str] = []
+        failed: list[str] = []
+
+        for other_wiki_id in self.list_entities(user_id):
+            if other_wiki_id in (old_target, new_target):
+                continue
+            try:
+                current = self._read_raw(user_id, other_wiki_id)
+                if current is None:
+                    continue
+                entity = self._read_entity(user_id, other_wiki_id, current)
+                if not any(r.target == old_target for r in entity.relations):
+                    continue  # nothing to redirect here — skip the write entirely
+
+                def mutator(e: Entity | None, _old=old_target, _new=new_target) -> Entity:
+                    if e is None:
+                        raise ValueError(f"Entity disappeared mid-redirect: {other_wiki_id!r}")
+                    now = _now_iso()
+                    kept: list[Relation] = []
+                    by_key: dict[tuple[str, str], Relation] = {}
+                    for r in e.relations:
+                        if r.target != _old:
+                            kept.append(r)
+                            by_key[(r.target, r.category)] = r
+                            continue
+                        match = by_key.get((_new, r.category))
+                        if match is not None:
+                            match.fact_ids = sorted(set(match.fact_ids) | set(r.fact_ids))
+                            match.evidence = sorted(set(match.evidence) | set(r.evidence))
+                            match.updated_at = now
+                        else:
+                            r.target = _new
+                            r.updated_at = now
+                            kept.append(r)
+                            by_key[(_new, r.category)] = r
+                    e.relations = kept
+                    e.metadata.updated_at = now
+                    return e
+
+                result = self._mutate(user_id, other_wiki_id, mutator)
+                self._sync_manifest(user_id, result)
+                self._log_op(
+                    user_id, "update_relation", other_wiki_id,
+                    reason=f"merge: redirected relation from {old_target!r} to {new_target!r}",
+                    field_="relations",
+                )
+                fixed.append(other_wiki_id)
+            except Exception:
+                logger.warning(
+                    "merge redirect: failed to repoint %r's relation from %r to %r — "
+                    "continuing with the rest of the scan; will be caught by the "
+                    "next /wiki/_reconcile sweep",
+                    other_wiki_id, old_target, new_target, exc_info=True,
                 )
                 failed.append(other_wiki_id)
 
@@ -1438,7 +2072,10 @@ class EntityGraphStore:
 
         # Undirected adjacency over active nodes only, so a tombstoned entity
         # breaks the path through it rather than being silently traversed.
-        adj: dict[str, set[str]] = {w: set() for w in entries}
+        # build_adjacency() (app/graph/components.py) is the same computation
+        # this used to do inline -- extracted so component detection below
+        # reuses it instead of a second, possibly-inconsistent adjacency.
+        adj = build_adjacency(list(entries.values()), categories=wanted)
         edge_cat: dict[tuple[str, str], str] = {}
         for wiki_id, entry in entries.items():
             for edge in entry.edges or []:
@@ -1447,13 +2084,34 @@ class EntityGraphStore:
                     continue
                 if wanted is not None and cat not in wanted:
                     continue
-                adj[wiki_id].add(target)
-                adj[target].add(wiki_id)
                 edge_cat[(wiki_id, target)] = cat
+
+        # Connected components over the WHOLE wiki (not just whatever this
+        # call ends up returning) so every node's component id is stable and
+        # meaningful regardless of which neighbourhood is currently in view.
+        comps = connected_components(adj)
+        comp_index = {w: i for i, comp in enumerate(comps) for w in comp}
 
         if not entry_wiki_ids:
             ranked = sorted(entries, key=lambda w: (-len(adj[w]), w))
             entry_wiki_ids = ranked[:3]
+            # The top-3-by-degree default seeds are picked with no awareness
+            # of components -- a small disconnected cluster can lose every
+            # tiebreak and be completely absent from the response (not just
+            # visually unseparated: never rendered at all, since this is the
+            # exact path gui.html's first page load always takes). Backfill
+            # one representative (highest local degree) from any component
+            # not already covered, additively -- a single-component wiki's
+            # `ranked[:3]` is therefore untouched, since the loop below finds
+            # nothing left to add.
+            covered = {comp_index[w] for w in entry_wiki_ids if w in comp_index}
+            for i, comp in enumerate(comps):
+                if len(entry_wiki_ids) >= _DEFAULT_SEED_CAP:
+                    break
+                if i in covered:
+                    continue
+                entry_wiki_ids.append(max(comp, key=lambda w: (len(adj[w]), w)))
+                covered.add(i)
         entry_wiki_ids = [w for w in dict.fromkeys(entry_wiki_ids) if w in entries]
         if not entry_wiki_ids:
             return {"nodes": [], "edges": [], "seeds": [],
@@ -1484,6 +2142,7 @@ class EntityGraphStore:
             neighbours = adj[wiki_id]
             node["degree"] = len(neighbours)
             node["hidden_neighbours"] = len(neighbours - in_set)
+            node["component"] = comp_index.get(wiki_id)
             nodes.append(node)
 
         edges = [{"source": a, "target": b, "category": cat}

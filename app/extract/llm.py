@@ -213,7 +213,7 @@ class LLMClient:
         return bool(self.api_key)
 
     def complete(self, system: str, user: str, temperature: float = 0.0,
-                 max_tokens: int = 2000, json_mode: bool = True) -> str:
+                 max_tokens: int = 10000, json_mode: bool = True) -> str:
         """One completion. Returns the assistant message text.
 
         temperature defaults to 0: this is an extraction task with a schema,
@@ -293,3 +293,109 @@ class LLMClient:
                 time.sleep(1.5 ** attempt)
 
         raise last or LLMError("LLM call failed for an unknown reason.")
+
+    # ---------- topic system ----------
+
+    _TOPIC_SYSTEM = (
+        "You decide whether a message (or meeting summary / project note) "
+        "starts a NEW topic that deserves its own knowledge base (wiki), or "
+        "belongs to an existing one. You must answer in STRICT JSON with "
+        "exactly these keys and no prose outside the JSON:\n"
+        '{"is_new_topic": bool, "belongs_to": string|null, "topic": string, '
+        '"title": string|null, "description": string, "reason": string}\n'
+        "Rules:\n"
+        "- is_new_topic: true ONLY when the message is about something "
+        "genuinely new and unrelated to every existing wiki's topic (a new "
+        "project, a new meeting on a fresh subject, a different domain). "
+        "Continue an existing topic -> false.\n"
+        "- belongs_to: when is_new_topic is false, the wiki_id of the existing "
+        "wiki this best fits, else null.\n"
+        "- topic: a very short (3-8 word) abstract noun phrase summarising "
+        "the message's subject, e.g. \"SRE on-call rotation planning\".\n"
+        "- title: when is_new_topic is true, a concise wiki name for the new "
+        "topic (a few words, title case, no articles), else null.\n"
+        "- description: one sentence describing the scope of the new wiki.\n"
+        "- reason: one short sentence justifying the decision.\n"
+        "Deciding -- the single most important rule:\n"
+        "- Only classify a message as CONTINUING an existing wiki when the "
+        "message points at the SAME concrete subject that wiki already owns: "
+        "the same named project, the same named person/team, or the same "
+        "specific entity listed in that wiki's entities. You must be able to "
+        "name that specific entity in your reason.\n"
+        "- Sharing generic business vocabulary (migration, cloud, data, "
+        "legacy, rollout, target, team, budget, platform, project) with an "
+        "existing wiki is NOT evidence of continuation. Different named "
+        "projects/teams/domains are different topics regardless of shared "
+        "jargon.\n"
+        "- A message can mention a known company/topic in passing without "
+        "continuing it. If the message's real subject is not one of the "
+        "existing wikis' named subjects, it is a NEW topic, even if it cites "
+        "or relates to something a wiki covers.\n"
+        "- When in doubt (you cannot name a specific existing entity the "
+        "message continues), choose is_new_topic=true. Fragmentation into a "
+        "new, correctly-named wiki is better than wrongly merging two "
+        "distinct subjects.\n"
+        "- The entity lists below matter: compare the message's subject "
+        "against the entities the existing wikis actually hold, not just "
+        "their names and topic phrases."
+    )
+
+    def evaluate_new_topic(self, text: str,
+                           existing: list[dict]) -> dict:
+        """Ask the model whether this message starts a new topic (and thus
+        deserves a new wiki), given the topics of the wikis the caller can
+        reach.
+
+        `existing` is a list of {wiki_id, title, topic} for reachable wikis.
+        Returns a dict with {is_new_topic, belongs_to, topic, title,
+        description, reason}. Degrades to a safe "continue existing" verdict
+        if the model is unavailable, so a routing failure never fragments a
+        graph and never blocks the caller.
+        """
+        if not self.configured:
+            raise LLMNotConfigured(
+                "No LLM API key configured. Set DEEPSEEK_API_KEY to enable "
+                "topic-based wiki creation.")
+
+        if not existing:
+            items = "(no existing wikis)"
+        else:
+            items = "\n".join(
+                f"- {w['wiki_id']}: title={w['title']!r}, topic={w.get('topic') or ''!r}, "
+                f"entities={[e for e in (w.get('sample_entities') or [])][:8]!r}"
+                for w in existing)
+        # With no existing wikis there is nothing to "continue", so the topic
+        # is trivially new. The model should still NAME it (a real title like
+        # "Pager Opsgenie"), but its "prefer is_new_topic=false when in doubt"
+        # bias would otherwise reject the very first topic and produce the
+        # fallback "New Wiki". Force the verdict to new; keep the model's
+        # proposed title/topic/description.
+        trivially_new = not existing
+        user = (
+            f"Existing wikis (id, title, topic):\n{items}\n\n"
+            f"Message to classify:\n{text}\n\n"
+            "Respond with the JSON object only."
+        )
+        try:
+            raw = self.complete(self._TOPIC_SYSTEM, user, json_mode=True,
+                                max_tokens=600)
+            data = extract_json(raw)
+        except LLMNotConfigured:
+            raise
+        except Exception as e:
+            logger.warning("topic evaluation failed (%s); defaulting to continue", e)
+            # Safe default: keep using what the deterministic router found.
+            return {"is_new_topic": False, "belongs_to": None,
+                    "topic": "", "title": None, "description": "",
+                    "reason": "topic evaluation unavailable"}
+
+        return {
+            # When there is no existing wiki, this is trivially a new topic
+            # regardless of the model's doubt.
+            "is_new_topic": trivially_new or bool(data.get("is_new_topic")),
+            "belongs_to": data.get("belongs_to") or None,
+            "topic": (data.get("topic") or "").strip()[:120],
+            "title": data.get("title") or None,
+            "description": (data.get("description") or "").strip(),
+            "reason": (data.get("reason") or "").strip(),
+        }

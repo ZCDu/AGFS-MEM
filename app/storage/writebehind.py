@@ -100,9 +100,16 @@ class FlushBuffer:
             self._flush_locked()
             self._pending = 0
         except Exception:
-            # Stay dirty and re-arm — the next write or timer retries.
-            # Losing a flush is not data loss (see module docstring), so
-            # this must never propagate into the caller's API response.
+            # Stay dirty and re-arm — the next write or timer retries. But
+            # only while the buffer is still open. If close() has been called
+            # (or is racing this flush), the underlying backend is being torn
+            # down and re-arming just schedules another doomed flush that
+            # fails again — an infinite retry loop that floods the log with
+            # the same error at shutdown. Once closed, stop. The buffered
+            # state stays dirty as a record even though there is no writer
+            # left to retry; losing it is not data loss (module docstring).
+            # Losing a flush is not data loss, so this must never propagate
+            # into the caller's API response either.
             try:
                 logger.warning("%s: flush failed, will retry", type(self).__name__,
                                exc_info=True)
@@ -111,7 +118,8 @@ class FlushBuffer:
                 # be closed by the interpreter or by a test runner. A failure to
                 # report a failure must not raise during shutdown.
                 pass
-            self._arm_timer_locked()
+            if not self._closed:
+                self._arm_timer_locked()
 
     def flush(self) -> None:
         """Force a flush now. Safe to call from any thread, and idempotent.

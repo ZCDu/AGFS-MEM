@@ -116,15 +116,12 @@
   <h1>Chat</h1>
   <label for="user" style="margin:0">User</label>
   <input id="user" value="demo" style="width:110px; font-family:var(--mono); padding:4px 7px">
-  <label for="token" style="margin:0">Token</label>
-  <input id="token" type="password" placeholder="if auth is on" autocomplete="off"
-         style="width:130px; font-family:var(--mono); padding:4px 7px">
+  <!-- The session token lives here so auth.js's existing $("token") reads/
+       writes keep working unchanged, but it's never shown or typed into --
+       signing in with username/password is the only way a user sees. -->
+  <input id="token" type="hidden">
   <button class="sm ghost" id="signin" style="padding:4px 9px">Sign in</button>
   <button class="sm ghost" id="signout" style="padding:4px 9px">Sign out</button>
-  <label for="wiki" style="margin:0">Wiki</label>
-  <select id="wiki" style="width:150px; padding:4px 7px">
-    <option value="">auto (route per message)</option>
-  </select>
   <span class="sp"></span>
   <span id="who" class="muted" style="font-size:11px"></span>
   <a class="navlink" href="/gui">Graph editor &rarr;</a>
@@ -144,6 +141,7 @@ That proposes changes without writing anything.</div>
   <div class="composer">
     <div class="row">
       <textarea id="input" placeholder="Type a message, then Enter to send (Shift+Enter for a new line)"></textarea>
+      <button class="ghost" id="fpickbtn" title="Upload a file to extract into memory">Attach file</button>
       <button id="send">Send</button>
     </div>
     <div class="hint">
@@ -185,6 +183,10 @@ That proposes changes without writing anything.</div>
     </div>
     <div id="plan" style="margin-top:10px"></div>
   </section>
+
+  <input type="file" id="finput" accept=".txt,.md,.markdown,.csv,.log,.json" hidden>
+  <div id="fstatus" class="muted" style="margin-top:6px; font-size:12px"></div>
+  <div id="fplan" style="margin-top:8px"></div>
 </aside>
 
 <div id="toast" role="status" aria-live="polite"></div>
@@ -206,6 +208,11 @@ let sessionDate = null;
 // The wiki the reviewed plan targets. Apply must write where the review said
 // it would, not wherever the picker happens to point by then.
 let reviewedTarget = null;
+// When the plan proposed creating a NEW wiki (a genuinely new topic), the
+// server returns a proposal that apply must echo back so the wiki is created
+// on demand. Discarded when the text changes or the session resets, so a
+// stale proposal is never applied to the wrong wiki.
+let reviewedProposal = null;
 // Past conversations for this user, so one can be resumed from where it
 // stopped instead of being lost when the tab closes. The server keeps the
 // logs; this is just the visible list.
@@ -215,6 +222,29 @@ const user = () => $("user").value.trim() || "demo";
 const base = () => `/v1/users/${encodeURIComponent(user())}`;
 const esc = t => String(t == null ? "" : t).replace(/[<>&"]/g, c =>
   ({"<":"&lt;",">":"&gt;","&":"&amp;",'"':"&quot;"}[c]));
+
+// Which conversation was on screen, so a page refresh returns to it instead
+// of a blank pane. The session LIST already survives a refresh (it's
+// re-fetched from the server), but which one was open did not -- that's
+// what actually reads as "lost my conversation" even though nothing was
+// deleted. Scoped by user (not a single global key) so switching the User
+// field doesn't resume the wrong person's chat.
+const activeKey = () => `chat_active:${user()}`;
+function saveActive() {
+  try {
+    if (sessionId) {
+      sessionStorage.setItem(activeKey(), JSON.stringify({sessionId, sessionDate}));
+    } else {
+      sessionStorage.removeItem(activeKey());
+    }
+  } catch { /* private browsing can block storage; not worth failing over */ }
+}
+function loadActive() {
+  try {
+    const raw = sessionStorage.getItem(activeKey());
+    return raw ? JSON.parse(raw) : null;
+  } catch { return null; }
+}
 
 function toast(msg, isErr) {
   const t = $("toast");
@@ -249,11 +279,26 @@ async function api(method, path, body) {
 
 /* ---------------- conversation ---------------- */
 
+// Hide a model-emitted <intents>...</intents> block from the user-visible
+// message. The intents are still parsed + executed server-side (writes
+// happen); this only prevents the raw block from leaking into the chat
+// bubble. Handles the block whether it is inline or on its own lines.
+function stripIntents(text) {
+  if (!text) return text;
+  // Robust: strips a complete <intents>...</intents> block OR an unclosed
+  // <intents> that runs to end-of-text (the model sometimes drops the close
+  // tag). Handles whitespace/attributes on the open tag.
+  return String(text)
+    .replace(/<intents\b[^>]*>[\s\S]*?(?:<\/intents>|$)/gi, "")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
 function render() {
   $("log").innerHTML = messages.map(m => `
     <div class="msg ${m.role === "user" ? "user" : ""}${m.error ? " err" : ""}">
       <span class="who">${m.role === "user" ? "You" : "Bot"}</span>
-      <div class="body">${esc(m.content)}${
+      <div class="body">${esc(m.role === "assistant" ? stripIntents(m.content) : m.content)}${
         m.cites && m.cites.length
           ? `<div class="cite">memory: ${m.cites.map(c => esc(c.wiki_id)).join(", ")}</div>`
           : ""}</div>
@@ -267,11 +312,11 @@ function transcript() {
                  .join("\n\n");
 }
 
-async function send() {
+async function send(attachmentId) {
   const text = $("input").value.trim();
-  if (!text) return;
+  if (!text && !attachmentId) return;
   $("input").value = "";
-  messages.push({role: "user", content: text});
+  messages.push({role: "user", content: attachmentId ? (text || "[attached file — see message] ") : text});
   render();
 
   $("send").disabled = true;
@@ -283,10 +328,18 @@ async function send() {
       messages: messages.filter(m => m.content !== "…")
                         .map(m => ({role: m.role, content: m.content})),
       use_memory: $("usemem").checked,
+      // Enable the CRUD-tool path so natural-language edits ("forget X",
+      // "X no longer leads Y") can actually mutate memory, not just get an
+      // acknowledging reply.
+      tools_enabled: true,
       session_id: sessionId,
-      // Empty means "route it" — the server picks and reports which, rather
-      // than the client guessing.
-      wiki_id: $("wiki").value || null,
+      // Single-user deployment: no wiki picker, the server always answers
+      // from this user's own home wiki.
+      wiki_id: null,
+      // Treat an attached file as a regular message: the server reads its
+      // text, gives it to the model, and journals the reference — exactly
+      // like the text were typed.
+      attachments: attachmentId ? [attachmentId] : undefined,
     });
     if (res.wiki_id) {
       $("routed").textContent = "wiki: " + res.wiki_id
@@ -299,10 +352,40 @@ async function send() {
       sessionId = res.session_id;
       sessionDate = new Date().toISOString().slice(0, 10);
       $("sess").textContent = "session " + sessionId;
+      saveActive();
     }
     messages.pop();
     messages.push({role: "assistant", content: res.reply, cites: res.context_used});
     renderContext(res.context_used);
+
+    // Destructive "forget X" is staged server-side (needs_confirmation). Ask
+    // the user to confirm before it deletes the node, listing what would go.
+    const pendingDeletes = (res.tool_results || [])
+      .filter(r => r && r.status === "needs_confirmation" && r.pending_id);
+    if (pendingDeletes.length) {
+      const describe = (p) => {
+        const plan = p.plan || {};
+        const rel = (plan.relations && plan.relations.length)
+          ? "\n  relations: " + plan.relations.join("; ")
+          : "";
+        return "- " + (plan.entity || "?") +
+          (plan.entity_title ? " (" + plan.entity_title + ")" : "") +
+          " · " + (plan.facts || 0) + " fact(s)" + rel;
+      };
+      const ok = confirm("Are you sure you want to delete?\n\n" +
+        pendingDeletes.map(describe).join("\n") +
+        "\n\nThis permanently removes the node(s) from memory.");
+      for (const p of pendingDeletes) {
+        if (ok) {
+          try {
+            const r = await api("POST", "/deletions/" + encodeURIComponent(p.pending_id) + "/confirm");
+            toast("Deleted: " + (p.plan && p.plan.entity || "") + " (" + (r.status || "?") + ")");
+          } catch (e) { toast("Delete failed: " + e.message, true); }
+        } else {
+          toast("Deletion cancelled.");
+        }
+      }
+    }
   } catch (e) {
     messages.pop();
     messages.push({role: "assistant", content: e.message, error: true});
@@ -313,7 +396,7 @@ async function send() {
     // what is on screen. Better to invalidate than to apply something stale.
     if (reviewedFrom !== null && reviewedFrom !== transcript()) {
       $("apply").disabled = true;
-      reviewedOps = null; reviewedFrom = null;
+      reviewedOps = null; reviewedFrom = null; reviewedProposal = null; reviewedTarget = null;
     }
     // A new turn may have started a new session; keep the list current.
     loadSessions();
@@ -401,11 +484,15 @@ async function resumeSession(id, date, el) {
     const msgs = (data.messages || [])
       .filter(m => m.role === "user" || m.role === "assistant")
       .map(m => ({role: m.role, content: m.content}));
-    if (!msgs.length) return toast("That conversation is empty", true);
+    if (!msgs.length) {
+      sessionStorage.removeItem(activeKey());
+      return toast("That conversation is empty", true);
+    }
     messages = msgs;
     sessionId = id;
     sessionDate = date;
-    reviewedOps = null; reviewedFrom = null;
+    saveActive();
+    reviewedOps = null; reviewedFrom = null; reviewedProposal = null; reviewedTarget = null;
     $("apply").disabled = true;
     $("plan").innerHTML = "";
     $("sess").textContent = "session " + id;
@@ -417,6 +504,7 @@ async function resumeSession(id, date, el) {
     }
     toast(`Resumed ${msgs.length} message${msgs.length === 1 ? "" : "s"}`);
   } catch (e) {
+    sessionStorage.removeItem(activeKey());
     toast("Could not resume: " + e.message, true);
   }
 }
@@ -424,8 +512,9 @@ async function resumeSession(id, date, el) {
 function newConversation() {
   // A new conversation is a new session; keeping the old id would append
   // unrelated turns to a stored transcript.
-  messages = []; reviewedOps = null; reviewedFrom = null;
+  messages = []; reviewedOps = null; reviewedFrom = null; reviewedProposal = null; reviewedTarget = null;
   sessionId = null; sessionDate = null;
+  saveActive();
   $("sess").textContent = "";
   $("apply").disabled = true;
   $("plan").innerHTML = "";
@@ -498,13 +587,14 @@ $("review").onclick = async () => {
     // from, so a stored claim can be traced back to the exact conversation.
     const plan = await api("POST", "/extract",
       {text, session_id: sessionId, session_date: sessionDate,
-       target_wiki: $("wiki").value || null});
+       target_wiki: null});
     if (plan.target_wiki) {
       $("routed").textContent = "writing to: " + plan.target_wiki;
     }
     renderPlan(plan);
     reviewedOps = plan.operations.filter(o => o.status === "proposed");
     reviewedTarget = plan.target_wiki || null;
+    reviewedProposal = plan.new_wiki_proposal || null;
     reviewedFrom = text;
     $("apply").disabled = !reviewedOps.length;
     if (!plan.operations.length) toast("Nothing worth storing yet");
@@ -518,7 +608,8 @@ $("apply").onclick = async () => {
   $("apply").disabled = true;
   try {
     const res = await api("POST", "/extract/apply", {
-      target_wiki: reviewedTarget || $("wiki").value,
+      target_wiki: reviewedTarget,
+      new_wiki_proposal: reviewedProposal || undefined,
       operations: reviewedOps.map(o => ({
         op: o.op, wiki_id: o.wiki_id, payload: o.payload, reason: o.reason || "",
       })),
@@ -529,7 +620,7 @@ $("apply").onclick = async () => {
       ? `Stored ${res.applied}, ${res.failed} failed — see the panel`
       : `Stored ${res.applied} change${res.applied === 1 ? "" : "s"}`,
       res.failed > 0);
-    reviewedOps = null; reviewedFrom = null;
+    reviewedOps = null; reviewedFrom = null; reviewedProposal = null; reviewedTarget = null;
   } catch (e) {
     showError("Apply failed", e.message);
     $("apply").disabled = false;
@@ -538,7 +629,7 @@ $("apply").onclick = async () => {
 
 /* ---------------- wiring ---------------- */
 
-$("send").onclick = send;
+$("send").onclick = () => send();
 $("input").addEventListener("keydown", e => {
   if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); }
 });
@@ -549,22 +640,42 @@ $("clear").onclick = e => {
 $("newsession").onclick = newConversation;
 $("refreshsessions").onclick = loadSessions;
 
-async function loadWikis() {
-  const sel = $("wiki");
-  const keep = sel.value;
-  try {
-    const wikis = await (await fetch("/v1/wikis", {headers: MemAuth.headers()})).json();
-    sel.innerHTML = `<option value="">auto (route per message)</option>`
-      + (Array.isArray(wikis) ? wikis : []).map(w =>
-          `<option value="${esc(w.wiki_id)}">${esc(w.title)} (${w.entity_count})</option>`
-        ).join("");
-    sel.value = keep;
-  } catch { /* auth off or no registry yet; the auto option still works */ }
+/* Conversation-bar file button opens the ingest picker; drag-and-drop still works */
+$("fpickbtn").onclick = () => $("finput").click();
+
+/* ---------------- ingest a file (treated as a regular chat message) ---------------- */
+
+// An attached file is NOT extracted separately. It is uploaded and then sent
+// through the normal /chat turn as an attachment, so the bot reads its text
+// and replies in the conversation exactly as if the content were typed. The
+// reference is journalled with the turn; nothing is auto-written to memory
+// (the /extract review above still applies to the conversation when asked).
+
+function fStatus(msg, err) {
+  $("fstatus").innerHTML = `<span style="color:${err ? "var(--danger)" : "var(--ink-soft)"}">${esc(msg)}</span>`;
 }
+
+async function ingestFile(file) {
+  try {
+    $("fplan").innerHTML = "";
+    fStatus(`Uploading ${esc(file.name)}…`);
+    const meta = await MemAuth.upload(user(), file, sessionId || undefined);
+    fStatus(`${esc(file.name)} attached…`);
+    // Feed it straight into the conversation as a normal user turn with the
+    // file as an attachment. The bot will read it and reply in-thread.
+    $("input").value = file.name; // surface which file in the transcript
+    await send(meta.file_id);
+    fStatus(`Attached ${esc(file.name)}.`);
+  } catch (e) {
+    fStatus(e.message, true);
+  }
+}
+
+MemAuth.installDnD({onDrop: f => ingestFile(f)});
+$("finput").onchange = () => { if ($("finput").files[0]) ingestFile($("finput").files[0]); $("finput").value = ""; };
 
 MemAuth.install({
   onSignedIn: () => {
-    loadWikis();
     loadSessions();
     // A new identity means a different memory namespace, so anything on
     // screen was answered from someone else's graph.
@@ -573,9 +684,21 @@ MemAuth.install({
   },
 });
 
-render();
-loadWikis();
-loadSessions();
+async function init() {
+  render();
+  await loadSessions();
+  // Return to whichever conversation was open before the page reloaded,
+  // instead of always landing on a blank pane -- the session list itself
+  // already survives a refresh (fetched fresh from the server above), but
+  // without this the ACTIVE one did not, which is what actually reads as
+  // "my conversation is gone" even though nothing was deleted.
+  const active = loadActive();
+  if (active && active.sessionId) {
+    const el = document.querySelector(`.sitem[data-id="${CSS.escape(active.sessionId)}"]`);
+    await resumeSession(active.sessionId, active.sessionDate, el || undefined);
+  }
+}
+init();
 </script>
 </body>
 </html>

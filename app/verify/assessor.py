@@ -64,42 +64,46 @@ from __future__ import annotations
 import re
 from dataclasses import asdict, dataclass, field
 
+from app.graph.lexical import STOPWORDS, _WORD, _tokens, content_tokens, jaccard
 from app.graph.manifest import ManifestEntry
 from app.graph.store import EntityGraphStore
 from app.graph.title_resolver import _normalize
 
-# Words carrying no topical information. Kept deliberately small: an
-# aggressive stopword list starts deleting meaning ("no", "not", "never" are
-# exactly the words that make a correction a correction).
-STOPWORDS = frozenset("""
-a an the and or but if then than so because as at by for from in into of on
-to with without is are was were be been being am do does did doing have has
-had having i you he she it we they me him her us them my your his its our
-their this that these those there here what which who whom when where how
-will would shall should can could may might must just very really quite too
-also only even still yet about over under again more most some any each
-""".split())
+# Back-compat aliases: several modules (autocapture/scheduler.py,
+# routes_chat.py, routes_extract.py, extractor.py, wikis/router.py) do
+# `from app.verify.assessor import _content_tokens` — the implementation now
+# lives in app.graph.lexical, but the old private names stay importable here.
+_content_tokens = content_tokens
+_jaccard = jaccard
 
 # Markers of things a person will want remembered. Grouped so the resulting
 # signal explains itself in the output rather than collapsing to one number.
 IMPORTANCE_MARKERS: dict[str, tuple[str, ...]] = {
     "decision": ("decided", "decide", "chose", "choosing", "agreed", "agreement",
                  "concluded", "settled on", "going with", "we'll use", "signed off",
-                 "approved", "rejected", "vetoed", "committed to"),
+                 "approved", "rejected", "vetoed", "committed to",
+                 "决定", "决策", "确定", "敲定", "明确", "达成", "批准", "否决"),
     "commitment": ("will", "going to", "plan to", "deadline", "due", "by friday",
                    "by monday", "next week", "next month", "scheduled", "promised",
-                   "owes", "action item", "todo", "follow up"),
+                   "owes", "action item", "todo", "follow up",
+                   "计划", "排期", "于", "前完成", "截止", "预算", "目标", "时限",
+                   "待办", "跟踪", "整改方案", "考核期"),
     "preference": ("prefer", "prefers", "preferred", "dislike", "dislikes",
                    "hate", "hates", "love", "loves", "always", "never",
                    "favourite", "favorite", "rather than", "instead of",
-                   "can't stand", "wish"),
+                   "can't stand", "wish", "偏好", "倾向", "更喜欢", "优于"),
     "correction": ("actually", "correction", "i was wrong", "not true", "mistake",
                    "no longer", "used to", "changed", "updated", "revised",
-                   "turns out", "in fact"),
+                   "turns out", "in fact", "纠正", "更正", "不是", "不再", "已调整",
+                   "修订"),
     "identity": ("i am", "i'm", "my name", "works at", "works on", "role",
-                 "title", "team", "reports to", "based in", "lives in", "joined"),
+                 "title", "team", "reports to", "based in", "lives in", "joined",
+                 "总监", "经理", "主管", "专员", "组长", "负责人", "主持",
+                 "参会", "列席", "汇报"),
     "problem": ("issue", "bug", "broken", "failed", "failing", "error", "blocked",
-                "blocker", "risk", "concern", "outage", "regression"),
+                "blocker", "risk", "concern", "outage", "regression",
+                "问题", "隐患", "短板", "风险", "违规", "不足", "缺口", "故障",
+                "异常"),
 }
 
 # Not all markers carry equal weight. A stated preference or a correction is
@@ -126,16 +130,33 @@ CHATTER_MARKERS = ("hello", "hi ", "hey ", "thanks", "thank you", "goodbye",
                    "bye", "good morning", "good night", "how are you", "lol",
                    "haha", "ok", "okay", "sure", "sounds good", "no problem")
 
-_WORD = re.compile(r"[A-Za-z0-9][A-Za-z0-9'’\-]*")
 # Runs of capitalised words: the cheapest usable proper-noun detector without
 # a POS tagger. Over-fires on sentence starts, which _strip_sentence_initial
-# handles.
-_PROPER = re.compile(r"\b([A-Z][a-z0-9'’\-]+(?:\s+(?:of|de|van|der|the)?\s*[A-Z][a-z0-9'’\-]+)*)")
+# handles. CJK has no capitalisation, so also capture runs of Han characters
+# (Chinese/Japanese names, org/team names like "土建班组", "技术部") as
+# name candidates -- without this the assessor sees NO named entities in a
+# Chinese meeting and skips it as "no named entities".
+_PROPER = re.compile(r"\b([A-Z][a-z0-9'’\-]+(?:\s+(?:of|de|van|der|the)?\s*[A-Z][a-z0-9'’\-]+)*)|([\u3400-\u9fff]{2,8})")
 _SENTENCE_SPLIT = re.compile(r"(?<=[.!?])\s+|\n+")
 _NUMERIC = re.compile(r"\b\d+(?:[.,]\d+)?\s*(?:%|percent|ms|s|k|m|bn|usd|eur|gbp|twd)?\b", re.I)
 _DATEISH = re.compile(
     r"\b(?:mon|tue|wed|thu|fri|sat|sun|jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)"
     r"[a-z]*\b|\b\d{4}-\d{2}-\d{2}\b|\bq[1-4]\b|\b20\d{2}\b", re.I)
+
+# A relational identity fact stated as "X is a/an/the <role> at/in/for/with
+# <Organization>". The identity IMPORTANCE_MARKERS only match literal verbs
+# ("works at", "reports to", "team lead", ...) and so MISS the extremely
+# common "is a ... at ..." phrasing ("Ravi Shah is a data engineer at
+# Silverline Analytics"). Such a sentence is a durable, valuable fact about
+# an entity; without this it trips the min_words gate as "chatter" and is
+# discarded before any wiki page is ever created. Firing here is treated as a
+# durable identity signal, bypassing the length gate the same way the literal
+# markers do. The terminal org word is required to be capitalized so the
+# pattern does not fire on chatter like "is a thing for me".
+_IDENT_RELATIONAL = re.compile(
+    r"\bis (?:a|an|the)?\s+[a-z][a-z .'’\-]{1,50}?\s+(?:at|in|for|with)\s+[A-Z]",
+    re.I,
+)
 
 
 @dataclass
@@ -145,7 +166,7 @@ class LinkedEntity:
     title: str
     type: str
     confidence: float
-    matched_on: str       # "title" | "alias" | "summary"
+    matched_on: str       # "title" | "alias" | "name-fragment" | "summary" | "semantic"
     mentions: int
 
     def to_dict(self) -> dict:
@@ -183,14 +204,6 @@ def _marker_present(marker: str, lowered: str) -> bool:
     return bool(pat.search(lowered))
 
 
-def _tokens(text: str) -> list[str]:
-    return [m.group(0).lower() for m in _WORD.finditer(text)]
-
-
-def _content_tokens(text: str) -> set[str]:
-    return {t for t in _tokens(text) if t not in STOPWORDS and len(t) > 2}
-
-
 def _strip_sentence_initial(text: str, phrases: list[str]) -> list[str]:
     """Drop proper-noun candidates that are only capitalised because they
     start a sentence. Without this, "The deadline moved" yields "The" and
@@ -212,15 +225,9 @@ def _strip_sentence_initial(text: str, phrases: list[str]) -> list[str]:
 
 
 def _proper_noun_phrases(text: str) -> list[str]:
-    raw = [m.group(1).strip() for m in _PROPER.finditer(text)]
+    raw = [(m.group(1) or m.group(2)).strip() for m in _PROPER.finditer(text)]
     raw = [p for p in raw if p and p.lower() not in STOPWORDS]
     return _strip_sentence_initial(text, raw)
-
-
-def _jaccard(a: set[str], b: set[str]) -> float:
-    if not a or not b:
-        return 0.0
-    return len(a & b) / len(a | b)
 
 
 class ConversationAssessor:
@@ -294,7 +301,7 @@ class ConversationAssessor:
     # ---------- stage 2: linkage against existing memory ----------
 
     def _link(self, entries: list[ManifestEntry], text: str,
-              propers: list[str]) -> list[LinkedEntity]:
+              propers: list[str], user_id: str) -> list[LinkedEntity]:
         lowered = text.lower()
         norm_propers = {_normalize(p): p for p in propers}
         found: dict[str, LinkedEntity] = {}
@@ -327,9 +334,29 @@ class ConversationAssessor:
                         mentions = len(re.findall(rf"\b{re.escape(alias.lower())}\b", lowered))
                         break
 
+            # Name-fragment / first-name tier: "whos Anton" should find
+            # "Anton Lokhy", "who is Alice" should find "Alice Chen". The full
+            # title tiers above fail on these because the question carries only
+            # part of the name. We match when a proper-noun mention is a leading
+            # token-prefix of the entity title (a first-name lookup). All
+            # mention tokens must appear in the title and the mention must start
+            # the title, which stays conservative: "John" finds "John Smith"
+            # but never "Anna Johnson" or a generic noun.
+            if confidence == 0.0 and norm_title:
+                title_tokens = norm_title.split()
+                for pm in norm_propers:
+                    mt = pm.split()
+                    if (mt and len(title_tokens) >= len(mt)
+                            and title_tokens[:len(mt)] == mt
+                            and all(len(t) >= 3 for t in mt)
+                            and any(len(t) >= 3 for t in title_tokens)):
+                        confidence, matched_on = 0.6, "name-fragment"
+                        mentions = 1
+                        break
+
             if confidence == 0.0 and e.compact:
                 # Weakest tier: topical overlap with what we already summarised.
-                overlap = _jaccard(_content_tokens(e.compact), _content_tokens(text))
+                overlap = jaccard(content_tokens(e.compact), content_tokens(text))
                 if overlap >= 0.18:
                     confidence, matched_on, mentions = 0.35 + overlap / 2, "summary", 1
 
@@ -340,14 +367,55 @@ class ConversationAssessor:
                     matched_on=matched_on, mentions=max(mentions, 1),
                 )
 
+        if not found:
+            # Last resort, tried only on a total miss above (see
+            # app/graph/embeddings.py for why this stays rare rather than
+            # running on every message): a query and an entity description
+            # can be genuinely related with zero shared text -- "department"
+            # and "branch" share no characters but are the same kind of
+            # thing. A no-op unless EMBEDDING_ENABLED is set and the model
+            # is actually available.
+            found.update(self._semantic_link(entries, text, user_id))
+
         return sorted(found.values(), key=lambda x: (-x.confidence, x.wiki_id))
+
+    def _semantic_link(self, entries: list[ManifestEntry], text: str,
+                       user_id: str) -> dict[str, LinkedEntity]:
+        from app.graph.embeddings import cosine, embed, is_embedding_enabled
+
+        if not is_embedding_enabled():
+            return {}
+        text_vector = embed(text)
+        if text_vector is None:
+            return {}
+        vectors = self.store.embedding_index.get_all(user_id)
+        if not vectors:
+            return {}
+
+        from app.config import get_settings
+        floor = get_settings().embedding_similarity_floor
+
+        by_id = {e.wiki_id: e for e in entries if e.status == "active"}
+        out: dict[str, LinkedEntity] = {}
+        for wiki_id, vector in vectors.items():
+            entry = by_id.get(wiki_id)
+            if entry is None:
+                continue
+            similarity = cosine(text_vector, vector)
+            if similarity >= floor:
+                out[wiki_id] = LinkedEntity(
+                    wiki_id=entry.wiki_id, title=entry.title, type=entry.type,
+                    confidence=round(min(similarity, 1.0), 3),
+                    matched_on="semantic", mentions=1,
+                )
+        return out
 
     def _novelty(self, text: str, related: list[LinkedEntity],
                  entries_by_id: dict[str, ManifestEntry]) -> tuple[float, dict]:
         """How much of this is NOT already in the compact summaries of the
         entities it refers to. This is the redundancy check from §4, done with
         token sets rather than embeddings."""
-        incoming = _content_tokens(text)
+        incoming = content_tokens(text)
         if not incoming:
             return 0.0, {"reason": "no content tokens"}
 
@@ -357,14 +425,14 @@ class ConversationAssessor:
             if not entry:
                 continue
             if entry.compact:
-                known |= _content_tokens(entry.compact)
+                known |= content_tokens(entry.compact)
             # The entity's own title and aliases count as known. Without this,
             # "Alice Chen is a staff engineer in Taipei" scored as novel
             # against the summary "Staff engineer on the retrieval team in
             # Taipei" purely because the summary does not repeat the name.
-            known |= _content_tokens(entry.title)
+            known |= content_tokens(entry.title)
             for alias in entry.aliases:
-                known |= _content_tokens(alias)
+                known |= content_tokens(alias)
 
         if not known:
             # Nothing to be redundant against.
@@ -427,7 +495,12 @@ class ConversationAssessor:
         # fires only one group and scores 0.19, below any threshold that also
         # excludes chatter. Name the groups instead.
         _, early_markers = self._importance(lowered)
-        durable = {"decision", "preference", "correction", "identity"} & set(early_markers)
+        durable = ({"decision", "preference", "correction", "identity"}
+                   & set(early_markers))
+        # "is a <role> at/in/for/with <Org>" is a durable identity fact even
+        # though it uses none of the literal identity verbs.
+        if _IDENT_RELATIONAL.search(lowered):
+            durable.add("identity")
         if not link_only and len(words) < self.min_words and not durable:
             return Assessment(
                 decision="skip", usefulness=0.0, relevance=0.0, novelty=0.0,
@@ -460,7 +533,7 @@ class ConversationAssessor:
         # --- graph linkage (§4 step 2) ---
         entries = self.store.manifest.list_entries(user_id)
         entries_by_id = {e.wiki_id: e for e in entries}
-        related = self._link(entries, text, propers)
+        related = self._link(entries, text, propers, user_id)
 
         if related:
             top = sum(r.confidence for r in related[:3]) / min(len(related), 3)

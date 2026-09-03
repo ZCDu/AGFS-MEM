@@ -1,44 +1,13 @@
-# Git
-.git
-.gitignore
-
-# Python
-__pycache__
+# Keep the build context small and free of anything host-specific.
+.venv/
+__pycache__/
 *.pyc
-*.pyo
-*.egg-info
-.eggs
-dist
-build
-
-# Virtual env
-venv
-.venv
-env
-
-# Test / dev
-.pytest_cache
-.mypy_cache
-.ruff_cache
-local_bucket
-_test
-*.tmp
-
-# IDE
-.vscode
-.idea
-*.swp
-*.swo
-
-# Env (use --env-file at runtime)
-.env.local
-.env.dev
-
-# OS
-.DS_Store
-Thumbs.db
-
-# Docker
-Dockerfile
-docker-compose.yml
-.dockerignore
+.pytest_cache/
+# Local disk-mode bucket: copying it in would bake one machine's data into
+# the image.
+local_bucket/
+# Credentials belong in the environment at runtime, never in a layer.
+.env
+.git/
+tests/
+*.zip

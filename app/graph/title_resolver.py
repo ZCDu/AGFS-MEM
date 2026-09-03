@@ -38,7 +38,6 @@ from __future__ import annotations
 
 from app.graph.keys import wiki_key, wiki_prefix
 
-import difflib
 import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -47,7 +46,32 @@ from app.graph.manifest import ManifestEntry
 from app.graph.store import VALID_TYPES, Entity, EntityGraphStore
 from app.storage.backend import StorageBackend
 
-FUZZY_THRESHOLD = 0.82  # difflib ratio; tune if this over/under-matches in practice
+FUZZY_THRESHOLD = 0.82  # tune if this over/under-matches in practice
+
+
+def _similarity(a: str, b: str) -> float:
+    """Fuzzy string similarity for the resolver's near-miss tier.
+
+    Was a single difflib.SequenceMatcher ratio. Now the higher of two
+    semantica metrics (Levenshtein and Jaro-Winkler) — they catch different
+    typo shapes (Levenshtein: edit distance overall; Jaro-Winkler: shared
+    prefix, forgiving of transpositions near the start), so a near-miss only
+    one of them scores highly on is still caught. Stateless, same pattern as
+    app/graph/semantica_wrap.py: a throwaway calculator, no persisted state.
+    Degrades to 0.0 (never merges) rather than raising if semantica is
+    unavailable — a missed merge is recoverable (the inbox/create path still
+    runs), a wrong one is not."""
+    try:
+        from semantica.deduplication import SimilarityCalculator
+    except Exception:
+        return 0.0
+    try:
+        calc = SimilarityCalculator()
+        lev = calc.calculate_string_similarity(a, b, method="levenshtein")
+        jw = calc.calculate_string_similarity(a, b, method="jaro_winkler")
+        return max(lev, jw)
+    except Exception:
+        return 0.0
 
 
 def _normalize(text: str) -> str:
@@ -176,8 +200,13 @@ class WikiTitleResolver:
         self.store = store
         self.inbox = WikiInbox(store.backend)
 
-    def _find_candidates(self, user_id: str, title: str,
-                          type_hint: str | None) -> list[ManifestEntry]:
+    def find_candidates(self, user_id: str, title: str,
+                        type_hint: str | None = None) -> list[ManifestEntry]:
+        """Read-only match: which existing entities (if any) `title` could
+        be referring to, by exact title, exact alias, word-containment, or
+        fuzzy similarity (see `_similarity`) -- in that priority order,
+        returning as soon as a tier has any hits. Never writes; safe to call
+        from a planning step (see ConversationExtractor._build_plan)."""
         entries = self.store.manifest.list_entries(user_id, type_filter=type_hint)
         entries = [e for e in entries if e.status != "deleted"]
         norm_title = _normalize(title)
@@ -198,10 +227,13 @@ class WikiTitleResolver:
             if _word_containment(norm_title, norm_existing):
                 fuzzy.append(e)
                 continue
-            ratio = difflib.SequenceMatcher(None, norm_title, norm_existing).ratio()
-            if ratio >= FUZZY_THRESHOLD:
+            if _similarity(norm_title, norm_existing) >= FUZZY_THRESHOLD:
                 fuzzy.append(e)
         return fuzzy
+
+    # Retained as a private alias: resolve() below was written against this
+    # name before find_candidates() became a public, plan-safe entry point.
+    _find_candidates = find_candidates
 
     def resolve(
         self,

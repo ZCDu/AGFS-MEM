@@ -42,7 +42,13 @@ def app_and_store(monkeypatch):
     store = UserStore(deps.get_storage_backend())
     store.create("alice", "hunter2hunter2")
     store.create("ops", "adminpassword1", is_admin=True)
-    return TestClient(main.create_app()), store
+    # Context-managed TestClient so the lifespan runs backend.close() (drains
+    # write-behind buffers, stops the mirage event loop); clear the cache on
+    # teardown so the singleton backend does not leak past this test and its
+    # flush timers do not fire at interpreter shutdown.
+    with TestClient(main.create_app()) as client:
+        yield client, store
+    deps.get_storage_backend.cache_clear()
 
 
 def hdr(t: str) -> dict:
@@ -209,12 +215,12 @@ def test_static_tokens_cannot_change_passwords(monkeypatch):
     import app.deps as deps
     deps.get_storage_backend.cache_clear()
     main = importlib.reload(importlib.import_module("app.main"))
-    c = TestClient(main.create_app())
-
-    assert c.get("/v1/users/alice/wiki", headers=hdr("static-tok")).status_code == 200
-    assert c.post("/v1/auth/password", headers=hdr("static-tok"),
-                  json={"current_password": "x", "new_password": "yyyyyyyyyyyy"}
-                  ).status_code == 401
+    with TestClient(main.create_app()) as c:
+        assert c.get("/v1/users/alice/wiki", headers=hdr("static-tok")).status_code == 200
+        assert c.post("/v1/auth/password", headers=hdr("static-tok"),
+                      json={"current_password": "x", "new_password": "yyyyyyyyyyyy"}
+                      ).status_code == 401
+    deps.get_storage_backend.cache_clear()
 
 
 def test_secret_alone_satisfies_startup_validation(monkeypatch):

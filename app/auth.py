@@ -160,11 +160,20 @@ def _match(token: str, settings: Settings) -> tuple[bool, str | None]:
 
 
 def require_user(user_id: str, authorization: str | None = Header(default=None)) -> str:
-    """Router-level dependency: the caller's token must be bound to `user_id`.
+    """Router-level dependency: the caller's token must reach `user_id`.
 
     Attached to whole routers rather than individual routes, so a new endpoint
     is protected by default instead of being protected only if someone
     remembers to decorate it.
+
+    Two ways the request may legitimately pass:
+      * the token is bound directly to `user_id` (the legacy personal
+        namespace case: /v1/users/{me}/wiki/...), or
+      * `user_id` names a WIKI the token's user has a grant to (a named,
+        org-level wiki like /v1/users/project-chimera/wiki/...). The graph
+        routes address a wiki's storage by putting the wiki id in the
+        user_id path slot; we authorize it against the wiki grant model
+        instead of refusing it. Fails closed: nobody without a grant passes.
     """
     settings = get_settings()
     if settings.auth_mode == "off":
@@ -182,18 +191,74 @@ def require_user(user_id: str, authorization: str | None = Header(default=None))
     if is_admin:
         return user_id
     if mapped is None:
-        # Deliberately the same message as a user mismatch below would be too
-        # helpful in reverse — but distinguishing "unknown token" from "wrong
-        # user" is useful to legitimate callers and tells an attacker nothing
-        # they cannot already determine by trying their own token.
         raise HTTPException(
             status_code=401, detail="Unrecognised token.",
             headers={"WWW-Authenticate": "Bearer"})
-    if mapped != user_id:
-        raise HTTPException(
-            status_code=403,
-            detail=f"This token is scoped to user {mapped!r} and cannot access {user_id!r}.")
-    return user_id
+    if mapped == user_id:
+        return user_id
+    # Not the caller's own namespace. It is still legitimate if `user_id` is
+    # a wiki the caller may read (named-wiki graph access). The graph routes
+    # read/write entities in the wiki's own namespace, so granting the wiki
+    # role here is the correct authorization decision.
+    if _can_reach_wiki(user_id, mapped):
+        return user_id
+    raise HTTPException(
+        status_code=403,
+        detail=f"This token is scoped to user {mapped!r} and cannot access {user_id!r}.")
+
+
+def _can_reach_wiki(wiki_id: str, caller: str) -> bool:
+    """True if `caller` holds at least read on the wiki named `wiki_id`.
+
+    Best-effort: any failure (unknown wiki, unknown caller, storage error)
+    denies access rather than raising, so a routing hiccup never turns into
+    a 500. A caller who cannot read the wiki must not reach its graph.
+    """
+    try:
+        from app.deps import get_storage_backend
+        from app.wikis.registry import ROLE_READ, WikiRegistry
+        meta = WikiRegistry(get_storage_backend()).get(wiki_id)
+        if meta is None:
+            logger.warning("require_user: no wiki named %r found for grant check", wiki_id)
+            return False
+        # public_read wikis are readable by anyone with a valid credential
+        if getattr(meta, "public_read", False):
+            return True
+        if caller in (getattr(meta, "access", None) or {}):
+            return True
+        logger.warning("require_user: %r has no grant on wiki %r (access=%s)",
+                        caller, wiki_id, dict(getattr(meta, "access", None) or {}))
+        return False
+    except Exception as e:
+        logger.warning("require_user: _can_reach_wiki error for %r by %r: %r",
+                        wiki_id, caller, e)
+        return False
+
+
+def require_share(share_id: str):
+    """Router-level dependency for the guest-facing /v1/shared/{share_id}/...
+    routes: the share_id in the URL IS the credential, not a bearer token.
+
+    Deliberately independent of AUTH_MODE/require_user -- a share link is
+    meant to work by "click and access" with no login, so gating it behind
+    the normal token check would defeat the point. What makes this safe
+    despite skipping that check is scope, not authentication: the returned
+    ShareLink only ever grants the one connected component it points at
+    (enforced downstream by app/shares/scope.py), never the owner's whole
+    wiki and never any other user's.
+
+    404 for a missing/malformed id (same response as "never existed" --
+    revealing "that one used to exist" to a guessing attacker is its own
+    leak), 410 Gone for a real link that's since been revoked or expired.
+    """
+    from app.deps import get_storage_backend
+    from app.shares.store import ShareLinkStore
+    link = ShareLinkStore(get_storage_backend()).get(share_id)
+    if link is None:
+        raise HTTPException(status_code=404, detail="No such share link.")
+    if not link.active:
+        raise HTTPException(status_code=410, detail="This share link is no longer active.")
+    return link
 
 
 def require_any_credential(authorization: str | None = Header(default=None)) -> dict:

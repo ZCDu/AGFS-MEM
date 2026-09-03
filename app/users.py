@@ -208,6 +208,21 @@ class UserStore:
         users[name]["disabled"] = disabled
         self._write(users)
 
+    def set_admin(self, username: str, is_admin: bool) -> None:
+        """Promote or demote an EXISTING account. `add --admin` only covers
+        account creation; this is the other half -- turning platform-admin on
+        or off for someone who already has a password. Existing sessions
+        carry their admin flag baked into the signed token (auth.py's
+        _match() reads it from the token, not a fresh account lookup), so a
+        demotion does not take effect until the session expires or
+        AUTH_SECRET is rotated -- same caveat as disable/enable."""
+        name = self.normalise(username)
+        users = self._read()
+        if name not in users:
+            raise ValueError(f"No such user {name!r}.")
+        users[name]["is_admin"] = is_admin
+        self._write(users)
+
     def delete(self, username: str) -> None:
         name = self.normalise(username)
         users = self._read()

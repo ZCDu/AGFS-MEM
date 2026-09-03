@@ -1,12 +1,17 @@
 """
-Rewrite existing entity files into the OKF v0.2 spec format.
+Rewrite existing entity files into the configured OKF_MODE.
 
     python scripts/migrate_okf.py --user demo --dry-run
     python scripts/migrate_okf.py --user demo
 
-Rewrites entity files to the current format: .okf.md → .md, companion JSON
-removal, status values updated. It is idempotent: running it twice changes
-nothing the second time.
+Reads work under either mode regardless of which wrote the file, so switching
+OKF_MODE needs no migration to keep working — but files already on disk keep
+their old shape until something writes them again. This rewrites them now, so
+a bundle is consistent rather than half in one layout and half in the other.
+
+Rewriting is a read-then-write of each entity through the normal path, so the
+manifest, adjacency index and ops log all stay correct. It is idempotent:
+running it twice changes nothing the second time.
 """
 
 from __future__ import annotations
@@ -26,6 +31,7 @@ except ImportError:
 
 from app.config import get_settings  # noqa: E402
 from app.deps import get_graph_store, get_storage_backend  # noqa: E402
+from app.graph.store import OKF_MODE_COMPANION  # noqa: E402
 
 
 def main() -> None:
@@ -37,7 +43,9 @@ def main() -> None:
     settings = get_settings()
     store = get_graph_store()
     backend = get_storage_backend()
+    mode = settings.okf_mode
 
+    print(f"  target OKF_MODE : {mode}")
     print(f"  storage         : {settings.storage_backend}")
 
     wiki_ids = store.list_entities(args.user)
@@ -45,19 +53,23 @@ def main() -> None:
 
     changed = 0
     for wiki_id in wiki_ids:
-        # Check for old .okf.md files that need migration
-        old_md_key = f"{args.user}/wiki/{wiki_id}.okf.md"
-        old_json_key = f"{args.user}/wiki/{wiki_id}.okf.json"
-        new_md_key = f"{args.user}/wiki/{wiki_id}.md"
-
-        raw = backend.get_bytes(old_md_key)
+        md_key = f"{args.user}/wiki/{wiki_id}.okf.md"
+        json_key = f"{args.user}/wiki/{wiki_id}.okf.json"
+        raw = backend.get_bytes(md_key)
         if raw is None:
-            # Already migrated or doesn't exist
+            continue
+        text = raw.data.decode("utf-8", "replace")
+        has_companion = backend.get_bytes(json_key) is not None
+        # "facts:" in the frontmatter means the structured data is inline.
+        inline = "\nfacts:" in text.split("---", 2)[1] if text.startswith("---") else False
+
+        wants_companion = mode == OKF_MODE_COMPANION
+        if wants_companion == has_companion and wants_companion != inline:
             continue
 
         changed += 1
         if args.dry_run:
-            print(f"    would migrate {wiki_id}")
+            print(f"    would rewrite {wiki_id}")
             continue
 
         entity = store.get_entity(args.user, wiki_id, touch=False)
@@ -65,20 +77,11 @@ def main() -> None:
             continue
         # Re-serialise through the normal write path so derived state follows.
         store.upsert_entity(args.user, entity.type, entity.title)
-        # Clean up old files
-        try:
-            backend.delete(old_md_key)
-        except Exception:
-            pass
-        try:
-            backend.delete(old_json_key)
-        except Exception:
-            pass
-        print(f"    migrated {wiki_id}")
+        print(f"    rewrote {wiki_id}")
 
     store.flush()
-    verb = "would be migrated" if args.dry_run else "migrated"
-    print(f"\n  {changed} file(s) {verb}; {len(wiki_ids) - changed} already current.")
+    verb = "would be rewritten" if args.dry_run else "rewritten"
+    print(f"\n  {changed} file(s) {verb}; {len(wiki_ids) - changed} already correct.")
 
     close = getattr(backend, "close", None)
     if callable(close):

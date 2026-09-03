@@ -10,9 +10,32 @@ import time
 # isn't installed, so this isn't a hard new dependency.
 try:
     from dotenv import load_dotenv
+    # Default override=False: .env fills in env vars that are not already
+    # set, but never shadows explicit env (incl. test harness monkeypatch).
+    # For prod the stale-key trap is avoided by launching the server from a
+    # shell without a leftover DEEPSEEK_API_KEY, not by force-overriding.
     _loaded_env_path = load_dotenv()  # searches CWD and parent dirs for a ".env" file
 except ImportError:
     _loaded_env_path = False
+
+# Verify TLS against the OS's own trust store instead of OpenSSL's bundled
+# logic. Some real, legitimately-trusted CA certs (DeepSeek's chain among
+# them, observed directly) mark their Basic Constraints extension in a way
+# OpenSSL 3.x now rejects outright ("Basic Constraints of CA cert not marked
+# critical") even though the OS itself -- and therefore curl, browsers, and
+# every non-Python client -- accepts the exact same chain without
+# complaint. That is a validation-strictness mismatch, not evidence of a
+# untrusted certificate, so the fix is to defer to the trust decision the OS
+# already makes correctly (truststore.inject_into_ssl() patches ssl.SSLContext
+# to do exactly that), not to weaken verification. Must run before any
+# module creates an SSL context; this is the first thing the app does.
+# Soft dependency, same reasoning as python-dotenv above: absence just means
+# outbound HTTPS (the LLM client) keeps using OpenSSL's stricter default.
+try:
+    import truststore
+    truststore.inject_into_ssl()
+except ImportError:
+    pass
 
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -22,12 +45,17 @@ from fastapi.responses import FileResponse, JSONResponse
 
 from app.api import (routes_auth, routes_chat, routes_entities, routes_extract,
                      routes_files, routes_health, routes_rawlog, routes_sessions,
-                     routes_verify, routes_wikis)
+                     routes_verify, routes_wikis, routes_autocapture, routes_wiki_entities,
+                     routes_intents, routes_notes, routes_views, routes_shares)
 from app.config import get_settings
 from app.storage.backend import ConflictError
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("memory_backend")
+
+# The background auto-capture timer. Created lazily by the lifespan so tests
+# and non-server entry points never start a thread they did not ask for.
+_auto_capture_timer = None
 
 if _loaded_env_path:
     logger.info("Loaded environment variables from .env")
@@ -38,7 +66,18 @@ else:
 
 @asynccontextmanager
 async def _lifespan(app: FastAPI):
+    # Start the background auto-capture timer (no-op unless AUTO_CAPTURE_ENABLED).
+    global _auto_capture_timer
+    try:
+        from app.autocapture.timer import AutoCaptureTimer
+        _auto_capture_timer = AutoCaptureTimer(get_settings())
+        _auto_capture_timer.start()
+    except Exception:
+        logger.exception("could not initialise auto-capture timer")
     yield
+    if _auto_capture_timer is not None:
+        _auto_capture_timer.stop()
+        _auto_capture_timer = None
     # Close the BACKEND, not just the buffers. MirageBackend.close() drains
     # the write-behind buffers and then stops its event loop, in that order.
     #
@@ -55,7 +94,7 @@ async def _lifespan(app: FastAPI):
     if callable(close):
         close()
     else:
-        for attr in ("_wiki_manifest", "_wiki_ops_log"):
+        for attr in ("_wiki_manifest", "_wiki_ops_log", "_embedding_index"):
             buf = getattr(backend, attr, None)
             if buf is not None:
                 buf.close()
@@ -128,6 +167,11 @@ def create_app() -> FastAPI:
 
     app.include_router(routes_health.router)
     app.include_router(routes_auth.router)
+    # routes_views must come BEFORE routes_entities: several view/diary paths
+    # under /v1/users/{u}/wiki/... are 2-segment GETs that would otherwise lose
+    # to the entity router's /wiki/{type}/{title} match (FastAPI resolves in
+    # registration order). Declaring the literal view routes first wins.
+    app.include_router(routes_views.router)
     app.include_router(routes_entities.router)
     app.include_router(routes_rawlog.router)
     app.include_router(routes_verify.router)
@@ -135,20 +179,37 @@ def create_app() -> FastAPI:
     app.include_router(routes_sessions.router)
     app.include_router(routes_files.router)
     app.include_router(routes_wikis.router)
+    app.include_router(routes_wiki_entities.router)
     app.include_router(routes_extract.router)
+    app.include_router(routes_autocapture.router)
+    app.include_router(routes_intents.router)
+    app.include_router(routes_notes.router)
+    app.include_router(routes_shares.owner_router)
+    app.include_router(routes_shares.guest_router)
+
+    def _no_cache(res):
+        """These pages embed a lot of logic and the files are edited in place.
+        A long-lived Cache-Control would keep servers/browsers serving a stale
+        copy long after the code changed, which reads as a broken UI. Force
+        revalidation so a refresh always sees the current widgets."""
+        res.headers["Cache-Control"] = "no-cache"
 
     @app.get("/static/auth.js", include_in_schema=False)
     def auth_js():
         """Shared sign-in widget for both UIs. One implementation cannot drift
         from itself; two copies did."""
-        return FileResponse(Path(__file__).parent / "static" / "auth.js",
-                            media_type="application/javascript")
+        res = FileResponse(Path(__file__).parent / "static" / "auth.js",
+                           media_type="application/javascript")
+        _no_cache(res)
+        return res
 
     @app.get("/chat", include_in_schema=False)
     def chat_gui():
         """Chat UI. Same-origin for the same reason as /gui: no CORS middleware."""
-        return FileResponse(Path(__file__).parent / "static" / "chat.html",
-                            media_type="text/html")
+        res = FileResponse(Path(__file__).parent / "static" / "chat.html",
+                           media_type="text/html")
+        _no_cache(res)
+        return res
 
     @app.get("/gui", include_in_schema=False)
     def gui():
@@ -158,8 +219,23 @@ def create_app() -> FastAPI:
         from the filesystem could not call the API at all. Serving it here
         removes the question rather than loosening the API's origin policy.
         """
-        return FileResponse(Path(__file__).parent / "static" / "gui.html",
-                            media_type="text/html")
+        res = FileResponse(Path(__file__).parent / "static" / "gui.html",
+                           media_type="text/html")
+        _no_cache(res)
+        return res
+
+    @app.get("/shared/{share_id}", include_in_schema=False)
+    def shared_gui(share_id: str):
+        """Guest-facing chat for a share link. Deliberately a separate, small
+        page rather than a mode of /chat's much larger UI (session list, wiki
+        picker, file uploads, sign-in) -- none of that applies to a guest who
+        has only a link and no account. share_id itself is read client-side
+        from the URL; the page's own API calls are what actually resolve it
+        server-side (see routes_shares.py)."""
+        res = FileResponse(Path(__file__).parent / "static" / "shared.html",
+                           media_type="text/html")
+        _no_cache(res)
+        return res
 
     @app.exception_handler(ConflictError)
     async def conflict_handler(request: Request, exc: ConflictError):
@@ -179,3 +255,4 @@ def create_app() -> FastAPI:
 
 
 app = create_app()
+

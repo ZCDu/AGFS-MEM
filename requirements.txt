@@ -4,6 +4,20 @@ pydantic>=2.7
 pyyaml>=6.0
 python-dotenv>=1.0
 
+# Verifies outbound HTTPS (the LLM client) against the OS's own trust store
+# instead of OpenSSL's bundled logic -- see app/main.py's injection site for
+# why (a real cert compliance nuance OpenSSL 3.x rejects that curl/browsers
+# via the OS trust store accept fine). Soft dependency: its absence only
+# means HTTPS falls back to OpenSSL's stricter default.
+truststore>=0.9
+
+# Conflict detection / provenance (Semantica). Installed with --no-deps:
+# only the lightweight conflict/provenance modules are used (no torch/spacy/
+# faiss). Requires the light transitive deps below; the repo may already have
+# numpy via mirage deps. If a fresh env fails on `import semantica.conflicts`,
+# `pip install numpy rdflib networkx chardet` for the unused (normalize) module.
+semantica==0.6.6
+
 # Needed only when STORAGE_BACKEND=s3:
 # boto3>=1.34
 
@@ -19,6 +33,14 @@ aioboto3>=13.0
 # and RedisFileCacheStore so cache state is shared and survives restarts.
 # Worth adding if you run more than one worker (see "Cache" in the README).
 # mirage-ai[redis]>=0.0.4
+
+# Optional: semantic search fallback (EMBEDDING_ENABLED=true). Runs the
+# bge-m3 embedding model in-process -- no separate service. Weights (~1-2GB)
+# download once (see app/graph/embeddings.py for a ModelScope mirror note
+# for environments where the default Hugging Face hub isn't reachable), then
+# everything runs fully offline. Off by default; the rest of the service
+# works normally without this installed.
+# FlagEmbedding>=1.2
 
 # Needed only for running tests:
 # pytest>=8.0

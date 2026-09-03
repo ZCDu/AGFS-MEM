@@ -22,6 +22,29 @@ import app.config as cfg
 from app.auth import parse_token_map, suggest_token
 
 
+# Backends created by build() below are never closed in the test body, and
+# leaving them alive means their write-behind flush timers fire at interpreter
+# shutdown through a dead aiofiles executor — a flood of "cannot schedule new
+# futures after shutdown" tracebacks that bury the summary. This autouse
+# fixture closes every leaked backend as the test that created it completes.
+_BACKENDS = []
+
+
+@pytest.fixture(autouse=True)
+def _close_leaked_backends():
+    yield
+    import app.deps as deps
+    for b in _BACKENDS:
+        try:
+            close = getattr(b, "close", None)
+            if callable(close):
+                close()
+        except Exception:
+            pass
+    _BACKENDS.clear()
+    deps.get_storage_backend.cache_clear()
+
+
 def build(monkeypatch, **env) -> TestClient:
     monkeypatch.setenv("STORAGE_BACKEND", "disk")
     monkeypatch.setenv("LOCAL_BUCKET_ROOT", tempfile.mkdtemp())
@@ -34,7 +57,11 @@ def build(monkeypatch, **env) -> TestClient:
     import app.deps as deps
     deps.get_storage_backend.cache_clear()
     main = importlib.reload(importlib.import_module("app.main"))
-    return TestClient(main.create_app())
+    client = TestClient(main.create_app())
+    # Track the singleton backend so _close_leaked_backends() drains its
+    # write-behind buffers and stops its event loop before process exit.
+    _BACKENDS.append(deps.get_storage_backend())
+    return client
 
 
 def hdr(token: str) -> dict:
@@ -47,7 +74,15 @@ def test_token_mode_without_tokens_refuses_to_start(monkeypatch):
     """An unauthenticated API must never ship by accident. The failure has to
     happen loudly at startup, not silently at runtime."""
     with pytest.raises(RuntimeError) as exc:
-        build(monkeypatch, AUTH_MODE="token", AUTH_TOKENS=None, AUTH_ADMIN_TOKEN=None)
+        # AUTH_SECRET, AUTH_TOKENS and AUTH_ADMIN_TOKEN must all be forced to
+        # a *present-but-empty* value, not deleted: the reload re-runs
+        # load_dotenv(), which would re-inject the real values from .env (the
+        # normal live setup) and exit the "nothing configured" branch. An
+        # empty string survives dotenv (it does not override existing vars)
+        # and config's `get(...) or None` reads it as absent, so this
+        # reliably exercises the totally-unconfigured state.
+        build(monkeypatch, AUTH_MODE="token", AUTH_TOKENS="",
+              AUTH_ADMIN_TOKEN="", AUTH_SECRET="")
     msg = str(exc.value)
     assert "no tokens are configured" in msg
     assert "AUTH_TOKENS=" in msg, "the error must show how to fix it"
